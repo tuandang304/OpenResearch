@@ -320,6 +320,7 @@ pub(crate) fn agy_account_files_in(home: &Path) -> Vec<PathBuf> {
         cli.join("google_accounts.json"),
         gemini.join("google_accounts.json"),
         gemini.join("oauth_creds.json"),
+        home.join(".config/antigravity/plugin-secrets.json"),
     ]
 }
 

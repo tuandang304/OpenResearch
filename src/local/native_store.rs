@@ -448,20 +448,36 @@ const AGY_ACCOUNT_OWNED: &[&str] = &[
     "google_accounts.json",
 ];
 
-/// A home folder for one extra Antigravity account. `agy` keeps its sign-in
-/// and conversations under `$HOME/.gemini`, so the account gets its own
-/// `.gemini/antigravity-cli` while every other entry of the user's home is a
-/// link back, which keeps the agent's shell, git, and tool configuration the
-/// user's own.
+/// Paths under `~/.config` that hold `agy`'s file-based secret storage, used
+/// when no system keyring is reachable.
+#[cfg(unix)]
+const AGY_CONFIG_OWNED: &[&str] = &["antigravity"];
+
+/// A home folder for one extra Antigravity account. `agy` keeps its
+/// conversations under `$HOME/.gemini` and, without a keyring, its sign-in
+/// under `$HOME/.config/antigravity`, so the account gets its own copies of
+/// those while every other entry of the user's home is a link back, which
+/// keeps the agent's shell, git, and tool configuration the user's own.
 #[cfg(unix)]
 pub fn prepare_agy_account(home: &Path) -> Result<PathBuf> {
-    let real = home_dir();
+    prepare_agy_account_from(&home_dir(), home)
+}
+
+#[cfg(unix)]
+fn prepare_agy_account_from(real: &Path, home: &Path) -> Result<PathBuf> {
     let _guard = LINK_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let gemini = home.join(".gemini");
     let cli = gemini.join("antigravity-cli");
+    let config = home.join(".config");
+    // Homes made before `.config` was overlaid link it whole to the user's.
+    if std::fs::symlink_metadata(&config).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        std::fs::remove_file(&config)?;
+    }
     std::fs::create_dir_all(&cli)?;
-    overlay_links(&real, home, &[".gemini"])?;
+    std::fs::create_dir_all(config.join("antigravity"))?;
+    overlay_links(real, home, &[".gemini", ".config"])?;
     overlay_links(&real.join(".gemini"), &gemini, AGY_ACCOUNT_OWNED)?;
+    overlay_links(&real.join(".config"), &config, AGY_CONFIG_OWNED)?;
     // Skills and plugins the user installed for agy apply to every account.
     for shared in ["skills", "plugins", "bin"] {
         let source = real.join(".gemini/antigravity-cli").join(shared);
@@ -812,6 +828,47 @@ mod hard_link_tests {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn agy_account_keeps_its_own_sign_in_and_links_the_rest() {
+        let root = std::env::temp_dir().join(format!("orx-agy-{}", uuid::Uuid::new_v4()));
+        let real = root.join("real");
+        let home = root.join("account");
+        std::fs::create_dir_all(real.join(".gemini/antigravity-cli/skills")).unwrap();
+        std::fs::create_dir_all(real.join(".config/antigravity")).unwrap();
+        std::fs::create_dir_all(real.join(".config/git")).unwrap();
+        std::fs::write(real.join(".config/antigravity/plugin-secrets.json"), "{}").unwrap();
+        std::fs::write(real.join(".gitconfig"), "").unwrap();
+        // A home made before `.config` was overlaid.
+        std::fs::create_dir_all(&home).unwrap();
+        create_symlink(&real.join(".config"), &home.join(".config")).unwrap();
+
+        prepare_agy_account_from(&real, &home).unwrap();
+
+        let config = std::fs::symlink_metadata(home.join(".config")).unwrap();
+        assert!(config.is_dir());
+        let own = std::fs::symlink_metadata(home.join(".config/antigravity")).unwrap();
+        assert!(own.is_dir() && !own.file_type().is_symlink());
+        assert!(!home
+            .join(".config/antigravity/plugin-secrets.json")
+            .exists());
+        assert!(std::fs::symlink_metadata(home.join(".config/git"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::symlink_metadata(home.join(".gitconfig"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(home.join(".gemini/antigravity-cli/skills"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     use super::*;
 
     #[test]

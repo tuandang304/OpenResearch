@@ -425,7 +425,15 @@ pub fn launch_env(harness: &str, id: &str) -> Result<Vec<(&'static str, OsString
             let home = native_store::prepare_agy_account(&home.join("home"))?;
             vec![
                 ("HOME", home.clone().into_os_string()),
-                ("USERPROFILE", home.into_os_string()),
+                ("USERPROFILE", home.clone().into_os_string()),
+                ("XDG_CONFIG_HOME", home.join(".config").into_os_string()),
+                // `agy` keeps its sign-in in the session keyring, which every
+                // home shares. Without a bus it falls back to a file in this
+                // account's home instead of reusing the default sign-in.
+                (
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    OsString::from(format!("unix:path={}", home.join(".no-keyring").display())),
+                ),
             ]
         }
         _ => Vec::new(),
@@ -465,7 +473,14 @@ pub fn login_command_line(harness: &str, id: &str) -> Option<String> {
             quote(&home)
         ),
         "codex" => format!("CODEX_HOME={} codex login", quote(&home)),
-        "antigravity" => format!("HOME={} agy", quote(&home.join("home"))),
+        "antigravity" => {
+            let home = home.join("home");
+            format!(
+                "HOME={0} XDG_CONFIG_HOME={1} DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent agy",
+                quote(&home),
+                quote(&home.join(".config"))
+            )
+        }
         _ => return None,
     })
 }
