@@ -11,7 +11,7 @@ import { Check, Copy, FileCode, ScrollText, X, Download, Minus, Plus } from "luc
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Markdown as StreamingMarkdown } from "@clo/react-markdown";
-import rehypeKatex from "rehype-katex";
+import { KATEX_ROOT_TAG, rehypeKatexCached } from "../rehypeKatexCached";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import remarkParse from "remark-parse";
@@ -361,7 +361,7 @@ const markdownProcessor = unified()
   .use(remarkMentions)
   .use(remarkRehype)
   .use(rehypeSafeUrls)
-  .use(rehypeKatex);
+  .use(rehypeKatexCached);
 
 /** A link target that is a file path rather than a web URL. */
 function isFileHref(href: string): boolean {
@@ -403,6 +403,8 @@ const stableComponents: Record<string, (props: any) => ReactNode> = {
   figcaption: ({ children }) => <figcaption className="mt-3 text-sm italic leading-relaxed text-text">{children}</figcaption>,
   th: ({ node: _node, ...rest }) => <th dir="auto" {...rest} />,
   td: ({ node: _node, ...rest }) => <td dir="auto" {...rest} />,
+  // One typeset formula: KaTeX's own root span and markup (see rehypeKatexCached).
+  [KATEX_ROOT_TAG]: ({ className, html }) => <span className={className} dangerouslySetInnerHTML={{ __html: html }} />,
 };
 
 /** Memoized: markdown + KaTeX parsing is the expensive part of a chat render,

@@ -117,7 +117,6 @@ import {
   selectChatBranch,
   compactChatSession,
   runShellCommand,
-  fmtDuration,
   sendChatMessage,
   setChatSessionArchived,
   setChatSessionAutonomy,
@@ -153,6 +152,7 @@ import {
   splitResponseTurn,
   partIsVisible,
   questionReplies,
+  stableQuestionReplies,
   type QuestionReplies,
   hasPendingInput,
   partsTailToolId,
@@ -208,6 +208,7 @@ import {
 } from "./ModelPicker";
 import { ContextMeter } from "./ContextMeter";
 import { HarnessActivity, type StepDescription } from "./HarnessActivity";
+import { WorkDuration } from "./WorkDuration";
 import { renderNote } from "./agentNote";
 import {
   canonicalSkillName,
@@ -3321,20 +3322,7 @@ function AssistantTurn({ messages, response, options }: {
   const message = messages[messages.length - 1];
   const answerOptions = { ...options, predictTextTail: streaming && answerMessageId === message.id };
   const [expanded, setExpanded] = useState(false);
-  const [, tick] = useState(0);
-  useEffect(() => {
-    if (!streaming || message.completedAt != null || work.length === 0) return;
-    const timer = window.setInterval(() => tick((value) => value + 1), 1000);
-    return () => window.clearInterval(timer);
-  }, [streaming, message.completedAt, work.length]);
   if (work.length === 0) return <>{renderParts(answer, answerOptions)}</>;
-  const elapsed = messages.reduce<number | null>((total, turn) => {
-    const end = turn.completedAt ?? (streaming && turn.id === message.id ? Date.now() : null);
-    return end === null ? total : (total ?? 0) + Math.max(0, end - turn.createdAt);
-  }, null);
-  const duration = elapsed === null ? null : elapsed < 60_000 || elapsed >= 3_600_000
-    ? fmtDuration(elapsed)
-    : m.chat_work_duration({ minutes: fmtNumber(Math.floor(elapsed / 60_000)), seconds: fmtNumber(Math.floor(elapsed / 1000) % 60) });
   return (
     <>
       <div className="turn-work mb-4">
@@ -3345,7 +3333,7 @@ function AssistantTurn({ messages, response, options }: {
           data-work-toggle
           onClick={() => setExpanded((value) => !value)}
         >
-          <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
+          <WorkDuration messages={messages} streaming={streaming} />
           <ChevronRight size={16} className={`shrink-0 text-muted transition-transform duration-200 ease-standard motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
         </button>
         <div className={`tool-group-disclosure ${expanded ? "open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
@@ -3908,7 +3896,9 @@ const Transcript = memo(function Transcript({
   skills?: SkillInfo[];
 }) {
   useLocale();
-  const replies = useMemo(() => questionReplies(messages), [messages]);
+  // Every row receives `replies`; a fresh object per streamed flush would re-render them all.
+  const previousReplies = useRef<QuestionReplies | null>(null);
+  const replies = useMemo(() => (previousReplies.current = stableQuestionReplies(previousReplies.current, questionReplies(messages))), [messages]);
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
   const responseGroups = useRef<ChatMessage[][]>([]);
   const visibleMessages = useMemo(
