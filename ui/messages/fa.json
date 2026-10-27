@@ -688,7 +688,6 @@
   "harness_activity_elapsed": "زمان از ارسال پیام",
   "harness_activity_step_time": "زمان این مرحله",
   "harness_activity_steps": "مراحل: {count}",
-  "harness_activity_no_steps": "هنوز ابزاری فراخوانی نشده است",
   "harness_activity_quiet": "{time} است که فعالیت تازه‌ای نیست. ممکن است harness گیر کرده باشد یا یک فرمان طولانی هنوز در حال اجرا باشد.",
   "chat_scroll_to_bottom": "رفتن به پایین گفتگو",
   "chat_no_activity": "بدون فعالیت",

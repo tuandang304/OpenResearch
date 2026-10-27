@@ -688,7 +688,6 @@
   "harness_activity_elapsed": "自发送消息以来的时间",
   "harness_activity_step_time": "此步骤用时",
   "harness_activity_steps": "步骤：{count}",
-  "harness_activity_no_steps": "尚无工具调用",
   "harness_activity_quiet": "已有 {time} 没有新活动。Harness 可能卡住了，或者某个耗时命令仍在运行。",
   "chat_scroll_to_bottom": "滚动到底部",
   "chat_no_activity": "无活动",
