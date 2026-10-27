@@ -25,6 +25,8 @@ import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, IconButton, IconButtonLink } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
+import { DiagramBlock } from "./DiagramBlock";
+import { diagramKind } from "../diagramSvg";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { imageWheelZoom } from "../imageZoom";
 import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
@@ -387,6 +389,10 @@ export const mdCodeComponents: Record<string, (props: any) => ReactNode> = {
           {children}
         </code>
       );
+    }
+    const diagram = diagramKind(match?.[1]);
+    if (diagram) {
+      return <DiagramBlock code={raw} kind={diagram} source={<CodeBlock code={raw} lang={resolveSyntaxLanguage(diagram === "svg" ? "xml" : match![1])} />} />;
     }
     const lang = match ? resolveSyntaxLanguage(match[1]) : null;
     return <CodeBlock code={raw} lang={lang} />;

@@ -116,6 +116,14 @@ Paths in commands and code fences are exempt. Emit file and run tags as raw text
 inside backticks or fences. Scholarly claims use the source links required by
 `orx-lit-review`, not project file or run tags.
 
+When a picture would make an idea, plan, or mechanism easier to grasp, draw it
+inline instead of describing it only in prose: a ```mermaid fence (flowchart,
+sequence, state, class, mindmap, timeline, gantt, pie, quadrant) or a ```svg
+fence with one self-contained `<svg viewBox="...">`. The chat renders both as
+pictures with the source one click away. SVG renders on a white background with
+no scripts, links, external images, or fonts; keep labels short, and save a
+file artifact instead when the user needs a durable figure.
+
 Use `$...$` for inline math and `$$...$$` for display math. Escape literal
 currency signs, for example `\$10`.
 
