@@ -694,7 +694,6 @@
   "harness_activity_elapsed": "メッセージ送信からの経過時間",
   "harness_activity_step_time": "このステップの経過時間",
   "harness_activity_steps": "ステップ: {count}",
-  "harness_activity_no_steps": "まだツール呼び出しはありません",
   "harness_activity_quiet": "{time} の間、新しいアクティビティがありません。ハーネスが停止しているか、長いコマンドが実行中の可能性があります。",
   "chat_scroll_to_bottom": "一番下にスクロール",
   "chat_no_activity": "アクティビティなし",

@@ -693,7 +693,6 @@
   "harness_activity_elapsed": "الوقت منذ إرسال الرسالة",
   "harness_activity_step_time": "الوقت في هذه الخطوة",
   "harness_activity_steps": "الخطوات: {count}",
-  "harness_activity_no_steps": "لا توجد استدعاءات أدوات بعد",
   "harness_activity_quiet": "لا نشاط جديد منذ {time}. قد يكون الـ harness عالقًا، أو أن أمرًا طويلًا ما زال قيد التشغيل.",
   "chat_scroll_to_bottom": "التمرير إلى الأسفل",
   "chat_no_activity": "لا يوجد نشاط",

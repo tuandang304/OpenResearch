@@ -694,7 +694,6 @@
   "harness_activity_elapsed": "메시지를 보낸 후 경과 시간",
   "harness_activity_step_time": "이 단계의 경과 시간",
   "harness_activity_steps": "단계: {count}",
-  "harness_activity_no_steps": "아직 도구 호출이 없습니다",
   "harness_activity_quiet": "{time} 동안 새 활동이 없습니다. 하네스가 멈췄거나 긴 명령이 아직 실행 중일 수 있습니다.",
   "chat_scroll_to_bottom": "맨 아래로 스크롤",
   "chat_no_activity": "활동 없음",

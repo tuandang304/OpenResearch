@@ -694,7 +694,6 @@
   "harness_activity_elapsed": "Time since the message was sent",
   "harness_activity_step_time": "Time on this step",
   "harness_activity_steps": "Steps: {count}",
-  "harness_activity_no_steps": "No tool calls yet",
   "harness_activity_quiet": "No new activity for {time}. The harness may be stuck, or a long command is still running.",
   "chat_scroll_to_bottom": "Scroll to bottom",
   "chat_no_activity": "No activity",

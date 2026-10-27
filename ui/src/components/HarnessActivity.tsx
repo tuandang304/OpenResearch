@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronRight, CircleX, Hourglass, TriangleAlert } from "lucide-react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Check, ChevronUp, CircleX, Hourglass, ListChecks, TriangleAlert } from "lucide-react";
 import type { ChatMessage, ChatPart } from "../api";
 import { m } from "../paraglide/messages.js";
 import { useLocale } from "../locale";
@@ -47,6 +47,8 @@ export function HarnessActivity({
   const lastChange = useRef({ signature: activity.signature, at: Date.now() });
   // Parts carry no timestamps, so step times are what this view observed.
   const timings = useRef(new Map<string, StepTiming>());
+  const timelineRef = useRef<HTMLOListElement>(null);
+  const timelineId = useId();
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -69,6 +71,12 @@ export function HarnessActivity({
     }
   }, [activity]);
 
+  // Keep the newest step in view as the timeline grows.
+  useLayoutEffect(() => {
+    const list = timelineRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+  }, [expanded, activity.steps.length]);
+
   const startedAt = activity.startedAt ?? mountedAt.current;
   const quietFor = now - lastChange.current.at;
   const stalled = activity.phase !== "waiting" && quietFor >= TURN_STALL_MS;
@@ -76,7 +84,6 @@ export function HarnessActivity({
   const currentDescription = current ? describe(current) : null;
   const currentTiming = current ? timings.current.get(current.id) : undefined;
   const tail = current ? outputTail(current.state?.output) : "";
-  const doneCount = activity.steps.filter((part) => part.state?.status !== "running").length;
 
   const headline = activity.phase === "waiting" ? m.harness_activity_waiting()
     : activity.phase === "tool" && currentDescription ? currentDescription.verb
@@ -87,12 +94,12 @@ export function HarnessActivity({
   return (
     <div
       className={cn(
-        "harness-activity mb-2.5 rounded-lg border bg-panel px-3 py-2 text-sm text-text",
+        "harness-activity relative -mb-px rounded-t-lg border border-b-0 bg-panel text-sm text-text",
         stalled ? "border-accent-amber" : "border-border",
       )}
       aria-label={m.harness_activity_label()}
     >
-      <div className="flex min-w-0 items-center gap-2" role="status" aria-live="polite">
+      <div className="flex h-9 min-w-0 items-center gap-2 px-3" role="status" aria-live="polite">
         {activity.phase === "waiting" ? (
           <Hourglass size={14} className="shrink-0 text-accent-blue" aria-hidden="true" />
         ) : stalled ? (
@@ -100,77 +107,84 @@ export function HarnessActivity({
         ) : (
           <Spinner />
         )}
-        <span className="shrink-0 font-medium">{headline}</span>
-        {currentDescription?.detail && (
-          <code className="min-w-0 truncate rounded-sm bg-surface px-1.5 py-px font-mono text-xs text-subtext" title={currentDescription.detail}>
-            {currentDescription.detail}
-          </code>
-        )}
-        {currentTiming && (
-          <span className="shrink-0 tabular-nums text-subtext" title={m.harness_activity_step_time()}>
-            {fmtClock(now - currentTiming.start)}
-          </span>
-        )}
-        <span className="ms-auto flex shrink-0 items-center gap-2 text-subtext">
-          <span className="tabular-nums" title={m.harness_activity_elapsed()}>{fmtClock(now - startedAt)}</span>
-          <button
-            type="button"
-            className="harness-activity-toggle inline-flex items-center gap-1 rounded-sm px-1 py-0.5 cursor-pointer hover:bg-surface hover:text-text focus-visible:outline-2 focus-visible:outline-focus"
-            aria-expanded={expanded}
-            onClick={() => setExpanded((value) => !value)}
-          >
-            <span className="tabular-nums">{m.harness_activity_steps({ count: String(activity.steps.length) })}</span>
-            <ChevronRight size={14} className={cn("transition-transform duration-120 ease-standard motion-reduce:transition-none", expanded && "rotate-90")} aria-hidden="true" />
-          </button>
+        <span className="min-w-0 truncate font-medium">{headline}</span>
+        {/* Takes only the space left, so the headline never gives way to a long command. */}
+        <span className="flex min-w-0 flex-1 basis-0 items-center gap-2">
+          {currentDescription?.detail && (
+            <code className="min-w-0 truncate rounded-sm bg-surface px-1.5 py-px font-mono text-xs text-subtext" title={currentDescription.detail}>
+              {currentDescription.detail}
+            </code>
+          )}
+          {currentTiming && now - currentTiming.start >= 1000 && (
+            <span className="shrink-0 text-xs tabular-nums text-muted" title={m.harness_activity_step_time()}>
+              {fmtClock(now - currentTiming.start)}
+            </span>
+          )}
+        </span>
+        <span className="flex shrink-0 items-center gap-1 text-subtext">
+          <span className="px-1 tabular-nums" title={m.harness_activity_elapsed()}>{fmtClock(now - startedAt)}</span>
+          {activity.steps.length > 0 && (
+            <button
+              type="button"
+              className="harness-activity-toggle inline-flex h-6 items-center gap-1 rounded-sm px-1.5 cursor-pointer hover:bg-surface hover:text-text focus-visible:outline-2 focus-visible:outline-focus"
+              aria-expanded={expanded}
+              aria-controls={timelineId}
+              onClick={() => setExpanded((value) => !value)}
+            >
+              <ListChecks size={14} aria-hidden="true" />
+              <span className="tabular-nums">{m.harness_activity_steps({ count: String(activity.steps.length) })}</span>
+              <ChevronUp size={14} className={cn("transition-transform duration-120 ease-standard motion-reduce:transition-none", !expanded && "rotate-180")} aria-hidden="true" />
+            </button>
+          )}
         </span>
       </div>
 
-      {tail && (
-        <pre className="harness-activity-output mt-1.5 max-h-16 overflow-hidden rounded-sm bg-background px-2 py-1 font-mono text-xs leading-4 text-subtext whitespace-pre-wrap wrap-anywhere">
-          {tail}
-        </pre>
-      )}
-
-      {stalled && (
-        <div className="mt-1.5 flex items-center gap-2 text-subtext">
-          <span className="min-w-0 flex-1">{m.harness_activity_quiet({ time: fmtClock(quietFor) })}</span>
-          {onStop && (
-            <Button type="button" size="small" onClick={onStop}>{m.chat_panel_stop()}</Button>
-          )}
-        </div>
-      )}
-
       {expanded && (
-        <ol className="harness-activity-timeline m-0 mt-2 list-none ps-0 flex max-h-56 flex-col gap-0.5 overflow-y-auto border-t border-border-variant pt-2">
-          {activity.steps.length === 0 && <li className="text-muted">{m.harness_activity_no_steps()}</li>}
+        <ol
+          id={timelineId}
+          ref={timelineRef}
+          className="harness-activity-timeline m-0 flex max-h-48 list-none flex-col overflow-y-auto border-t border-border-variant px-3 py-1.5 ps-3"
+        >
           {activity.steps.map((part) => {
             const description = describe(part);
             const status = part.state?.status;
             const timing = timings.current.get(part.id);
             const duration = timing ? (timing.end ?? now) - timing.start : null;
             return (
-              <li key={part.id} className="flex min-w-0 items-center gap-2">
+              <li key={part.id} className="flex h-6 min-w-0 items-center gap-2">
                 <span className="flex w-4 shrink-0 justify-center">
                   {status === "running" ? <Spinner className="size-3" />
-                    : status === "error" ? <CircleX size={14} className="text-accent-red" aria-label={m.chat_panel_failed()} />
+                    : status === "error" ? <CircleX size={14} className="text-accent-red" aria-hidden="true" />
                     : <Check size={14} className="text-accent-green" aria-hidden="true" />}
                 </span>
                 <span className="flex shrink-0 text-muted [&_svg]:size-3.5" aria-hidden="true">{description.icon}</span>
                 <span className={cn("min-w-0 flex-1 truncate", status === "error" ? "text-accent-red" : "text-subtext")} title={description.detail ?? description.label}>
+                  {status === "error" && <span className="sr-only">{m.chat_panel_failed()} </span>}
                   {status === "running" ? description.verb : description.label}
                   {status === "running" && description.detail && <span className="ms-1 font-mono text-xs">{description.detail}</span>}
                 </span>
-                {duration !== null && <span className="shrink-0 tabular-nums text-muted">{fmtClock(duration)}</span>}
+                {duration !== null && duration >= 1000 && <span className="shrink-0 text-xs tabular-nums text-muted">{fmtClock(duration)}</span>}
               </li>
             );
           })}
-          {doneCount > 0 && doneCount === activity.steps.length && activity.phase !== "tool" && (
-            <li className="flex items-center gap-2 text-muted">
-              <span className="flex w-4 shrink-0 justify-center"><Spinner className="size-3" /></span>
-              <span>{headline}</span>
-            </li>
-          )}
         </ol>
+      )}
+
+      {tail && (
+        <div className="px-3 pb-2">
+          <pre className="harness-activity-output m-0 max-h-15 overflow-hidden rounded-sm bg-background px-2 py-1 font-mono text-xs leading-4 text-subtext whitespace-pre-wrap wrap-anywhere">
+            {tail}
+          </pre>
+        </div>
+      )}
+
+      {stalled && (
+        <div className="flex items-center gap-2 border-t border-border-variant px-3 py-1.5 text-subtext">
+          <span className="min-w-0 flex-1 text-xs leading-5">{m.harness_activity_quiet({ time: fmtClock(quietFor) })}</span>
+          {onStop && (
+            <Button type="button" size="small" onClick={onStop}>{m.chat_panel_stop()}</Button>
+          )}
+        </div>
       )}
     </div>
   );

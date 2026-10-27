@@ -2532,6 +2532,11 @@ function ToolGroup({
   const summaryLabel = pendingActivity
     ? pendingActivity.label
     : m.chat_panel_used_tools();
+  // "Running…" alone hides what runs; show the command beside it.
+  const pendingCommand = pendingActivity?.kind === "command" && tailPart ? describeActivityStep(tailPart).detail : null;
+  const pendingCommandNode = pendingCommand && (
+    <code className="tool-pending-command ms-1.5 font-mono text-sm text-muted" title={pendingCommand}>{pendingCommand}</code>
+  );
   if (parts.length === 1) {
     if (isSubagentPart(parts[0])) {
       return (
@@ -2562,6 +2567,7 @@ function ToolGroup({
                 onOpenExperiment={onOpenExperiment}
                 experimentName={experimentName}
               />
+              {pendingCommandNode}
             </span>
           </div>
         </div>
@@ -2601,6 +2607,7 @@ function ToolGroup({
               onOpenExperiment={onOpenExperiment}
               experimentName={experimentName}
             />
+            {pendingCommandNode}
           </span>
         ) : (
           <button
@@ -5527,6 +5534,9 @@ export function ChatPanel({
     part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
   )), [messages, busy]);
   const activeSession = openSession;
+  // The live activity strip above the composer replaces the transcript's
+  // Thinking / Waiting lines while a turn runs.
+  const activityVisible = busy && !!activeSession && !historyLoading;
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
@@ -6929,10 +6939,10 @@ export function ChatPanel({
                   skills={transcriptSkills}
                 />
               </ChatImageScope>
-              {busy && awaitingInput && (
+              {busy && !activityVisible && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
-              {busy && !awaitingInput && !hasPendingTailTool && !hasStreamingText && (
+              {busy && !activityVisible && !awaitingInput && !hasPendingTailTool && !hasStreamingText && (
                 <div className="text-base pt-0.5 px-1 pb-2">
                   <span className="tool-running-shimmer">{m.chat_thinking()}</span>
                 </div>
@@ -6982,16 +6992,6 @@ export function ChatPanel({
                 <ArrowDown size={16} />
               )}
             </IconButton>
-          )}
-          {busy && activeSession && (
-            <HarnessActivity
-              key={activeId}
-              messages={messages}
-              awaitingInput={awaitingInput}
-              harnessLabel={harnessLabel(activeSession.harness, activeSession.harnessName)}
-              describe={describeActivityStep}
-              onStop={stop}
-            />
           )}
           <ExperimentRunBanner
             key={activeId}
@@ -7126,7 +7126,19 @@ export function ChatPanel({
               }}
             />
           )}
-          <div className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle`} data-onboarding="composer">
+          {activityVisible && activeSession && (
+            // Keyed apart from the run banner: two siblings sharing a key
+            // leave stale panels behind when the session changes.
+            <HarnessActivity
+              key={`activity-${activeSession.id}`}
+              messages={messages}
+              awaitingInput={awaitingInput}
+              harnessLabel={harnessLabel(activeSession.harness, activeSession.harnessName)}
+              describe={describeActivityStep}
+              onStop={stop}
+            />
+          )}
+          <div className={cn("composer-box relative flex flex-col border", bashMode ? "border-accent-amber" : "border-border", "rounded-lg bg-background shadow-control-subtle", activityVisible && "rounded-t-none")} data-onboarding="composer">
             {activeHarness && !activeHarness.agentReady && (
               <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
                 {activeHarness.catalogPending ? (
