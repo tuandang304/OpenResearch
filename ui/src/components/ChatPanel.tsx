@@ -206,6 +206,7 @@ import {
   type ModelSelection,
 } from "./ModelPicker";
 import { ContextMeter } from "./ContextMeter";
+import { HarnessActivity, type StepDescription } from "./HarnessActivity";
 import { renderNote } from "./agentNote";
 import {
   canonicalSkillName,
@@ -2159,6 +2160,21 @@ function activityInProgress(activity: ToolActivity): ToolActivity {
     command: m.activity_running(),
   }[activity.kind];
   return { ...activity, label };
+}
+
+/** Plain-text step summary for the live activity panel. */
+function describeActivityStep(part: ChatPart): StepDescription {
+  const activity = toolActivity(part);
+  const input = part.state?.input ?? {};
+  const command = inputString(input, "command", "cmd");
+  const detail = (command ? meaningfulCommand(command) : null)
+    ?? activity.filePath ?? activity.searchPattern ?? activity.queries?.[0] ?? inputString(input, "description") ?? null;
+  return {
+    icon: <ToolActivityIcon activity={activity} />,
+    verb: activityInProgress(activity).label,
+    label: activity.label,
+    detail: detail?.slice(0, TOOL_TARGET_LIMIT) ?? null,
+  };
 }
 
 function permissionActivityLabel(tool: string | undefined, input: Record<string, unknown> | undefined): string {
@@ -6966,6 +6982,16 @@ export function ChatPanel({
                 <ArrowDown size={16} />
               )}
             </IconButton>
+          )}
+          {busy && activeSession && (
+            <HarnessActivity
+              key={activeId}
+              messages={messages}
+              awaitingInput={awaitingInput}
+              harnessLabel={harnessLabel(activeSession.harness, activeSession.harnessName)}
+              describe={describeActivityStep}
+              onStop={stop}
+            />
           )}
           <ExperimentRunBanner
             key={activeId}
