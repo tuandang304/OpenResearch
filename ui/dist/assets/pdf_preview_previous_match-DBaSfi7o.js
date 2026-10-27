@@ -1,1 +1,0 @@
-import{g as c,l as n}from"./index-CV2iBKc-.js";const o=()=>"Next match",l=((r={},a={})=>{var t;const _=a.locale??c(),e=(t=n[_])==null?void 0:t.pdf_preview_next_match;return e?e(r):o()}),s=()=>"Previous match",i=((r={},a={})=>{var t;const _=a.locale??c(),e=(t=n[_])==null?void 0:t.pdf_preview_previous_match;return e?e(r):s()});export{l as a,i as p};
