@@ -3,15 +3,19 @@ import { activeWorkspaceRuns } from "../workspaceRuns";
 import { statusLabel } from "./StatusBadge";
 import { getComputeSettingsQuery } from "../queries/settings";
 import { TARGET_LABELS } from "../computeTargets";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getSessionWorktreeQuery } from "../queries/files";
-import { countChanges, parseDiffFiles } from "./GitDiff";
 import { m } from "../paraglide/messages.js";
 import { BackendLogo } from "./BackendLogos";
 import { IconButton, MenuItem, StatusIndicator, Spinner } from "./ui";
 import { OptionPicker } from "./ModelPicker";
+
+// The diff parser (react-diff-view) only feeds the branch's +/− counts, so it loads on demand.
+type DiffFiles = typeof import("./diffFiles");
+let loadedDiffFiles: DiffFiles | null = null;
+const loadDiffFiles = () => import("./diffFiles").then((module) => (loadedDiffFiles = module));
 
 export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments, onSideChat, sessions, onSelectSideChat }: {
   expanded: boolean;
@@ -150,15 +154,19 @@ function ChatBranch({ sessionId, busy, onChanges }: { sessionId: string; busy: b
     wasBusy.current = busy;
   }, [busy, refetch]);
   const wt = worktree.data;
+  const [diffFiles, setDiffFiles] = useState(loadedDiffFiles);
+  useEffect(() => {
+    if (!diffFiles) void loadDiffFiles().then(setDiffFiles, () => {});
+  }, [diffFiles]);
   const counts = useMemo(() => {
-    if (!wt?.diff || wt.diff.truncated) return null;
-    const parsed = parseDiffFiles(wt.diff.diff, false);
+    if (!diffFiles || !wt?.diff || wt.diff.truncated) return null;
+    const parsed = diffFiles.parseDiffFiles(wt.diff.diff, false);
     if (parsed.failed) return null;
-    return parsed.files.map(countChanges).reduce((total, file) => ({
+    return parsed.files.map(diffFiles.countChanges).reduce((total, file) => ({
       additions: total.additions + file.additions,
       deletions: total.deletions + file.deletions,
     }), { additions: 0, deletions: 0 });
-  }, [wt?.diff]);
+  }, [diffFiles, wt?.diff]);
   if (!wt?.exists) return null;
   return (
     <MenuItem className="min-h-7 py-1" onClick={onChanges} title={wt.branch ?? m.settings_detached()}>

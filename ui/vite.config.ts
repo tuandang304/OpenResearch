@@ -6,6 +6,7 @@ import { basename, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
+import { paraglideLocaleSplit } from "./paraglideLocaleSplit";
 
 // Backend the dev server proxies to. Defaults to the standard `orx up` port;
 // override with ORX_BACKEND when running against a backend on another port.
@@ -14,6 +15,10 @@ const backend = process.env.ORX_BACKEND ?? "http://127.0.0.1:4791";
 const outDir = fileURLToPath(new URL("./dist/", import.meta.url));
 const pdfjsDir = fileURLToPath(new URL("./node_modules/pdfjs-dist/", import.meta.url));
 const pdfjsVersion: string = JSON.parse(readFileSync(join(pdfjsDir, "package.json"), "utf8")).version;
+const inlang = JSON.parse(readFileSync(new URL("./project.inlang/settings.json", import.meta.url), "utf8")) as {
+  baseLocale: string;
+  locales: string[];
+};
 const PDFJS_DIRS = ["cmaps", "iccs", "standard_fonts", "wasm"];
 
 // Every webview we ship in runs wasm, and PdfPreview never enables PDF scripting.
@@ -58,6 +63,11 @@ export default defineConfig({
       emitTsDeclarations: true,
       localStorageKey: "orx:locale",
       strategy: ["localStorage", "preferredLanguage", "baseLocale"],
+    }),
+    paraglideLocaleSplit({
+      messagesDir: fileURLToPath(new URL("./src/paraglide/messages/", import.meta.url)),
+      locales: inlang.locales,
+      baseLocale: inlang.baseLocale,
     }),
     react(),
     tailwindcss(),

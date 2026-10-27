@@ -10,13 +10,15 @@ import { DesktopZoomControls } from "./components/DesktopZoomControls";
 import { WindowControls } from "./components/WindowControls";
 import { WINDOWS_TITLEBAR } from "./desktopTitlebar";
 import { getLocale } from "./paraglide/runtime.js";
+import { loadLocaleMessages } from "virtual:paraglide-locales";
 import "./tailwind.css";
 
 const locale = getLocale();
 document.documentElement.lang = locale;
 document.documentElement.dir = "ltr";
 
-createRoot(document.getElementById("root")!).render(
+// Builds ship only the base locale up front; load the active one before the first render.
+void loadLocaleMessages(locale).catch(() => {}).then(() => createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
@@ -26,4 +28,4 @@ createRoot(document.getElementById("root")!).render(
     {"__ORX_DESKTOP__" in window && <DesktopZoomControls />}
     {WINDOWS_TITLEBAR && <WindowControls />}
   </StrictMode>,
-);
+));

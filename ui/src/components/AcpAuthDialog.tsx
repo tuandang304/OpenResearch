@@ -6,8 +6,10 @@ import { getEnvVarsQuery, refreshHarnesses } from "../queries/settings";
 import { queryClient } from "../queries/client";
 import { m } from "../paraglide/messages.js";
 import { HarnessLogo } from "./HarnessLogo";
-import { CommandTerminal } from "./SshConnectTerminal";
+import { lazyNamed } from "../lazyComponent";
 import { Button, Input, Spinner } from "./ui";
+
+const CommandTerminal = lazyNamed(() => import("./SshConnectTerminal"), "CommandTerminal");
 
 export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
   harness: Harness;

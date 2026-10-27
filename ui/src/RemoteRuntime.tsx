@@ -36,9 +36,16 @@ import { isLocale } from "./paraglide/runtime.js";
 import { setThemePreference } from "./theme";
 import { Button, Input, showAlert, Spinner } from "./components/ui";
 import { RemoteStopDialog } from "./components/RemoteStopDialog";
-import { CommandTerminal, SshConnectTerminal, isComplete } from "./components/SshConnectTerminal";
+import { lazyNamed } from "./lazyComponent";
+import { isRecord } from "./workspaceState";
 import { resetGlobalWorkspace } from "./workspacePersistence";
 import { clearProjectWorkspaceCache } from "./useProjectWorkspace";
+
+// The terminals pull in xterm, which only the remote setup screens need.
+const loadSshConnectTerminal = () => import("./components/SshConnectTerminal");
+const CommandTerminal = lazyNamed(loadSshConnectTerminal, "CommandTerminal");
+const SshConnectTerminal = lazyNamed(loadSshConnectTerminal, "SshConnectTerminal");
+const isComplete = (value: unknown) => isRecord(value) && value.type === "complete";
 
 const REMOTE_FAVICON =
   "data:image/svg+xml," +

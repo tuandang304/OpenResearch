@@ -3,6 +3,8 @@ import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
+import { SETTINGS_SECTIONS, harnessSetupPath } from "./settingsNav";
+export { SETTINGS_NAV, harnessSetupPath } from "./settingsNav";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import {
   setScopedQueryData,
@@ -44,7 +46,6 @@ import {
   ArrowRight,
   Bot,
   ChevronDown,
-  Cpu,
   ExternalLink,
   HardDrive,
   Info,
@@ -107,7 +108,6 @@ import {
   type ProjectGitStatus,
   type TelemetrySettings,
   type Harness,
-  type HarnessSetupCommands,
   type HarnessId,
   harnessModelLabel,
   type HfSettings,
@@ -384,21 +384,6 @@ function AuthLabel({ h }: { h: Harness }) {
   if (h.authMethod === "local") return <>{m.projects_local()}</>;
   if (h.authMethod === "thirdParty") return <>{m.settings_providers()}</>;
   return <>{h.authMethod === "oauth" ? m.settings_oauth_login() : m.onboarding_api_key()}</>;
-}
-
-/** A note command that is one of the harness's setup commands runs through the
- * setup route, which owns install/login/update semantics (telemetry, OpenCode's
- * isolated store, verification); `shell` keeps the terminal open afterwards. */
-export function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undefined, command: string) {
-  if (!setup) return undefined;
-  // Install notes quote the vendor one-liner (`curl … | bash`) while the shown
-  // setup command fetches to a temp file first, so exact equality would drop the
-  // play button from every install note. The shared bootstrap URL identifies it.
-  const installsSameSource = setup.installUrl !== undefined && command.includes(setup.installUrl);
-  const action = command === setup.login ? "login" : command === setup.install ? "install" : command === setup.update ? "update" : installsSameSource ? "install" : null;
-  if (!action) return undefined;
-  if (action !== "install" && (!h.installed || h.installBroken)) return undefined;
-  return `/api/harnesses/setup?${new URLSearchParams({ harness: h.id, action, shell: "true" })}`;
 }
 
 function HarnessesTab({ remote }: { remote: boolean }) {
@@ -3980,15 +3965,6 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
 
 // --- embedded view -----------------------------------------------------------
 
-type SettingsNavItem = {
-  id: Tab;
-  label: () => string;
-  icon: React.ReactNode;
-  activeTabs: Tab[];
-};
-
-const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "context", "storage"];
-
 type SettingsPane = "settings" | "harnesses" | "context" | "projects" | "storage";
 
 /** The Settings page's own sidebar, in its default order. */
@@ -4000,23 +3976,6 @@ const SETTINGS_PANES: { id: SettingsPane; label: () => string; icon: React.React
   { id: "storage", label: m.settings_nav_storage, icon: <HardDrive size={15} /> },
 ];
 const SETTINGS_PANE_IDS = SETTINGS_PANES.map((pane) => pane.id);
-
-/** Primary rail entries. Configuration sections share the Settings entry. */
-export const SETTINGS_NAV: SettingsNavItem[] = [
-  {
-    id: "compute",
-    label: m.settings_page_compute,
-    icon: <Cpu size={16} />,
-    activeTabs: ["compute", "instances"],
-  },
-  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={16} />, activeTabs: ["environment"] },
-  {
-    id: "settings",
-    label: m.settings_page_settings,
-    icon: <Settings size={16} />,
-    activeTabs: ["settings", ...SETTINGS_SECTIONS],
-  },
-];
 
 function isSettingsSection(tab: Tab): boolean {
   return SETTINGS_SECTIONS.includes(tab);
