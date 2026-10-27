@@ -1,0 +1,1 @@
+import{g as e,l as c}from"./index-CV2iBKc-.js";const s=t=>`Open ${t==null?void 0:t.name} on GitHub`,u=((t,n={})=>{var o;const r=n.locale??e(),a=(o=c[r])==null?void 0:o.a11y_open_on_github;return a?a(t):s(t)}),_=()=>"Trackio charts for this run",h=((t={},n={})=>{var o;const r=n.locale??e(),a=(o=c[r])==null?void 0:o.a11y_trackio_charts;return a?a(t):_()});export{u as a,h as b};
