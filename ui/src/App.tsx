@@ -106,19 +106,17 @@ import {
   type UiState,
 } from "./api";
 import { WorkspaceTools } from "./components/WorkspaceTools";
-import { ProjectTerminal } from "./components/ProjectTerminal";
-import { SettingsCommandTerminal } from "./components/SshConnectTerminal";
 import { isWindowsDrivePath } from "./markdownTarget";
 import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
 import { usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
-import { CodeTab, type CodeView } from "./components/CodeTab";
-import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
+import type { CodeView } from "./components/CodeTab";
+import type { WorktreeView } from "./components/WorktreeTab";
 import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
 import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { TabStrip } from "./components/TabStrip";
-import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
+import type { ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { confirmFileDiscard, FileBufferSession } from "./fileSync";
 import { RailHeader } from "./components/Header";
@@ -129,14 +127,48 @@ import { NewProjectDialog } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
 import { archiveActionsByExperiment } from "./components/ArchiveMenu";
 import { Md } from "./components/Md";
-import { SettingsView, type SettingsTab } from "./components/SettingsPage";
-import { DemoWelcomeModal } from "./components/Tour";
-import { TreeView } from "./components/TreeView";
+import type { SettingsTab } from "./components/SettingsPage";
 import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
 import { Button, IconButton, MenuItem, showAlert, Spinner } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 import { RemoteStatus } from "./components/RemoteStatus";
+import { lazyNamed } from "./lazyComponent";
+
+// Views with heavy dependencies (xterm, React Flow, diffs, the settings forms)
+// load on first use and are warmed once the workspace is idle.
+const PANE_PENDING = <div className="flex flex-1 h-full items-center justify-center"><Spinner /></div>;
+const loadTreeView = () => import("./components/TreeView");
+const loadSettingsPage = () => import("./components/SettingsPage");
+const loadDetailDrawer = () => import("./components/DetailDrawer");
+const loadCodeTab = () => import("./components/CodeTab");
+const loadWorktreeTab = () => import("./components/WorktreeTab");
+const loadSshConnectTerminal = () => import("./components/SshConnectTerminal");
+const loadProjectTerminal = () => import("./components/ProjectTerminal");
+const TreeView = lazyNamed(loadTreeView, "TreeView", PANE_PENDING);
+const SettingsView = lazyNamed(loadSettingsPage, "SettingsView", PANE_PENDING);
+const DetailDrawer = lazyNamed(loadDetailDrawer, "DetailDrawer", PANE_PENDING);
+const CodeTab = lazyNamed(loadCodeTab, "CodeTab", PANE_PENDING);
+const WorktreeTab = lazyNamed(loadWorktreeTab, "WorktreeTab", PANE_PENDING);
+const SettingsCommandTerminal = lazyNamed(loadSshConnectTerminal, "SettingsCommandTerminal");
+const ProjectTerminal = lazyNamed(loadProjectTerminal, "ProjectTerminal");
+const DemoWelcomeModal = lazyNamed(() => import("./components/Tour"), "DemoWelcomeModal");
+const IDLE_PRELOADS: (() => Promise<unknown>)[] = [loadTreeView, loadDetailDrawer, loadCodeTab, loadWorktreeTab, loadSettingsPage, loadProjectTerminal, loadSshConnectTerminal];
+
+/** Fetch the lazily loaded views in the background so opening one doesn't wait on the network. */
+function useIdlePreload() {
+  useEffect(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      // One at a time, so parsing never blocks input for long.
+      void IDLE_PRELOADS.reduce<Promise<unknown>>(
+        (previous, load) => previous.then(() => (cancelled ? undefined : load().catch(() => undefined))),
+        Promise.resolve(),
+      );
+    }, 1500);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, []);
+}
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -263,6 +295,7 @@ function useStableStringMap(next: Map<string, string>): Map<string, string> {
 const errorText = (error: unknown) => ltr(error instanceof Error ? error.message : String(error));
 
 export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo; projectId: string; pane?: Pane }) {
+  useIdlePreload();
   const updateUiStateMutation = useMutation({ mutationFn: updateUiState });
 
   const router = useRouter();

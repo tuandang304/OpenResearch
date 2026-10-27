@@ -28,7 +28,7 @@ import {
   type Run,
 } from "../api";
 import { BackendBadge, GitHubMark } from "./BackendLogos";
-import { countChanges } from "./GitDiff";
+import { countChanges } from "./diffFiles";
 import { StatusBadge } from "./StatusBadge";
 import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";

@@ -1,5 +1,4 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Terminal as Xterm } from "@xterm/xterm";
 import {
   refreshHarnesses,
   getHarnessesQuery,
@@ -111,7 +110,14 @@ export function Onboarding({
   const installOutput = useRef("");
   const setupTask = useRef<Promise<Harness> | null>(null);
   const automaticSetupStarted = useRef(false);
-  useEffect(() => () => installSocket.current?.close(), []);
+  const unmounted = useRef(false);
+  useEffect(() => {
+    unmounted.current = false;
+    return () => {
+      unmounted.current = true;
+      installSocket.current?.close();
+    };
+  }, []);
   const harnesses = harnessQuery.data ?? null;
   const gitVersion = pathQuery.data?.gitVersion;
   const gitInstallable = !remote && pathQuery.data?.gitInstallable === true;
@@ -259,7 +265,13 @@ export function Onboarding({
     automaticSetupStarted.current = true;
     setAutomaticSetup(true);
     const task = (async () => {
+      // xterm loads on demand so it stays out of the entry chunk.
+      const { Terminal: Xterm } = await import("@xterm/xterm");
       await new Promise<void>((resolve, reject) => {
+        if (unmounted.current) {
+          reject(new Error(m.settings_terminal_closed()));
+          return;
+        }
         const protocol = location.protocol === "https:" ? "wss:" : "ws:";
         const socket = new WebSocket(`${protocol}//${location.host}/api/harnesses/setup?harness=opencode&action=install&trigger=automatic`);
         socket.binaryType = "arraybuffer";

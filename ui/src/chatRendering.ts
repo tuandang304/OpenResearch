@@ -109,6 +109,24 @@ export function questionReplies(messages: ChatMessage[]): QuestionReplies {
   return { textById, questionById, prompts };
 }
 
+function sameEntries<K, V>(left: ReadonlyMap<K, V>, right: ReadonlyMap<K, V>): boolean {
+  if (left.size !== right.size) return false;
+  for (const [key, value] of left) {
+    if (right.get(key) !== value || (value === undefined && !right.has(key))) return false;
+  }
+  return true;
+}
+
+/** `previous` when `next` holds the same replies, else `next`. Each streamed
+ * flush rebuilds the replies; keeping the old object when nothing changed lets
+ * every memoized transcript row that receives it skip the re-render. */
+export function stableQuestionReplies(previous: QuestionReplies | null | undefined, next: QuestionReplies): QuestionReplies {
+  if (!previous) return next;
+  const samePrompts = previous.prompts.size === next.prompts.size && [...next.prompts].every((id) => previous.prompts.has(id));
+  return samePrompts && sameEntries(previous.textById, next.textById) && sameEntries(previous.questionById, next.questionById)
+    ? previous : next;
+}
+
 /** Whether a part paints anything in the transcript. */
 export function partIsVisible(part: ChatPart, activePermissionId?: string | null): boolean {
   // The persisted marker still delimits stopped turns for history consumers.

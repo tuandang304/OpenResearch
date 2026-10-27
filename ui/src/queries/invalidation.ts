@@ -12,6 +12,27 @@ export function isImmutableQuery(query: Query) {
   return typeof options === "object" && options !== null && "ref" in options && isCommit(options.ref);
 }
 
+// While the tab is hidden, event-driven invalidations only mark queries stale:
+// nobody sees the refetched data, and a streaming turn can invalidate the same
+// families many times a second. Becoming visible refetches whatever was marked.
+let deferredRefetch = false;
+const pageHidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (pageHidden() || !deferredRefetch) return;
+    deferredRefetch = false;
+    void queryClient.refetchQueries({ type: "active", predicate: (query) => query.state.isInvalidated }, { cancelRefetch: false });
+  });
+}
+
+function invalidate(filters: QueryFilters) {
+  if (pageHidden()) {
+    deferredRefetch = true;
+    return queryClient.invalidateQueries({ ...filters, refetchType: "none" });
+  }
+  return queryClient.invalidateQueries(filters);
+}
+
 export function invalidateFamilies(families: readonly string[], scope = workspaceScope(), predicate?: QueryFilters["predicate"], cancelReads = false) {
   if (!isCurrentScope(scope)) return;
   const filters = {
@@ -20,9 +41,9 @@ export function invalidateFamilies(families: readonly string[], scope = workspac
   };
   if (cancelReads) {
     void queryClient.cancelQueries(filters).then(() => {
-      if (isCurrentScope(scope)) void queryClient.invalidateQueries(filters);
+      if (isCurrentScope(scope)) void invalidate(filters);
     });
-  } else void queryClient.invalidateQueries(filters);
+  } else void invalidate(filters);
 }
 
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];

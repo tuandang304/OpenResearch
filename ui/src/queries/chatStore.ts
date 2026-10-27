@@ -60,7 +60,15 @@ export function dispatchChat(projectId: string, action: Action, existingOnly = f
 export function useChatState(projectId: string, activeId: string | null) {
   const enabled = Boolean(activeId) && !deletedSessionIds.has(activeId ?? "");
   const history = useQuery({ ...getChatMessagesQuery(activeId ?? ""), enabled, subscribed: enabled });
-  const dataRevision = useSyncExternalStore(subscribeChat, getRevision);
+  // Only data this view reads wakes it: a turn streaming in another project
+  // (or an unlisted session) must not re-render the open transcript ~13×/s.
+  const subscribe = useCallback((notify: () => void) => queryClient.getQueryCache().subscribe((event) => {
+    if (!isChatDataEvent(event)) return;
+    const [, , family, id] = event.query.queryKey;
+    if (family === "listChatSessions" ? id === projectId
+      : id === activeId || (queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey)?.some((session) => session.id === id) ?? false)) notify();
+  }), [projectId, activeId]);
+  const dataRevision = useSyncExternalStore(subscribe, getRevision);
   const state = useMemo(() => readChatState(projectId, activeId), [projectId, activeId, dataRevision, history.data]);
   const generation = workspaceScope()[1];
   const dispatch = useCallback((action: Action) => {

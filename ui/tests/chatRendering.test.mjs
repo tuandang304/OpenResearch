@@ -14,6 +14,7 @@ import {
   transcriptMarkdown,
   withoutDuplicateTurnError,
   splitResponseParts,
+  stableQuestionReplies,
 } from "../src/chatRendering.ts";
 
 const message = (...parts) => ({ id: "assistant", role: "assistant", parts, createdAt: 0 });
@@ -203,6 +204,26 @@ test("async answers appear once without the generated question preamble", () => 
 
 const user = (id, text) => ({ id, role: "user", createdAt: 0, parts: [{ id: `${id}-t`, type: "text", text }] });
 const assistant = (id, parts) => ({ id, role: "assistant", createdAt: 0, parts });
+
+test("question replies keep their identity until a reply actually changes", () => {
+  const prompt = { id: "q", type: "prompt", prompt: { kind: "question", question: "Can you free space?", resolved: true, note: "What is using memory?" } };
+  const reply = user("reply", "In response to: Can you free space?\n\nWhat is using memory?");
+  const first = questionReplies([message(prompt), reply]);
+  assert.equal(stableQuestionReplies(null, first), first);
+  // A streamed flush of unrelated text rebuilds equal replies: keep the old object.
+  const streamed = questionReplies([message(prompt), reply, assistant("a", [{ id: "t", type: "text", text: "working" }])]);
+  assert.notEqual(streamed, first);
+  assert.equal(stableQuestionReplies(first, streamed), first);
+  const empty = questionReplies([]);
+  assert.equal(stableQuestionReplies(questionReplies([]), empty).textById.size, 0);
+  // Any changed entry hands back the new replies.
+  assert.equal(stableQuestionReplies(first, empty), empty);
+  const reworded = questionReplies([message({ ...prompt, prompt: { ...prompt.prompt, note: "Other" } }), user("reply", "In response to: Can you free space?\n\nOther")]);
+  assert.equal(stableQuestionReplies(first, reworded), reworded);
+  const asked = { id: "q2", type: "prompt", prompt: { kind: "question", question: "Next?" } };
+  const withQuestion = questionReplies([message(prompt, asked), reply]);
+  assert.equal(stableQuestionReplies(first, withQuestion), withQuestion);
+});
 
 test("copy takes the latest answer, skipping commentary and tool work", () => {
   const messages = [

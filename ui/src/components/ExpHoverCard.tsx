@@ -26,7 +26,7 @@ import {
   type Run,
 } from "../api";
 import { BackendBadge } from "./BackendLogos";
-import { countChanges } from "./GitDiff";
+import { countChanges } from "./diffFiles";
 import { StatusBadge } from "./StatusBadge";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";

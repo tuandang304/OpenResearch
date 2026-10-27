@@ -3,10 +3,12 @@ import type { Harness, HarnessSetupCommands } from "../api";
 import { m } from "../paraglide/messages.js";
 import { readHarnesses, refreshHarnesses } from "../queries/settings";
 import { HarnessLogo } from "./HarnessLogo";
-import { CommandTerminal } from "./SshConnectTerminal";
 import { initialPhase, recheckedAction, setupAction, terminalMounted, type SetupAction, type SetupPhase } from "./harnessSetupState";
 import { renderNote } from "./agentNote";
 import { Button, Spinner } from "./ui";
+import { lazyNamed } from "../lazyComponent";
+
+const CommandTerminal = lazyNamed(() => import("./SshConnectTerminal"), "CommandTerminal");
 
 export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
   harness: Harness;
