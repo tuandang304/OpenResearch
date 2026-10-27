@@ -464,7 +464,11 @@ export function RuntimeRoot() {
   const runtimeQuery = useQuery({
     ...getRuntimeQuery(),
     enabled: !launchPlaceholder,
-    refetchInterval: (query) => query.state.status === "error" || query.state.data?.kind === "ssh" ? 2_000 : false,
+    // Keeps watching the gateway while hidden, but at a slower pace; becoming
+    // visible refetches at once (staleTime is 2s).
+    refetchInterval: (query) => query.state.status === "error" || query.state.data?.kind === "ssh"
+      ? (document.visibilityState === "hidden" ? 10_000 : 2_000)
+      : false,
     refetchIntervalInBackground: true,
   });
   useQuery({

@@ -59,8 +59,8 @@ export function SubagentTab({
   const nativeTranscript = useQuery({
     queryKey: workspaceKey("getSubagentTranscript", sessionId, spawnPartId, selectedSpawn?.state?.input?.nativeTranscript ?? null, selectedSpawn?.state?.output?.match(/\(sessionID: (ses_\w+)\)/)?.[1] ?? null),
     queryFn: ({ signal }) => getSubagentTranscript(sessionId, spawnPartId, signal),
+    // Paused while the page is hidden; the interval resumes on return.
     refetchInterval: (query) => query.state.data?.state?.status === "running" ? 1500 : false,
-    refetchIntervalInBackground: true,
     refetchOnMount: "always",
   });
   const loading = messages === null || nativeTranscript.isPending;

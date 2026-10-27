@@ -23,6 +23,7 @@ import {
 import { queryClient, workspaceScope, isCurrentScope, deletedSessionIds } from "./client";
 import { listProjectsQuery, listRunsQuery, listExperimentsQuery } from "./projects";
 import { listChatSessionsQuery } from "./chat";
+import { artifactUrlPrefix } from "../useFileVersion";
 
 import { artifactFamilies, liveFamilies, invalidateFamilies, removeSession } from "./invalidation";
 
@@ -32,6 +33,8 @@ function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefin
   if (old && old.updatedAt > next.updatedAt) return rows;
   return old ? rows.map((row) => row.id === next.id ? next : row) : [...rows, next];
 }
+
+const ACTIVITY_REFRESH_MS = 1_000;
 
 export function QueryEvents() {
   const scope = workspaceScope();
@@ -64,6 +67,8 @@ export function QueryEvents() {
       if (!isCurrentScope(scope)) return;
       invalidateFamilies(artifactFamilies, scope, (query) => query.queryKey[3] === projectId);
       invalidateFamilies(["resolvedFile"], scope, (query) => query.queryKey[3] === projectId && query.queryKey[5] === "artifacts");
+      // Artifact previews poll their HEAD only as a slow fallback; this event is the live signal.
+      invalidateFamilies(["fileVersion"], scope, (query) => typeof query.queryKey[3] === "string" && query.queryKey[3].startsWith(artifactUrlPrefix(projectId)));
     },
     onReconnect() {
       if (!isCurrentScope(scope)) return;
@@ -81,11 +86,16 @@ export function QueryEvents() {
         invalidateFamilies(["listSidebarChatSessions", "listChatSessions"], scope);
       }, 100);
     };
+    // Every streamed chat flush (~13/s per turn) pings activity, and the summary
+    // is an aggregate over all messages. Keep the first refresh quick but space
+    // later ones out: the rail's counts and "last active" times don't need more.
+    let activityAt = 0;
     const refreshActivity = () => {
       activityTimer ??= setTimeout(() => {
         activityTimer = undefined;
+        activityAt = Date.now();
         invalidateFamilies(["listProjectActivity"], scope);
-      }, 100);
+      }, Math.max(100, activityAt + ACTIVITY_REFRESH_MS - Date.now()));
     };
     const offActivity = onProjectActivityEvent(refreshActivity);
     const offMove = onDataDirMove((event) => { if (event.type === "done") invalidateFamilies(["getDataDir"], scope); });
