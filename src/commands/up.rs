@@ -83,7 +83,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         .ok()
         .flatten();
     // An install that finished while this process waited replaced the image it was started from.
-    if backend_lock.is_some() && updates::newer_exe_on_disk().await {
+    if backend_lock.is_some() && updates::updated_exe_on_disk().await {
         drop(backend_lock);
         let err = updates::relaunch(port);
         return Err(anyhow!("orx up: could not restart: {err}"));
@@ -291,7 +291,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
         drop(backend_lock);
-        if !updates::newer_exe_on_disk().await {
+        if !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
             let failures = updates::failure_count();
             if let Err(err) = updates::apply_now().await {
@@ -299,7 +299,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
             // Unless the updater counted it or still will, back off (deferred again, or it
             // never started), or the relaunch restarts straight back into this.
-            if !updates::newer_exe_on_disk().await
+            if !updates::updated_exe_on_disk().await
                 && updates::failure_count() == failures
                 && !updates::updater_running()
             {
@@ -517,6 +517,7 @@ impl ProjectLifecycle {
 fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/file-manager", get(file_manager))
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))
         .route("/api/project-path/pick", post(pick_project_folder))
@@ -685,6 +686,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/update/apply", post(apply_update))
         .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
+        .route("/api/update/channel", post(set_update_channel))
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route(
@@ -792,6 +794,14 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .patch(update_chat_session),
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+        .route(
+            "/api/chat/sessions/{id}/submissions/{client_id}",
+            get(chat_submission),
+        )
+        .route(
+            "/api/chat/sessions/{id}/experiments",
+            get(chat_session_experiments),
+        )
         .route("/api/chat/sessions/{id}/subagent", get(chat_subagent))
         .route(
             "/api/chat/sessions/{id}/configuration",
@@ -896,6 +906,7 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/update/apply"
             | "/api/update/restart"
             | "/api/update/auto"
+            | "/api/update/channel"
             | "/api/update/install-cli"
             | "/api/settings/data-dir"
             | "/api/settings/data-dir/move"
@@ -1011,6 +1022,17 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "dashboardProtocol": crate::commands::up_remote::DASHBOARD_PROTOCOL,
         "instanceId": state.remote_instance_id,
     }))
+}
+
+async fn file_manager(
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let locale = query.get("locale").cloned().unwrap_or_default();
+    let name = tokio::task::spawn_blocking(move || crate::editors::file_manager_name(&locale))
+        .await
+        .ok()
+        .flatten();
+    Json(json!({ "os": std::env::consts::OS, "name": name }))
 }
 
 #[derive(Deserialize)]
@@ -4889,7 +4911,7 @@ fn spawn_restart_when_idle(state: AppState) {
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
                 && status.restart_required
-                && (updates::deferred_update_due() || updates::newer_exe_on_disk().await))
+                && (updates::deferred_update_due() || updates::updated_exe_on_disk().await))
             {
                 continue;
             }
@@ -5734,6 +5756,54 @@ async fn set_auto_update(Json(req): Json<SetAutoUpdateReq>) -> ApiResult {
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("auto-update task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SetUpdateChannelReq {
+    channel: updates::ReleaseChannel,
+}
+
+async fn set_update_channel(Json(req): Json<SetUpdateChannelReq>) -> ApiResult {
+    if !updates::current_channel().is_ok_and(|channel| channel.has_release_channels()) {
+        return Err(bad_request(
+            "Update channels are available for desktop apps.",
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        let path = updates::updater_lock_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ApiError::from(anyhow!(e)))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .map_err(|e| ApiError::from(anyhow!(e)))?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let _guard = lock.try_write().map_err(|_| {
+            ApiError(
+                StatusCode::CONFLICT,
+                "An update is in progress. Try again when it finishes.".into(),
+            )
+        })?;
+        if req.channel != crate::telemetry::update_channel() {
+            if updates::channel_change_blocked_by_installed() {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "An update is already installed. Restart OpenResearch before changing channels."
+                        .into(),
+                ));
+            }
+            updates::clear_deferred_update();
+        }
+        crate::telemetry::set_update_channel(req.channel)
+            .map_err(|e| ApiError::from(anyhow!("could not save update channel: {e}")))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("update channel task failed: {e}")))??;
+    tokio::spawn(updates::periodic_update_pass());
+    Ok(Json(json!(updates::status())))
 }
 
 /// Apply an update now, for the user who doesn't want to wait for the next
@@ -6757,7 +6827,7 @@ const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
     ),
     ("devin auth login", &["devin", "auth", "login"]),
     ("grok login", &["grok", "login"]),
-    ("pi", &["pi"]),
+    ("pi-acp --terminal-login", &["pi-acp", "--terminal-login"]),
     ("zcode login zai", &["zcode", "login", "zai"]),
     ("zcode login bigmodel", &["zcode", "login", "bigmodel"]),
 ];
@@ -7122,9 +7192,10 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: &local::claude::AuthSnapsh
     else {
         return;
     };
-    // Overlaying would replace the reinstall note with advice that runs the
-    // failing binary.
-    if entry_install_broken(claude) {
+    // Cached auth cannot make a missing or broken binary runnable.
+    if claude.get("installed").and_then(Value::as_bool) == Some(false)
+        || entry_install_broken(claude)
+    {
         return;
     }
     // A provisional entry is never overlaid: the shared state would stamp an
@@ -7173,6 +7244,7 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: &local::claude::AuthSnapsh
             || !entry_was_ready
         {
             object.remove("account");
+            object.remove("accountName");
             object.remove("org");
             object.remove("plan");
         }
@@ -7428,11 +7500,14 @@ async fn delete_acp_harness(State(state): State<AppState>, Path(id): Path<String
 
 async fn test_acp_harness(Json(input): Json<AcpHarnessInput>) -> ApiResult {
     let definition = input.definition(format!("acp:{}", uuid::Uuid::new_v4()));
-    Ok(Json(
-        local::acp::test_connection(&definition)
-            .await
-            .map_err(bad_request)?,
-    ))
+    let mut result = local::acp::test_connection(&definition)
+        .await
+        .map_err(bad_request)?;
+    result["harnessId"] = json!(local::acp::registered_definitions()
+        .iter()
+        .find(|registered| local::acp::same_launch(registered, &definition))
+        .map(|registered| &registered.id));
+    Ok(Json(result))
 }
 
 /// The shared detection path behind `GET /api/harnesses` and the startup
@@ -8095,6 +8170,16 @@ async fn get_chat_session(State(state): State<AppState>, Path(id): Path<String>)
     ))
 }
 
+async fn chat_session_experiments(Path(id): Path<String>) -> ApiResult {
+    let store = Store::open()?;
+    store
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    Ok(Json(
+        json!({ "experiments": store.list_experiments_by_chat_session(&id)? }),
+    ))
+}
+
 async fn create_chat_session(
     State(state): State<AppState>,
     Json(mut req): Json<CreateChatSessionReq>,
@@ -8576,6 +8661,16 @@ async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) ->
     })))
 }
 
+async fn chat_submission(Path((id, client_id)): Path<(String, String)>) -> ApiResult {
+    let store = Store::open()?;
+    if store.get_chat_session(&id)?.is_none() {
+        return Err(not_found("chat session"));
+    }
+    Ok(Json(
+        json!({ "accepted": store.has_chat_submission(&id, &client_id)? }),
+    ))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SendChatReq {
@@ -8720,7 +8815,8 @@ async fn send_chat_message(
                 if local::chat::is_client_turn_conflict(&error) {
                     ApiError(StatusCode::CONFLICT, error.to_string())
                 } else {
-                    bad_request(error)
+                    // A failure can occur after the message was admitted.
+                    ApiError::from(error)
                 }
             })?;
         match result {
@@ -8746,7 +8842,7 @@ async fn send_chat_message(
                 if local::chat::is_client_turn_conflict(&error) {
                     ApiError(StatusCode::CONFLICT, error.to_string())
                 } else {
-                    bad_request(error)
+                    ApiError::from(error)
                 }
             })?;
         let capture = !result.existing;
@@ -9288,7 +9384,14 @@ fn log_size(run_id: &str) -> u64 {
 /// ui/dist, embedded at release build time (debug builds read from disk).
 #[derive(rust_embed::RustEmbed)]
 #[folder = "ui/dist"]
+#[cfg_attr(debug_assertions, allow_missing = true)]
 struct UiDist;
+
+#[cfg(not(debug_assertions))]
+const _: () = assert!(
+    !include_str!("../../ui/dist/index.html").is_empty(),
+    "Run pnpm build in ui/ before a release build"
+);
 
 const NOT_BUILT_PAGE: &str = "<!doctype html><html><head><title>orx up</title></head>\
 <body style=\"font-family:system-ui;background:#111;color:#ddd;display:grid;place-items:center;height:100vh;margin:0\">\
@@ -9477,6 +9580,21 @@ mod tests {
                 format!("orx up could not start the run: {expected}")
             );
         }
+    }
+
+    #[test]
+    fn missing_claude_keeps_install_guidance_when_auth_was_cached() {
+        let host = local::claude::ClaudeHost::new();
+        let ready = local::harness::claude::parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"oauth","apiProvider":"firstParty"}"#,
+            local::harness::claude::auth_barrier_sequence(),
+        );
+        host.observe_auth_probe(&ready);
+        let mut payload = json!({"harnesses": [{"id": "claude-code", "installed": false, "agentReady": false, "agentNote": "Install Claude Code"}]});
+        let expected = payload.clone();
+        overlay_claude_auth(&mut payload, &host.auth_snapshot());
+        assert_eq!(payload, expected);
     }
 
     #[test]

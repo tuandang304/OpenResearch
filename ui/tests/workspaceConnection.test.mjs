@@ -15,7 +15,7 @@ function load(file, mocks, globals = {}) {
   }).outputText;
   const exports = {};
   new Function("require", "exports", ...Object.keys(globals), code)(
-    (name) => mocks[name] ?? require(name), exports, ...Object.values(globals),
+    (name) => name === "./EscapeScope" ? { EscapeScope: "escape-scope" } : mocks[name] ?? require(name), exports, ...Object.values(globals),
   );
   return exports;
 }
@@ -55,6 +55,7 @@ for (const corner of [true, false]) {
       "./RemoteIcon": { RemoteIcon: "RemoteIcon" },
       "./SshConfigDialog": { SshConfigDialog: "ConfigDialog" },
       "./Wordmark": { BrandMark: "BrandMark" },
+      "./UpdateBanner": { useUpdateStatus: () => ({ status: null }) },
       "./ui": { Button: "button", IconButton: "button" },
     });
     const runtime = { kind: "local", version: "test" };

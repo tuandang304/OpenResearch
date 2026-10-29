@@ -24,6 +24,7 @@ const mocks = {
   "../bashCommand": bashCommand,
   "../chatRecovery": chatRecovery,
   "../chatRendering": chatRendering,
+  "../queries/chatState": { LOCAL_PREFIX: "local-", SHELL_TOOL: "shell" },
   "../orxCommand": orxCommand,
   "@tanstack/react-router": { useNavigate: () => () => {} },
   "./ui": new Proxy({}, {
@@ -36,8 +37,8 @@ new Function("require", "exports", compiled)(
   (name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name)),
   exports,
 );
-const renderMessage = (parts, props = {}) => renderToStaticMarkup(React.createElement(exports.Message, {
-  message: { id: "msg-1", role: "assistant", parts, createdAt: 0, completedAt: 1000 },
+const renderMessage = (parts, props = {}, id = "msg-1") => renderToStaticMarkup(React.createElement(exports.Message, {
+  message: { id, role: "assistant", parts, createdAt: 0, completedAt: 1000 },
   activePermissionId: null,
   forkDisabled: false,
   branchDisabled: false,
@@ -93,4 +94,12 @@ test("a superseded failure reads as history but keeps its recovery action", () =
   assert.match(html, /data-superseded="true"/);
   assert.doesNotMatch(html, /text-accent-red/);
   assert.match(html, /app_retry/);
+});
+
+test("local send uncertainty is visible in an alert", () => {
+  const warning = "Send not confirmed. Check the conversation before sending again: network";
+  const html = renderMessage([{ id: "p0", type: "tool", tool: "error", state: { status: "error", error: warning } }], {}, "local-senderr-1");
+  assert.match(html, /role="alert"/);
+  assert.match(html, /Send not confirmed/);
+  assert.doesNotMatch(html, /<details/);
 });

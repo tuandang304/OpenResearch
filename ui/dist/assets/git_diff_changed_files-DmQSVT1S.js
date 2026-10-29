@@ -1,1 +1,0 @@
-import{g as n,l as f}from"./index-D-ZmxZIS.js";const i=()=>"Changed files",c=((t={},a={})=>{var s;const l=a.locale??n(),e=(s=f[l])==null?void 0:s.git_diff_changed_files;return e?e(t):i()});export{c as g};

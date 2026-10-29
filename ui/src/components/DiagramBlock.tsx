@@ -113,15 +113,15 @@ export function DiagramBlock({ code, kind, source }: { code: string; kind: Diagr
       <div className="flex items-center gap-1 border-b border-border-muted px-2 py-1 text-xs text-subtext">
         <Shapes size={13} className="flex-none" />
         <span className="me-auto font-medium">{kind === "mermaid" ? `${label} · Mermaid` : `${label} · SVG`}</span>
-        {imageUrl && <IconButton size="small" title={showSource ? m.md_diagram_show_diagram() : m.md_diagram_show_source()}
+        {imageUrl && <IconButton size="small" data-tip={showSource ? m.md_diagram_show_diagram() : m.md_diagram_show_source()}
           aria-label={showSource ? m.md_diagram_show_diagram() : m.md_diagram_show_source()} aria-pressed={showSource}
           onClick={() => setShowSource(value => !value)}>
           {showSource ? <Shapes size={14} /> : <Code2 size={14} />}
         </IconButton>}
-        <IconButton size="small" title={m.md_copy()} aria-label={m.md_copy_code()} onClick={copy}>
+        <IconButton size="small" data-tip={m.md_copy()} aria-label={m.md_copy_code()} onClick={copy}>
           {copied ? <Check size={14} /> : <Copy size={14} />}
         </IconButton>
-        {imageUrl && <IconButtonLink size="small" href={imageUrl} download="diagram.svg" title={m.md_diagram_download()} aria-label={m.md_diagram_download()}>
+        {imageUrl && <IconButtonLink size="small" href={imageUrl} download="diagram.svg" data-tip={m.md_diagram_download()} aria-label={m.md_diagram_download()}>
           <Download size={14} />
         </IconButtonLink>}
       </div>
