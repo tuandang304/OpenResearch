@@ -208,7 +208,7 @@ export function HarnessAccountsCard({ harness, remote }: { harness: Harness; rem
                 />
                 {!account.isDefault && (
                   <IconButton
-                    title={m.settings_accounts_remove()}
+                    data-tip={m.settings_accounts_remove()}
                     aria-label={m.settings_accounts_remove()}
                     disabled={busy != null}
                     onClick={() => {
@@ -1294,7 +1294,7 @@ export function HarnessFailoverCard({ harnesses }: { harnesses: Harness[] }) {
                   <span className="sr-only">{status.label}</span>
                   <IconButton
                     size="small"
-                    title={m.settings_failover_move_up({ name: ltr(harness.name) })}
+                    data-tip={m.settings_failover_move_up({ name: ltr(harness.name) })}
                     aria-label={m.settings_failover_move_up({ name: ltr(harness.name) })}
                     disabled={!included || index === 0 || save.isPending}
                     onClick={() => move(index, -1)}
@@ -1303,7 +1303,7 @@ export function HarnessFailoverCard({ harnesses }: { harnesses: Harness[] }) {
                   </IconButton>
                   <IconButton
                     size="small"
-                    title={m.settings_failover_move_down({ name: ltr(harness.name) })}
+                    data-tip={m.settings_failover_move_down({ name: ltr(harness.name) })}
                     aria-label={m.settings_failover_move_down({ name: ltr(harness.name) })}
                     disabled={!included || index === order.length - 1 || save.isPending}
                     onClick={() => move(index, 1)}

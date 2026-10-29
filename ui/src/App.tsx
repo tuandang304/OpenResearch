@@ -1,3 +1,5 @@
+import { EscapeScope } from "./components/EscapeScope";
+import { navigateKeyboardList } from "./keyboardNavigation";
 import {
   setScopedQueryData,
   deletedSessionIds,
@@ -16,6 +18,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import { listChatSessionsQuery, getChatMessagesQuery } from "./queries/chat";
@@ -26,7 +29,6 @@ import { readHarnesses } from "./queries/settings";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   getTaskWorkspace,
-  initialExperimentTreeState,
   parseDestination,
   safeLocation,
   taskLocation,
@@ -34,7 +36,7 @@ import {
   type TaskWorkspace,
 } from "./workspaceState";
 import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
-import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth, sideChatPanelWidth } from "./panelLayout";
+import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth, sideChatPanelWidth, sidebarFitsWithPanel } from "./panelLayout";
 import {
   type ExpViewDef,
   sameExpTab,
@@ -72,16 +74,19 @@ import { autoDir, ltr } from "./i18n";
 import {
   ChartLine,
   ChartSpline,
+  ArrowDownWideNarrow,
   Check,
   FileCode,
   Filter,
   FlaskConical,
   FolderGit2,
   FolderOpen,
+  GitBranch,
   Maximize2,
   MessagesSquare,
   Minimize2,
   Package,
+  PanelLeft,
   ScrollText,
   Terminal,
   Users,
@@ -108,7 +113,7 @@ import {
 import { WorkspaceTools } from "./components/WorkspaceTools";
 import { isWindowsDrivePath } from "./markdownTarget";
 import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
-import { usePopover } from "./components/ModelPicker";
+import { OptionPicker, usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
 import type { CodeView } from "./components/CodeTab";
 import type { WorktreeView } from "./components/WorktreeTab";
@@ -126,11 +131,15 @@ import { OfflineBanner } from "./components/OfflineBanner";
 import { NewProjectDialog } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
 import { archiveActionsByExperiment } from "./components/ArchiveMenu";
+import { type HistoryOrder } from "./components/ExperimentLineage";
 import { Md } from "./components/Md";
 import type { SettingsTab } from "./components/SettingsPage";
 import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
-import { Button, IconButton, MenuItem, showAlert, Spinner } from "./components/ui";
+import { formatForDisplay, useHotkey, useHotkeys } from "@tanstack/react-hotkeys";
+import { commandRegion, subscribeCommandRegion } from "./keyboardRegion";
+import { appHotkeys, tabJumpHotkeys } from "./hotkeys";
+import { Button, IconButton, MenuItem, SEGMENTED_CLASS_NAME, showAlert, Spinner, Tooltip } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 import { RemoteStatus } from "./components/RemoteStatus";
 import { lazyNamed } from "./lazyComponent";
@@ -412,8 +421,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const artifacts = artifactsQuery.data ?? null;
 
   const [view, setView] = useState<ExperimentsView>("table");
-  const [treeState, setTreeState] = useState(initialExperimentTreeState);
-  const showArchivedExperiments = treeState.showArchived;
+  const [showTableLineage, setShowTableLineage] = useState(false);
+  const [tableOrder, setTableOrder] = useState<HistoryOrder>("lineage");
+  const [showArchivedExperiments, setShowArchivedExperiments] = useState(false);
   // Experiments pane scope: "agent" narrows to the open chat session's work.
   // Falls back to "project" whenever there is no usable experiment attribution.
   const [scope, setScope] = useState<"agent" | "project">("project");
@@ -505,9 +515,62 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [panelMax, setPanelMax] = useState(false);
   const [treeViewport, setTreeViewport] = useState<Viewport | null>(null);
   const [panelWidth, setPanelWidth] = useState(initialPanelWidth);
-  const [workspaceWide, setWorkspaceWide] = useState(() => window.innerWidth >= WORKSPACE_CARD_MIN_WIDTH);
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
+  const workspaceWide = windowWidth >= WORKSPACE_CARD_MIN_WIDTH;
   const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
   const [railOpen, setRailOpen] = useState(true);
+  const [mobileRailOpen, setMobileRailOpen] = useState(false);
+  const mobile = windowWidth < 768;
+  useEffect(() => { setMobileRailOpen(false); }, [mobile, location.href]);
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const railTemporarilyHidden = mainView === "chat" && panelOpen && !sidebarFitsWithPanel(windowWidth);
+  const railVisible = mobile ? mobileRailOpen : railOpen && !railTemporarilyHidden;
+  const stackPanel = !mobile && mainView === "chat" && panelOpen && windowWidth < PANEL_MIN_WIDTH * 2;
+  const visiblePanelWidth = Math.min(panelWidth, panelMaxWidth(windowWidth, railVisible));
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const pendingTabFocus = useRef<string | null>(null);
+  const pendingViewFocus = useRef<"settings" | "compute" | null>(null);
+  useLayoutEffect(() => {
+    if (pendingTabFocus.current && panelOpen && mainView === "chat" && pendingTabFocus.current === rightTabKey(rightTab)) {
+      const content = bodyRef.current?.querySelector<HTMLElement>(".right-pane [data-workspace-content]");
+      if (content) {
+        content.focus();
+        pendingTabFocus.current = null;
+      }
+    }
+    if (pendingViewFocus.current && pendingViewFocus.current === mainView) {
+      const view = bodyRef.current?.querySelector<HTMLElement>(".settings-view-scroll h1");
+      if (view) {
+        view.focus();
+        pendingViewFocus.current = null;
+      }
+    }
+  });
+  const focusAfterRailChange = useRef<"rail" | "show" | Element | null>(null);
+  const lastFocused = useRef<Element | null>(null);
+  useEffect(() => {
+    const rememberFocus = (event: FocusEvent) => { lastFocused.current = event.target instanceof Element ? event.target : null; };
+    document.addEventListener("focusin", rememberFocus);
+    return () => document.removeEventListener("focusin", rememberFocus);
+  }, []);
+  useLayoutEffect(() => {
+    if (!railVisible && lastFocused.current?.closest(".session-rail") && !lastFocused.current.isConnected
+      && document.activeElement === document.body) focusAfterRailChange.current = "show";
+    const pendingFocus = focusAfterRailChange.current;
+    if (pendingFocus && pendingFocus !== "show" && railVisible) {
+      if (pendingFocus === "rail" || (document.activeElement === document.body && pendingFocus === lastFocused.current && !pendingFocus.isConnected)) {
+        const buttons = bodyRef.current?.querySelectorAll<HTMLElement>(".session-rail button, .session-rail a");
+        [...(buttons ?? [])].find((button) => button.getClientRects().length > 0
+          && getComputedStyle(button).visibility !== "hidden")?.focus();
+      }
+      focusAfterRailChange.current = null;
+    } else if (focusAfterRailChange.current === "show" && !railVisible) {
+      const buttons = bodyRef.current?.parentElement?.querySelectorAll<HTMLElement>("button[aria-label]");
+      [...(buttons ?? [])].find((button) => button.getAttribute("aria-label") === m.chat_panel_show_sidebar()
+        && button.getClientRects().length > 0 && getComputedStyle(button).visibility !== "hidden")?.focus();
+      focusAfterRailChange.current = null;
+    }
+  }, [railVisible]);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const currentRightPaneStateRef = useRef<RightPaneSessionState>(initialRightPaneSessionState());
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
@@ -563,8 +626,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     setRightTab(tab);
   }, [setRightTab]);
 
-  const openRightTab = useCallback((tab: ContentTab, intent: TabOpenIntent, runId?: string) => {
+  const openRightTab = useCallback((tab: ContentTab, intent: TabOpenIntent, runId?: string, focus = true) => {
     const key = rightTabKey(tab);
+    if (focus) {
+      pendingViewFocus.current = null;
+      pendingTabFocus.current = key;
+    }
     const outgoing = previewTabRef.current;
     const transition = openTab(
       {
@@ -600,51 +667,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (current && rightTabKey(current) === rightTabKey(tab)) setPreviewTab(null);
   }, [setPreviewTab]);
 
-  useEffect(() => {
-    let waitingForEnter = false;
-    const onKeyDown = (event: KeyboardEvent) => {
-      const preview = previewTabRef.current;
-      const target = event.target;
-      const editing =
-        target instanceof Element &&
-        target.closest("input, textarea, [contenteditable='true']") !== null;
-      if (editing) {
-        waitingForEnter = false;
-        return;
-      }
-      if (
-        preview &&
-        rightTabKey(preview) === rightTabKey(currentRightPaneStateRef.current.rightTab) &&
-        (event.metaKey || event.ctrlKey) &&
-        !event.altKey &&
-        !event.shiftKey &&
-        event.key.toLowerCase() === "k"
-      ) {
-        event.preventDefault();
-        waitingForEnter = true;
-        return;
-      }
-      if (waitingForEnter && event.key === "Enter") {
-        event.preventDefault();
-        waitingForEnter = false;
-        const activePreview = previewTabRef.current;
-        if (activePreview) promoteRightTab(activePreview);
-        return;
-      }
-      waitingForEnter = false;
-    };
-    const resetChord = () => {
-      waitingForEnter = false;
-    };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("blur", resetChord);
-    window.addEventListener("pointerdown", resetChord);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("blur", resetChord);
-      window.removeEventListener("pointerdown", resetChord);
-    };
-  }, [promoteRightTab]);
+  useHotkey(
+    appHotkeys["tab.keepOpen"],
+    () => {
+      if (previewTab) promoteRightTab(previewTab);
+    },
+    { enabled: previewTab !== null && rightTabKey(previewTab) === rightTabKey(rightTab), ignoreInputs: true },
+  );
 
   const forgetRightTab = useCallback((tab: RightTab, selectFallback: boolean) => {
     const key = rightTabKey(tab);
@@ -667,8 +696,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     const fallback = contentState.fallbackKey
       ? next.find((item) => rightTabKey(item) === contentState.fallbackKey)
       : undefined;
-    if (fallback) setRightTab(fallback);
-    else {
+    const focusWasInPanel = document.activeElement?.closest(".right-pane");
+    if (fallback) {
+      if (focusWasInPanel) pendingTabFocus.current = rightTabKey(fallback);
+      setRightTab(fallback);
+    } else {
+      if (focusWasInPanel) bodyRef.current?.querySelector<HTMLElement>(".chat-pane .composer-input textarea")?.focus();
       closePanel();
       setPanelMax(false);
     }
@@ -698,8 +731,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     panelOpen,
     panelMax,
     treeViewport,
-    treeState,
-  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, terminalTabOpen, expTabs, fileTabs, planTabs, subagentTabs, sideTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport, treeState]);
+  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, terminalTabOpen, expTabs, fileTabs, planTabs, subagentTabs, sideTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport]);
   currentRightPaneStateRef.current = rightPaneState;
   const getFileScroll = useCallback(() => Object.fromEntries(fileScrollPositionsRef.current), []);
   const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -728,7 +760,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     setScope(state.scope);
     setPanelMax(state.panelMax);
     setTreeViewport(state.treeViewport);
-    setTreeState(state.treeState);
     setDemoOverviewLeading(navigationRef.current.activeSessionId === DEMO_MAIN_SESSION_ID && state.fileTabs.some((tab) => sameFileTab(tab, { path: DEMO_OVERVIEW_ARTIFACT, source: "artifacts" })));
     if (restored) {
       for (const [key, position] of Object.entries(saved?.scroll ?? {})) fileScrollPositionsRef.current.set(key, position);
@@ -785,10 +816,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const lastGlobalLocation = useRef<string | null>(null);
   useEffect(() => {
     const savedLocation = safeLocation(location.href);
-    if (!uiState || !workspaceReady || !savedLocation) return;
+    if (!uiState || !workspaceReady || !preferencesLoaded || !savedLocation) return;
     globalWorkspaceWriter.queue({ lastLocation: savedLocation, railOpen, panelWidth, experimentsView: view }, lastGlobalLocation.current === savedLocation ? 250 : 0);
     lastGlobalLocation.current = savedLocation;
-  }, [location.href, uiState, workspaceReady, railOpen, panelWidth, view]);
+  }, [location.href, uiState, workspaceReady, preferencesLoaded, railOpen, panelWidth, view]);
   const onboarded = uiState?.onboardingCompleted ?? false;
   const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
@@ -854,18 +885,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     void uiStateQuery.refetch();
     void sessionsQuery.refetch();
   };
-  const preferencesLoaded = useRef(false);
   useEffect(() => {
-    if (!uiState || preferencesLoaded.current) return;
-    preferencesLoaded.current = true;
+    if (!uiState || preferencesLoaded) return;
     persistedPreferredAgent.current = uiState.preferredAgent;
     const prefs = getRememberedGlobalWorkspace() ?? uiState.workspace;
     if (prefs) {
       setRailOpen(prefs.railOpen);
-      setPanelWidth(Math.min(prefs.panelWidth, panelMaxWidth()));
+      setPanelWidth(prefs.panelWidth);
       setView(prefs.experimentsView === "tree" ? "tree" : "table");
     }
-  }, [uiState]);
+    setPreferencesLoaded(true);
+  }, [uiState, preferencesLoaded]);
   useEffect(() => {
     if (sessions && rememberedSessionRef.current && !sessions.includes(rememberedSessionRef.current)) rememberedSessionRef.current = null;
   }, [sessions]);
@@ -907,16 +937,20 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       });
   }, []);
 
-  // Shrinking the window can push a fixed-width panel past its usable max —
-  // reclamp so it never overflows the viewport.
   useEffect(() => {
     const onResize = () => {
-      setPanelWidth((w) => Math.min(w, panelMaxWidth()));
-      setWorkspaceWide(window.innerWidth >= WORKSPACE_CARD_MIN_WIDTH);
+      const focused = document.activeElement;
+      if (railOpen && railTemporarilyHidden && sidebarFitsWithPanel(window.innerWidth)
+        && focused?.closest(".chat-pane") && focused.getAttribute("aria-label") === m.chat_panel_show_sidebar()) {
+        focusAfterRailChange.current = focused;
+      } else if (focusAfterRailChange.current && typeof focusAfterRailChange.current !== "string") {
+        focusAfterRailChange.current = null;
+      }
+      setWindowWidth(window.innerWidth);
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, []);
+  }, [railOpen, railTemporarilyHidden]);
 
   // Open an experiment view as a right-panel tab (creating it if needed) and
   // focus it.
@@ -925,6 +959,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     view: ExperimentView = "overview",
     intent: TabOpenIntent = "preview",
     runId?: string,
+    focus = true,
   ) => {
     reportFirstAction("open_experiment");
     const tab = { id, view };
@@ -932,14 +967,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (view !== "overview" && isDemoProjectId(projectIdRef.current)) {
       setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
     }
-    openRightTab(tab, intent, runId);
+    openRightTab(tab, intent, runId, focus);
   }, [openRightTab]);
 
   const openStreamingRun = useCallback((run: Run) => {
     const navigation = navigationRef.current;
     if (!navigation.isTask || (navigation.pane &&
       !(navigation.pane.kind === "home" && navigation.pane.view === "experiments"))) return;
-    openExperimentTab(run.experimentId, "terminal", "preview", run.id);
+    openExperimentTab(run.experimentId, "terminal", "preview", run.id, false);
   }, [openExperimentTab]);
 
   const loadRunsBaseline = useCallback((baselineProjectId: string) => {
@@ -1532,6 +1567,70 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [forgetRightTab, rightTab],
   );
 
+  const focusOpenedTab = (tab: RightTab, open: () => void) => {
+    const key = rightTabKey(tab);
+    pendingViewFocus.current = null;
+    const content = panelOpen && mainView === "chat" && key === rightTabKey(rightTab)
+      ? bodyRef.current?.querySelector<HTMLElement>(".right-pane [data-workspace-content]") : null;
+    if (content) content.focus();
+    pendingTabFocus.current = content ? null : key;
+    open();
+  };
+
+  const focusOpenedView = (view: "settings" | "compute") => {
+    pendingTabFocus.current = null;
+    const currentView = mainView === view ? bodyRef.current?.querySelector<HTMLElement>(".settings-view-scroll h1") : null;
+    if (currentView) currentView.focus();
+    pendingViewFocus.current = currentView ? null : view;
+    selectMainView(view);
+  };
+
+  const focusedRegion = useSyncExternalStore(subscribeCommandRegion, commandRegion);
+  useHotkey(appHotkeys["tab.close"], () => {
+    const region = commandRegion();
+    if (region === "left") {
+      if (mainView !== "chat") selectMainView("chat");
+      else if (activeSessionId) onActiveSessionChange(null);
+      return;
+    }
+    if (region !== "right" || mainView !== "chat" || !panelOpen) return;
+    if (typeof rightTab === "string") closeHomeTab(rightTab);
+    else if ("code" in rightTab) closeCodeTab(rightTab);
+    else if ("kind" in rightTab) {
+      if (rightTab.kind === "plan") closePlanTab(rightTab);
+      else if (rightTab.kind === "side") closeSideTab(rightTab);
+      else closeSubagentTab(rightTab);
+    } else if ("path" in rightTab) closeFileTab(rightTab);
+    else closeExperimentTab(rightTab);
+  }, { enabled: focusedRegion === "right" ? panelOpen && mainView === "chat" : focusedRegion === "left" && (mainView !== "chat" || activeSessionId !== null) });
+
+  const toggleSidebar = () => {
+    if (mobile) setMobileRailOpen(!mobileRailOpen);
+    else if (railVisible) setRailOpen(false);
+    else {
+      focusAfterRailChange.current = "rail";
+      setRailOpen(true);
+      if (railTemporarilyHidden) closePanel();
+    }
+  };
+  useHotkey(appHotkeys["settings.open"], () => focusOpenedView("settings"), { enabled: !!projectId, requireReset: true, capture: true });
+  useHotkey(appHotkeys["compute.open"], () => focusOpenedView("compute"), { enabled: !!projectId, requireReset: true, capture: true });
+  useHotkey(appHotkeys["experiments.open"], () => focusOpenedTab("experiments", openExperimentsTab), { enabled: !!projectId && workspaceReady, requireReset: true, capture: true, ignoreInputs: false });
+  const openWorkspaceShortcut = (event: KeyboardEvent, open: () => void) => {
+    if (event.ctrlKey && !event.metaKey && event.target instanceof Element && event.target.closest(".xterm")) return;
+    event.preventDefault();
+    open();
+  };
+  useHotkeys([
+    { hotkey: appHotkeys["files.open"], callback: (event) => openWorkspaceShortcut(event, () => focusOpenedTab("files", () => { setFilesView("files"); openWorktreeTab(); })) },
+    { hotkey: appHotkeys["artifacts.open"], callback: (event) => openWorkspaceShortcut(event, () => focusOpenedTab("artifacts", openArtifactsTab)) },
+    { hotkey: appHotkeys["terminal.open"], callback: (event) => openWorkspaceShortcut(event, () => focusOpenedTab("terminal", openTerminalTab)) },
+  ], { enabled: !!projectId && workspaceReady, requireReset: true, capture: true, preventDefault: false, ignoreInputs: false });
+  useHotkey(appHotkeys["sidebar.toggle"], toggleSidebar, { enabled: !!projectId, requireReset: true, capture: true });
+  useEffect(() => {
+    window.ipc?.postMessage(`menu:state:${JSON.stringify({ "sidebar.toggle": { checked: railVisible } })}`);
+  }, [railVisible]);
+
   // Drag the panel's left edge to resize; width persists across reloads.
   const resizePanel = (e: React.PointerEvent) => {
     e.preventDefault();
@@ -1543,7 +1642,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     document.body.style.userSelect = "none";
     const startedMaximized = panelMax;
     const startX = e.clientX;
-    const startWidth = panelWidth;
     let restoredFromMax = false;
     function stop() {
       window.removeEventListener("pointermove", onMove);
@@ -1557,16 +1655,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         if (restoredFromMax || distance < FULLSCREEN_RESTORE_DRAG) return;
         restoredFromMax = true;
         setPanelMax(false);
-        const width = Math.min(
-          Math.max(startWidth, PANEL_MIN_WIDTH),
-          panelMaxWidth(),
-        );
-        setPanelWidth(width);
         window.removeEventListener("pointermove", onMove);
         return;
       }
       const w = Math.round(window.innerWidth - ev.clientX);
-      const max = panelMaxWidth();
+      const max = panelMaxWidth(window.innerWidth, railVisible);
       // Drag past the usable max by the slop threshold → snap to fullscreen.
       // Dragging back below it drops out of fullscreen to the clamped width.
       if (w > max + FULLSCREEN_SNAP_SLOP) {
@@ -1574,7 +1667,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         return;
       }
       setPanelMax(false);
-      const clamped = Math.min(Math.max(w, PANEL_MIN_WIDTH), max);
+      const clamped = Math.min(Math.max(w, Math.min(PANEL_MIN_WIDTH, max)), max);
       setPanelWidth(clamped);
     }
     window.addEventListener("pointermove", onMove);
@@ -1653,6 +1746,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const codeTab = requestedCodeTab
     ? (codeTabs.find((tab) => sameCodeTab(tab, requestedCodeTab)) ?? null)
     : null;
+  let activeWorkspaceView: "files" | "artifacts" | "experiments" | "terminal" | null = null;
+  if (panelOpen) {
+    if (expTab || codeTab) activeWorkspaceView = "experiments";
+    else if (fileTab) activeWorkspaceView = fileTab.source === "artifacts" ? "artifacts" : "files";
+    else if (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") activeWorkspaceView = rightTab;
+  }
   const contentTabByKey = new Map<string, ContentTab>();
   for (const tab of [...expTabs, ...fileTabs, ...planTabs, ...subagentTabs, ...sideTabs, ...codeTabs]) {
     contentTabByKey.set(rightTabKey(tab), tab);
@@ -1664,10 +1763,40 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     .filter((key) => key !== leadingContentKey)
     .map((key) => contentTabByKey.get(key))
     .filter(isPresent);
+  const homeTabs = [
+    { id: "files" as const, open: filesTabOpen, label: m.app_files(), icon: FolderOpen },
+    { id: "terminal" as const, open: terminalTabOpen, label: m.workspace_terminal(), icon: Terminal },
+    { id: "artifacts" as const, open: artifactsTabOpen, label: m.app_artifacts(), icon: Package },
+    { id: "experiments" as const, open: experimentsTabOpen, label: m.app_experiments(), icon: FlaskConical },
+  ].filter((tab) => tab.open);
+  const visibleRightTabs: RightTab[] = [...leadingFileTabs, ...homeTabs.map((tab) => tab.id), ...orderedContentTabs];
+  const canSwitchTabs = panelOpen && mainView === "chat" && visibleRightTabs.length > 0;
+  const cycleTab = (direction: number) => {
+    const current = visibleRightTabs.findIndex((tab) => rightTabKey(tab) === rightTabKey(rightTab));
+    const tab = visibleRightTabs[(current + direction + visibleRightTabs.length) % visibleRightTabs.length];
+    focusOpenedTab(tab, () => selectRightTab(tab));
+  };
+  useHotkeys([
+    { hotkey: appHotkeys["tab.next"], callback: () => cycleTab(1) },
+    { hotkey: appHotkeys["tab.previous"], callback: () => cycleTab(-1) },
+    { hotkey: appHotkeys["tab.nextArrow"], callback: () => cycleTab(1) },
+    { hotkey: appHotkeys["tab.previousArrow"], callback: () => cycleTab(-1) },
+    ...tabJumpHotkeys.map((hotkey, index) => ({
+      hotkey,
+      callback: () => focusOpenedTab(visibleRightTabs[index], () => selectRightTab(visibleRightTabs[index])),
+      options: { enabled: canSwitchTabs && index < visibleRightTabs.length },
+    })),
+  ], { enabled: canSwitchTabs, capture: true, preventDefault: "always", ignoreInputs: false });
+
   const isPreviewTab = (tab: RightTab) =>
     previewTab !== null && rightTabKey(previewTab) === rightTabKey(tab);
+  const tabShortcut = (tab: RightTab) => {
+    const index = visibleRightTabs.findIndex((item) => rightTabKey(item) === rightTabKey(tab));
+    return tabJumpHotkeys[index]?.hotkey;
+  };
   const renderFileTab = (tab: FileViewDef) => (
     <ClosableTab
+      shortcut={tabShortcut(tab)}
       key={`file:${fileTabKey(tab)}`}
       active={fileTab !== null && sameFileTab(fileTab, tab)}
       label={tab.path.split("/").pop() || tab.path}
@@ -1688,6 +1817,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       const experiment = experiments.find((item) => item.id === tab.id);
       return (
         <ClosableTab
+          shortcut={tabShortcut(tab)}
           key={rightTabKey(tab)}
           active={expTab !== null && sameExpTab(expTab, tab)}
           label={experiment ? experiment.title || experiment.slug : "…"}
@@ -1710,6 +1840,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if ("kind" in tab && tab.kind === "plan") {
       return (
         <ClosableTab
+          shortcut={tabShortcut(tab)}
           key={rightTabKey(tab)}
           active={planTab !== null && planTab.promptId === tab.promptId}
           label={m.chat_plan()}
@@ -1725,6 +1856,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       const session = sessionsQuery.data?.find((item) => item.id === tab.sessionId);
       return (
         <ClosableTab
+          shortcut={tabShortcut(tab)}
           key={rightTabKey(tab)}
           active={sideTab !== null && sideTab.sessionId === tab.sessionId}
           label={session?.title?.trim() || m.side_chat_open()}
@@ -1740,6 +1872,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if ("kind" in tab) {
       return (
         <ClosableTab
+          shortcut={tabShortcut(tab)}
           key={rightTabKey(tab)}
           active={subagentTab !== null && subagentTab.spawnPartId === tab.spawnPartId}
           label={spawnMeta[tab.spawnPartId]?.label ?? tab.label ?? m.app_subagent()}
@@ -1755,6 +1888,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     const experiment = experiments.find((item) => item.id === tab.experimentId);
     return (
       <ClosableTab
+        shortcut={tabShortcut(tab)}
         key={rightTabKey(tab)}
         active={codeTab !== null && sameCodeTab(codeTab, tab)}
         label={experiment?.slug ?? tab.branch}
@@ -1808,98 +1942,28 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const railHeader = (
     <RailHeader
-      onCollapse={() => setRailOpen(false)}
+      onCollapse={() => {
+        focusAfterRailChange.current = "show";
+        if (mobile) setMobileRailOpen(false);
+        else setRailOpen(false);
+      }}
     />
   );
 
-  const experimentToolbarActions = (
-    <div className="experiments-toolbar-controls inline-flex shrink-0 items-center gap-2">
-                    <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
-                      <IconButton
-                        ref={scopeTriggerRef}
-                        className="experiment-scope-trigger"
-                        active={effectiveScope === "agent"}
-                        title={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}
-                        aria-label={m.app_filter_experiments()}
-                        aria-expanded={scopeMenuOpen}
-                        onClick={() => setScopeMenuOpen((open) => !open)}
-                      >
-                        <Filter size={16} strokeWidth={2.5} />
-                      </IconButton>
-                      {scopeMenuOpen && (
-                        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
-                          <MenuItem
-                            aria-pressed={effectiveScope === "agent"}
-                            disabled={!activeSessionId || !allExperimentsAttributed}
-                            title={
-                              !activeSessionId
-                                ? m.app_open_task_to_filter()
-                                : !allExperimentsAttributed
-                                  ? m.app_filter_unavailable_unattributed()
-                                  : undefined
-                            }
-                            onClick={() => {
-                              setScope("agent");
-                              setScopeMenuOpen(false);
-                            }}
-                          >
-                            <span>{m.app_current_task()}</span>
-                            {effectiveScope === "agent" && <Check size={13} />}
-                          </MenuItem>
-                          <MenuItem
-                            aria-pressed={effectiveScope === "project"}
-                            onClick={() => {
-                              setScope("project");
-                              setScopeMenuOpen(false);
-                            }}
-                          >
-                            <span>{m.app_entire_project()}</span>
-                            {effectiveScope === "project" && <Check size={13} />}
-                          </MenuItem>
-                          <div className="my-1 border-t border-border-variant" />
-                          <MenuItem
-                            aria-pressed={showArchivedExperiments}
-                            onClick={() => {
-                              setTreeState((current) => ({ ...current, showArchived: !current.showArchived }));
-                              setScopeMenuOpen(false);
-                            }}
-                          >
-                            <span>{m.app_show_archived_experiments()}</span>
-                            {showArchivedExperiments && <Check size={13} />}
-                          </MenuItem>
-                        </div>
-                      )}
-                    </div>
-                    <div
-                      className="seg inline-flex items-center gap-0.5 rounded-md bg-hover-subtle [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle h-8 p-0.5 [&_button]:h-7 [&_button]:px-2.5 [&_button]:text-xs"
-                      role="group"
-                      aria-label={m.app_experiment_view()}
-                    >
-                      <button
-                        className={view === "table" ? "active" : ""}
-                        aria-pressed={view === "table"}
-                        onClick={() => setView("table")}
-                      >
-                        {m.app_table()}
-                      </button>
-                      <button
-                        className={view === "tree" ? "active" : ""}
-                        aria-pressed={view === "tree"}
-                        onClick={() => setView("tree")}
-                      >
-                        {m.app_tree()}
-                      </button>
-                    </div>
-                  </div>
-  );
-
   return (
-    <div className="app flex flex-col h-full">
-      {runtime.kind === "local" && <OfflineBanner />}
-      {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
+    <div className="app relative flex flex-col h-full">
+      {projectId && <div className="absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-2px/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-[calc(44px/min(1,var(--desktop-page-zoom,1)))] items-center mac-titlebar:flex">
+        <Tooltip interactive content={`${railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} className="rounded-md">
+          <IconButton aria-label={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} aria-expanded={railVisible} onClick={toggleSidebar}>
+            <PanelLeft size={18} />
+          </IconButton>
+        </Tooltip>
+      </div>}
+      {runtime.kind === "local" && <OfflineBanner hasSidebar={Boolean(projectId)} />}
+      {runtime.kind === "local" && <UpdateBanner status={updateStatus} hasSidebar={Boolean(projectId)} />}
       <DesktopAppBanner />
-      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-controls win-titlebar:pe-win-controls py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
-      <div className={`app-body workspace-body relative flex flex-1 min-h-0 py-0 px-3.5 ${workspaceCardVisible ? "workspace-card-visible" : ""} ${!panelOpen && !workspaceCardVisible ? "workspace-tools-labeled" : ""}`}>
+      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-sidebar-controls mac-titlebar:min-h-titlebar win-titlebar:pe-win-controls py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
+      <div ref={bodyRef} className={`app-body workspace-body relative flex flex-1 min-h-0 ${stackPanel ? "flex-col [&>.chat-pane]:overflow-y-auto [&_.chat-empty]:min-h-0 [&_.chat-empty]:overflow-y-auto [&_.chat-empty]:justify-start [&_.chat-empty]:p-0" : ""} ${workspaceCardVisible ? "workspace-card-visible" : ""} ${mainView === "chat" && workspaceReady && !conversationError ? "has-workspace-tools" : ""}`}>
         {projectId && (
           <ChatPanel
             projectId={projectId}
@@ -1908,11 +1972,21 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             contentError={conversationError || null}
             onRetryContent={retryConversation}
             railHeader={railHeader}
-            railOpen={railOpen}
-            onShowRail={() => setRailOpen(true)}
-            onNewProject={() => setNewProjectOpen(true)}
+            railOpen={railVisible}
+            mobileRail={mobile}
+            onCloseMobileRail={() => setMobileRailOpen(false)}
+            contentInert={mobile && panelOpen && mainView === "chat"}
+            onShowRail={() => {
+              if (mobile) setMobileRailOpen(true);
+              else {
+                focusAfterRailChange.current = "rail";
+                setRailOpen(true);
+                if (railTemporarilyHidden) closePanel();
+              }
+            }}
+            onNewProject={() => { setMobileRailOpen(false); setNewProjectOpen(true); }}
             mainView={mainView}
-            onSelectMainView={selectMainView}
+            onSelectMainView={(view) => { setMobileRailOpen(false); selectMainView(view); }}
             onOpenFile={openChatFile}
             onOpenRun={openRunLogs}
             runExperimentName={runExperimentName}
@@ -1925,7 +1999,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             composerFocusNonce={composerFocusNonce}
             runtime={runtime}
             activeSessionId={activeSessionId}
-            onActiveSessionChange={onActiveSessionChange}
+            onActiveSessionChange={(...args) => { setMobileRailOpen(false); onActiveSessionChange(...args); }}
             preferredAgent={uiState.preferredAgent}
             onPreferredAgentChange={persistPreferredAgent}
             preferredAutonomy={uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
@@ -1952,17 +2026,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             experiments={experiments}
             runs={runs}
             onOpenExperiment={(id, runId) => openExperimentTab(id, "overview", "preview", runId)}
-            rightOffset={panelOpen ? panelWidth + 14 : undefined}
-            activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") ? rightTab : null}
+            rightOffset={panelOpen && !stackPanel ? visiblePanelWidth + 14 : undefined}
+            activeView={activeWorkspaceView}
             projectId={activeProject.id}
-            onCompute={() => selectMainView("compute")}
+            onCompute={() => focusOpenedView("compute")}
             sessionId={activeSessionId}
             busy={sessionsQuery.data?.some((session) => session.id === activeSessionId && session.busy) ?? false}
-            onChanges={() => { setFilesView("changes"); openWorktreeTab(); }}
-            onFiles={() => { setFilesView("files"); openWorktreeTab(); }}
-            onTerminal={openTerminalTab}
-            onArtifacts={openArtifactsTab}
-            onExperiments={() => openExperimentsTab()}
+            onChanges={() => focusOpenedTab("files", () => { setFilesView("changes"); openWorktreeTab(); })}
+            onFiles={() => focusOpenedTab("files", () => { setFilesView("files"); openWorktreeTab(); })}
+            onTerminal={() => focusOpenedTab("terminal", openTerminalTab)}
+            onArtifacts={() => focusOpenedTab("artifacts", openArtifactsTab)}
+            onExperiments={() => focusOpenedTab("experiments", openExperimentsTab)}
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}
             sessions={sessionsQuery.data ?? []}
             onSelectSideChat={focusSideTab}
@@ -1970,76 +2044,50 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         )}
         {mainView === "chat" && panelOpen && (
           <aside
-            className={`right-pane relative shrink-0 min-w-0 flex flex-col win-titlebar:pt-win-caption bg-background [&.max]:fixed [&.max]:inset-0 mac-titlebar:[&.max]:pt-titlebar [&.max]:z-60 [&.max]:border-s-0 border-s border-s-border overflow-hidden ${panelMax ? "max" : ""}`}
-            style={panelMax ? undefined : { width: panelWidth }}
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col bg-background [&.max]:fixed [&.max]:inset-0 [&.max]:z-60 [&.max]:border-s-0 overflow-hidden ${stackPanel ? "border-t border-t-border" : "border-s border-s-border"} ${panelMax ? "max" : ""}`}
+            style={mobile || panelMax ? undefined : stackPanel ? { width: "100%", height: "50%" } : { width: visiblePanelWidth }}
             data-onboarding="experiments"
           >
-            <div
+            {!stackPanel && <div
               className={`panel-resizer absolute start-0 top-0 bottom-0 w-1.5 z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover ${panelMax ? "cursor-e-resize" : "cursor-col-resize"}`}
               title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
               onPointerDown={resizePanel}
-            />
-            <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 mac-titlebar:h-titlebar border-b border-b-border bg-background shrink-0">
+            />}
+            <div className={`tabs relative flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 mac-titlebar:h-titlebar bg-background shrink-0 after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-border ${panelMax ? "mac-titlebar:ps-titlebar-controls" : ""}`}>
               <TabStrip activeKey={rightTabKey(rightTab)}>
-                {leadingFileTabs.map(renderFileTab)}
-                {filesTabOpen && (
-                  <ClosableTab
-                    active={rightTab === "files"}
-                    label={m.app_files()}
-                    icon={<FolderOpen size={12} className="shrink-0" />}
-                    onSelect={() => selectRightTab("files")}
-                    onClose={() => closeHomeTab("files")}
-                  />
-                )}
-                {terminalTabOpen && (
-                  <ClosableTab
-                    active={rightTab === "terminal"}
-                    label={m.workspace_terminal()}
-                    icon={<Terminal size={12} className="shrink-0" />}
-                    onSelect={() => selectRightTab("terminal")}
-                    onClose={() => closeHomeTab("terminal")}
-                  />
-                )}
-                {artifactsTabOpen && (
-                  <ClosableTab
-                    active={rightTab === "artifacts"}
-                    label={m.app_artifacts()}
-                    icon={<Package size={12} className="shrink-0" />}
-                    onSelect={() => selectRightTab("artifacts")}
-                    onClose={() => closeHomeTab("artifacts")}
-                  />
-                )}
-                {experimentsTabOpen && (
-                  <ClosableTab
-                    active={rightTab === "experiments"}
-                    label={m.app_experiments()}
-                    icon={<FlaskConical size={12} className="shrink-0" />}
-                    onSelect={() => selectRightTab("experiments")}
-                    onClose={() => closeHomeTab("experiments")}
-                  />
-                )}
-                {orderedContentTabs.map(renderContentTab)}
+                {visibleRightTabs.map((tab) => {
+                  if (typeof tab !== "string") return renderContentTab(tab);
+                  const home = homeTabs.find((home) => home.id === tab);
+                  if (!home) return null;
+                  const Icon = home.icon;
+                  return <ClosableTab key={tab} shortcut={tabShortcut(tab)} active={rightTab === tab} label={home.label}
+                    icon={<Icon size={12} className="shrink-0" />}
+                    onSelect={() => selectRightTab(tab)} onClose={() => closeHomeTab(tab)} />;
+                })}
               </TabStrip>
               <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
-                <IconButton
-                  title={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
-                  aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
-                  onClick={() => setPanelMax((m) => !m)}
-                >
-                  {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-                </IconButton>
-                <IconButton
-                  title={m.app_close_panel()}
-                  aria-label={m.app_close_panel()}
-                  onClick={() => {
-                    closePanel();
-                    setPanelMax(false);
-                  }}
-                >
-                  <X size={14} />
-                </IconButton>
+                <Tooltip interactive content={panelMax ? m.app_restore_panel() : m.app_expand_panel()}>
+                  <IconButton
+                    aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
+                    onClick={() => setPanelMax((m) => !m)}
+                  >
+                    {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                  </IconButton>
+                </Tooltip>
+                <Tooltip interactive content={m.app_close_panel()}>
+                  <IconButton
+                    aria-label={m.app_close_panel()}
+                    onClick={() => {
+                      closePanel();
+                      setPanelMax(false);
+                    }}
+                  >
+                    <X size={14} />
+                  </IconButton>
+                </Tooltip>
               </div>
             </div>
+            <div data-workspace-content role="region" aria-labelledby="active-workspace-tab" tabIndex={-1} onKeyDown={navigateKeyboardList} className="relative flex min-h-0 flex-1 flex-col focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-50 focus-visible:after:border-2 focus-visible:after:border-focus focus-visible:after:content-['']">
             {/* The terminal body is the standalone TabBody after this chain. */}
             {rightTab === "terminal" && terminalTabOpen ? null : !workspaceReady || ((pane?.kind === "experiment" || pane?.kind === "code") && !experimentDataReady) || (pane?.kind === "experiment" && pane.runId && !runDataReady) ? (
               <TabBody><Spinner /></TabBody>
@@ -2063,6 +2111,123 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             ) : rightTab === "experiments" ? (
               <TabBody>
+                <div className="pane-toolbar flex shrink-0 flex-wrap items-center gap-2 bg-background px-3 pt-2.5 pb-2">
+                  <div className="experiments-toolbar-controls flex w-full items-center gap-1">
+                    {view === "table" && (
+                      <Tooltip interactive content={m.history_order()}>
+                      <OptionPicker
+                        triggerIcon={<ArrowDownWideNarrow size={16} />}
+                        choices={[
+                          { id: "lineage", label: m.history_lineage() },
+                          { id: "oldest", label: m.history_order_oldest() },
+                          { id: "newest", label: m.history_order_newest() },
+                        ]}
+                        value={tableOrder}
+                        header={m.history_order()}
+                        title={m.history_order()}
+                        variant="bare"
+                        dropDown
+                        align="left"
+                        onSelect={(id) => {
+                          if (id === "lineage" || id === "oldest" || id === "newest") setTableOrder(id);
+                        }}
+                      />
+                      </Tooltip>
+                    )}
+                    {view === "table" && (
+                      <Tooltip interactive content={m.history_show_lineage()}>
+                        <IconButton
+                          size="small"
+                          active={showTableLineage && tableOrder === "lineage"}
+                          className="[&.active]:text-text"
+                          disabled={tableOrder !== "lineage"}
+                          aria-label={m.history_show_lineage()}
+                          aria-pressed={showTableLineage && tableOrder === "lineage"}
+                          onClick={() => setShowTableLineage((show) => !show)}
+                        >
+                          <GitBranch size={16} />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                    <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
+                      <Tooltip interactive content={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}>
+                        <IconButton size="small"
+                          ref={scopeTriggerRef}
+                          className="experiment-scope-trigger"
+                          active={effectiveScope === "agent"}
+                          aria-label={m.app_filter_experiments()}
+                          aria-expanded={scopeMenuOpen}
+                          onClick={() => setScopeMenuOpen((open) => !open)}
+                        >
+                          <Filter size={16} strokeWidth={2.5} />
+                        </IconButton>
+                      </Tooltip>
+                      {scopeMenuOpen && (
+                        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
+                          <MenuItem
+                            aria-pressed={effectiveScope === "agent"}
+                            aria-describedby={!activeSessionId || !allExperimentsAttributed ? "experiment-scope-unavailable" : undefined}
+                            disabled={!activeSessionId || !allExperimentsAttributed}
+                            onClick={() => {
+                              setScope("agent");
+                              setScopeMenuOpen(false);
+                            }}
+                          >
+                            <span>{m.app_current_task()}</span>
+                            {effectiveScope === "agent" && <Check size={14} />}
+                          </MenuItem>
+                          {(!activeSessionId || !allExperimentsAttributed) && (
+                            <p id="experiment-scope-unavailable" className="px-2 pb-1 text-xs text-muted">
+                              {!activeSessionId ? m.app_open_task_to_filter() : m.app_filter_unavailable_unattributed()}
+                            </p>
+                          )}
+                          <MenuItem
+                            aria-pressed={effectiveScope === "project"}
+                            onClick={() => {
+                              setScope("project");
+                              setScopeMenuOpen(false);
+                            }}
+                          >
+                            <span>{m.app_entire_project()}</span>
+                            {effectiveScope === "project" && <Check size={14} />}
+                          </MenuItem>
+                          <div className="my-1 border-t border-border-variant" />
+                          <MenuItem
+                            aria-pressed={showArchivedExperiments}
+                            onClick={() => {
+                              setShowArchivedExperiments((show) => !show);
+                              setScopeMenuOpen(false);
+                            }}
+                          >
+                            <span>{m.app_show_archived_experiments()}</span>
+                            {showArchivedExperiments && <Check size={14} />}
+                          </MenuItem>
+                        </div>
+                      )}
+                    </div>
+                    <span className="flex-1" />
+                    <div
+                      className={`${SEGMENTED_CLASS_NAME} experiments-view-toggle`}
+                      role="group"
+                      aria-label={m.app_experiment_view()}
+                    >
+                      <button
+                        className={view === "table" ? "active" : ""}
+                        aria-pressed={view === "table"}
+                        onClick={() => setView("table")}
+                      >
+                        {m.app_table()}
+                      </button>
+                      <button
+                        className={view === "tree" ? "active" : ""}
+                        aria-pressed={view === "tree"}
+                        onClick={() => setView("tree")}
+                      >
+                        {m.app_tree()}
+                      </button>
+                    </div>
+                  </div>
+                </div>
                 <div className="pane-content flex-1 min-h-0 relative bg-background">
                   {view === "tree" ? (
                     activeProject && (
@@ -2081,15 +2246,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         onRestoreRegion={restoreArchivedRegion}
                         viewport={treeViewport}
                         onViewportChange={setTreeViewport}
-                        state={treeState}
-                        onStateChange={setTreeState}
-                        onCancel={cancelRun}
-                        toolbarActions={experimentToolbarActions}
                       />
                     )
                   ) : view === "table" ? (
                     <ExperimentsTable
-                      toolbarActions={experimentToolbarActions}
+                      showLineage={showTableLineage && tableOrder === "lineage"}
+                      order={tableOrder}
                       archiveActions={archiveActions}
                       runs={scopedRuns}
                       emptyHint={
@@ -2301,6 +2463,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         if (sessionId === null && deleted) forgetSideTab(sideTab);
                         else onActiveSessionChange(sessionId, options);
                       }}
+                      onStartHarnessDraft={() => onActiveSessionChange(null, { projectId })}
                       preferredAgent={sideTab.sessionId === null ? sideDraftAgent : uiState.preferredAgent}
                       onPreferredAgentChange={persistPreferredAgent}
                       preferredAutonomy={sideTab.sessionId === null ? sideParentSession?.autonomy ?? DEFAULT_AUTONOMY : uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
@@ -2432,6 +2595,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 />
               </TabBody>
             )}
+            </div>
           </aside>
         )}
       </div>
@@ -2452,6 +2616,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           onCreateProject={createProjectFromDemoWelcome}
         />
       )}
+      <EscapeScope enabled={scopeMenuOpen} onEscape={() => { setScopeMenuOpen(false); scopeTriggerRef.current?.focus(); }} />
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { useLocale } from "../locale";
@@ -22,7 +23,7 @@ import { highlight } from "../syntaxHighlight";
 import { remarkFigures } from "../remarkFigures";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-import { Button, IconButton, IconButtonLink } from "./ui";
+import { Button, IconButton, IconButtonLink, Tooltip } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { DiagramBlock } from "./DiagramBlock";
@@ -90,7 +91,7 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
   const fit = size.width && bounds.width
     ? Math.min(1, bounds.width * 0.9 / size.width, bounds.height * 0.9 / size.height)
     : 1;
-  return createPortal(
+  return <EscapeScope onEscape={onClose}>{createPortal(
     <dialog ref={ref} tabIndex={-1} aria-label={alt || m.chat_pasted_image()}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       className="fixed inset-0 m-0 max-w-none max-h-none w-full h-dvh border-0 outline-none bg-transparent p-0 text-text backdrop:bg-image-backdrop"
@@ -104,23 +105,33 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
         </div>
       </div>
       <div className="absolute top-5 right-5 flex gap-2">
-        <IconButtonLink shape="circle" href={src} download={name || true} aria-label={m.media_preview_download()} title={m.media_preview_download()}
-          className="bg-background shadow-popover"><Download size={16} /></IconButtonLink>
-        <IconButton shape="circle" onClick={onClose} aria-label={m.tour_close()} title={m.tour_close()}
-          className="bg-background shadow-popover"><X size={16} /></IconButton>
+        <Tooltip interactive content={m.media_preview_download()}>
+          <IconButtonLink shape="circle" href={src} download={name || true} aria-label={m.media_preview_download()}
+            className="bg-background shadow-popover"><Download size={16} /></IconButtonLink>
+        </Tooltip>
+        <Tooltip interactive content={m.tour_close()}>
+          <IconButton shape="circle" onClick={onClose} aria-label={m.tour_close()}
+            className="bg-background shadow-popover"><X size={16} /></IconButton>
+        </Tooltip>
       </div>
       <div className="absolute bottom-6 inset-x-6 flex flex-col items-center gap-3 pointer-events-none">
         {alt && <div className="max-w-xl line-clamp-2 rounded-xl bg-background px-4 py-2 text-center text-sm leading-snug shadow-popover">{alt}</div>}
         <div className="pointer-events-auto flex items-center gap-1 rounded-full bg-background p-1.5 shadow-popover">
-          <IconButton shape="circle" disabled={zoom <= 0.25} onClick={() => setZoom((value) => Math.max(0.25, value - 0.25))}
-            aria-label={m.image_zoom_out()} title={m.image_zoom_out()}><Minus size={16} /></IconButton>
-          <Button variant="ghost" className="min-w-16 tabular-nums" onClick={() => setZoom(1)} title={m.image_zoom_reset()} aria-label={m.image_zoom_reset()}>{Math.round(zoom * 100)}%</Button>
-          <IconButton shape="circle" disabled={zoom >= 4} onClick={() => setZoom((value) => Math.min(4, value + 0.25))}
-            aria-label={m.image_zoom_in()} title={m.image_zoom_in()}><Plus size={16} /></IconButton>
+          <Tooltip interactive content={m.image_zoom_out()}>
+            <IconButton shape="circle" disabled={zoom <= 0.25} onClick={() => setZoom((value) => Math.max(0.25, value - 0.25))}
+              aria-label={m.image_zoom_out()}><Minus size={16} /></IconButton>
+          </Tooltip>
+          <Tooltip interactive content={m.image_zoom_reset()}>
+            <Button variant="ghost" className="min-w-16 tabular-nums" onClick={() => setZoom(1)} aria-label={m.image_zoom_reset()}>{Math.round(zoom * 100)}%</Button>
+          </Tooltip>
+          <Tooltip interactive content={m.image_zoom_in()}>
+            <IconButton shape="circle" disabled={zoom >= 4} onClick={() => setZoom((value) => Math.min(4, value + 0.25))}
+              aria-label={m.image_zoom_in()}><Plus size={16} /></IconButton>
+          </Tooltip>
         </div>
       </div>
     </dialog>, document.body,
-  );
+  )}</EscapeScope>;
 }
 
 function MarkdownImage({ sources, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { sources: string[]; downloadName?: string }) {
@@ -156,9 +167,11 @@ function CodeBlock({ code, lang }: { code: string; lang: string | null }) {
   };
   return (
     <div className="md-code relative my-2.5 mx-0 [&_pre]:m-0 [&:hover_.md-code-copy]:opacity-100">
-      <IconButton size="small" className="md-code-copy absolute top-1.5 end-1.5 bg-background opacity-0" title={m.md_copy()} aria-label={m.md_copy_code()} onClick={copy}>
-        {copied ? <Check size={14} /> : <Copy size={14} />}
-      </IconButton>
+      <Tooltip interactive content={m.md_copy()} className="md-code-copy absolute top-1.5 end-1.5 opacity-0 focus-within:opacity-100">
+        <IconButton size="small" className="bg-background" aria-description={m.md_copy()} aria-label={m.md_copy_code()} onClick={copy}>
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+        </IconButton>
+      </Tooltip>
       <pre>
         <code>{highlight(code, lang, HIGHLIGHT_MAX_BYTES)}</code>
       </pre>

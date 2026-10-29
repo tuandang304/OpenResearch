@@ -198,6 +198,8 @@ pub(crate) struct Settings {
     /// Absent = `auto_compact::DEFAULT_MAX_TOKENS`; `0` = no token limit.
     #[serde(default)]
     pub auto_compact_max_tokens: Option<u64>,
+    #[serde(default)]
+    pub update_channel: Option<crate::updates::ReleaseChannel>,
     /// Surfaces whose `first_action` event has already been sent, so a restart
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
@@ -411,6 +413,16 @@ pub(crate) fn cross_harness_excluded() -> Vec<String> {
 
 pub(crate) fn set_cross_harness_excluded(excluded: Vec<String>) -> std::io::Result<()> {
     mutate_settings(|settings| settings.cross_harness_excluded = excluded)
+}
+
+pub(crate) fn update_channel() -> crate::updates::ReleaseChannel {
+    load_settings()
+        .and_then(|settings| settings.update_channel)
+        .unwrap_or_else(crate::updates::current_release_channel)
+}
+
+pub(crate) fn set_update_channel(channel: crate::updates::ReleaseChannel) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.update_channel = Some(channel))
 }
 
 pub(crate) fn github_default_prompt_seen() -> bool {

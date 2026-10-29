@@ -326,6 +326,15 @@ fn opens_in_browser(url: &str) -> bool {
         .any(|scheme| url.starts_with(scheme))
 }
 
+/// The dashboard path an `openresearch://reproduce/<paper id>` link opens; the page validates the id.
+#[cfg_attr(not(all(desktop_app, target_os = "macos")), allow(dead_code))]
+fn deep_link_path(scheme: &str, host: Option<&str>, path: &str) -> Option<String> {
+    if scheme != "openresearch" || host != Some("reproduce") || path.len() < 2 {
+        return None;
+    }
+    Some(format!("/reproduce{path}"))
+}
+
 #[cfg(windows)]
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -596,19 +605,21 @@ mod imp {
 
     #[cfg(target_os = "macos")]
     use muda::{
-        accelerator::{Accelerator, Code, Modifiers},
-        AboutMetadata, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+        accelerator::Accelerator, AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem,
+        MenuItemKind, PredefinedMenuItem, Submenu,
     };
     #[cfg(target_os = "macos")]
-    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, NSObjectProtocol, Sel};
     #[cfg(target_os = "macos")]
     use objc2::MainThreadMarker;
     #[cfg(target_os = "macos")]
-    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication};
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSWritingToolsBehavior};
     #[cfg(target_os = "macos")]
     use objc2_foundation::NSString;
     #[cfg(target_os = "macos")]
-    use wry::WebViewExtMacOS;
+    use objc2_web_kit::WKWebViewConfiguration;
+    #[cfg(target_os = "macos")]
+    use wry::{WebViewBuilderExtMacos, WebViewExtMacOS};
 
     #[cfg(target_os = "macos")]
     const MACOS_ESCAPE_SCRIPT: &str = r#"
@@ -633,8 +644,15 @@ mod imp {
         Zoom(ZoomAction),
         #[cfg(target_os = "macos")]
         Menu(MenuId),
+        #[cfg(target_os = "macos")]
+        MenuSpec(Vec<PageMenu>),
+        #[cfg(target_os = "macos")]
+        MenuState(HashMap<String, PageMenuState>),
         #[cfg(not(target_os = "macos"))]
         Focus,
+        /// The dashboard page finished loading and can take `orx:open-path`.
+        #[cfg(target_os = "macos")]
+        PageReady,
         #[cfg(windows)]
         Close,
         #[cfg(windows)]
@@ -738,8 +756,10 @@ mod imp {
         set_taskbar_identity();
 
         #[cfg(target_os = "macos")]
-        let (menu, quit_item, reload_item) = {
-            let menu_proxy = event_loop.create_proxy();
+        let mut menu = Menu::new();
+        #[cfg(target_os = "macos")]
+        {
+            let proxy = event_loop.create_proxy();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 let action = match event.id.as_ref() {
                     "zoom-in" => Some(ZoomAction::In),
@@ -751,39 +771,9 @@ mod imp {
                     Some(action) => UserEvent::Zoom(action),
                     None => UserEvent::Menu(event.id),
                 };
-                let _ = menu_proxy.send_event(event);
+                let _ = proxy.send_event(event);
             }));
-            let quit = MenuItem::new(
-                "Quit OpenResearch",
-                true,
-                Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
-            );
-            let reload = MenuItem::new(
-                "Reload",
-                true,
-                Some(Accelerator::new(Modifiers::META, Code::KeyR)),
-            );
-            let zoom_items = [
-                ("zoom-in", "Zoom In", Code::Equal),
-                ("zoom-out", "Zoom Out", Code::Minus),
-                ("zoom-reset", "Actual Size", Code::Digit0),
-            ]
-            .map(|(id, title, key)| {
-                MenuItem::with_id(
-                    id,
-                    title,
-                    true,
-                    Some(Accelerator::new(Modifiers::META, key)),
-                )
-            });
-            match build_menu(&quit, &reload, &zoom_items) {
-                Ok(menu) => (menu, quit, reload),
-                Err(err) => {
-                    crate::show_error_dialog(&format!("Could not build the menu bar: {err}"));
-                    return;
-                }
-            }
-        };
+        }
 
         let window = WindowBuilder::new()
             .with_title("OpenResearch")
@@ -833,6 +823,8 @@ mod imp {
         );
 
         let shown = Rc::new(Cell::new(false));
+        #[cfg(target_os = "macos")]
+        let page_ready = Rc::new(Cell::new(false));
         let replaced = Rc::new(RefCell::new(HashMap::new()));
         let builder = WebViewBuilder::new()
             .with_accept_first_mouse(true)
@@ -867,13 +859,24 @@ mod imp {
                 let window = window.clone();
                 let origin = origin.clone();
                 let shown = shown.clone();
+                #[cfg(target_os = "macos")]
+                let page_ready = page_ready.clone();
                 let proxy = event_loop.create_proxy();
                 move |event, url| {
+                    #[cfg(target_os = "macos")]
+                    if matches!(event, PageLoadEvent::Started) {
+                        page_ready.set(false);
+                    }
                     if !matches!(event, PageLoadEvent::Finished) {
                         return;
                     }
                     if super::is_dashboard_url(&url, &origin) {
                         let _ = proxy.send_event(UserEvent::SyncZoom);
+                        #[cfg(target_os = "macos")]
+                        {
+                            page_ready.set(true);
+                            let _ = proxy.send_event(UserEvent::PageReady);
+                        }
                     }
                     #[cfg(windows)]
                     let _ = proxy.send_event(UserEvent::SyncMaximized);
@@ -883,6 +886,11 @@ mod imp {
                     }
                 }
             });
+        #[cfg(windows)]
+        let builder = {
+            use wry::WebViewBuilderExtWindows;
+            builder.with_browser_accelerator_keys(false)
+        };
         let builder = builder.with_ipc_handler({
             #[cfg(not(target_os = "linux"))]
             let window = window.clone();
@@ -927,7 +935,25 @@ mod imp {
                     _ => {}
                     #[cfg(target_os = "macos")]
                     _ => {
-                        if let Some((appearance, color)) = parse_titlebar_message(message) {
+                        if let Some(spec) = message.strip_prefix("menu:spec:") {
+                            match serde_json::from_str(spec) {
+                                Ok(spec) => {
+                                    let _ = proxy.send_event(UserEvent::MenuSpec(spec));
+                                }
+                                Err(error) => {
+                                    eprintln!("openresearch app: invalid menu spec: {error}")
+                                }
+                            }
+                        } else if let Some(state) = message.strip_prefix("menu:state:") {
+                            match serde_json::from_str(state) {
+                                Ok(state) => {
+                                    let _ = proxy.send_event(UserEvent::MenuState(state));
+                                }
+                                Err(error) => {
+                                    eprintln!("openresearch app: invalid menu state: {error}")
+                                }
+                            }
+                        } else if let Some((appearance, color)) = parse_titlebar_message(message) {
                             set_titlebar_color(&window, appearance, color);
                         }
                     }
@@ -939,6 +965,17 @@ mod imp {
         let builder = builder
             .with_initialization_script("window.__ORX_MAC_TITLEBAR__ = true;")
             .with_initialization_script_for_main_only(MACOS_ESCAPE_SCRIPT, false);
+        #[cfg(target_os = "macos")]
+        let builder = {
+            let mtm = MainThreadMarker::new().expect("desktop app runs on the main thread");
+            let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+            if configuration.respondsToSelector(objc2::sel!(setWritingToolsBehavior:)) {
+                unsafe {
+                    let _: () = objc2::msg_send![&*configuration, setWritingToolsBehavior: NSWritingToolsBehavior::None];
+                }
+            }
+            builder.with_webview_configuration(configuration)
+        };
         #[cfg(windows)]
         let builder = builder.with_initialization_script("window.__ORX_WIN_TITLEBAR__ = true;");
         #[cfg(not(target_os = "linux"))]
@@ -967,7 +1004,12 @@ mod imp {
         if let Err(error) = sync_page_zoom(&webview, zoom_percent, false) {
             eprintln!("openresearch app: could not restore page zoom: {error}");
         }
+        #[cfg(target_os = "macos")]
+        align_traffic_lights(&window, zoom_percent);
         let mut quit = Quit::No;
+        // A link that opens the app arrives before its server answers.
+        #[cfg(target_os = "macos")]
+        let (mut server_ready, mut pending_link) = (false, None::<String>);
         // What the loaded page was last told; a new page starts unmaximized.
         #[cfg(windows)]
         let mut page_maximized = false;
@@ -993,7 +1035,14 @@ mod imp {
                 Quit::ShuttingDown => *control_flow = ControlFlow::Exit,
             },
             Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
-                let _ = webview.load_url(&format!("{origin}/"));
+                #[cfg(target_os = "macos")]
+                let path = {
+                    server_ready = true;
+                    pending_link.take().unwrap_or_else(|| "/".to_string())
+                };
+                #[cfg(not(target_os = "macos"))]
+                let path = "/";
+                let _ = webview.load_url(&format!("{origin}{path}"));
             }
             // A window that never appears is worse than a blank one.
             Event::UserEvent(UserEvent::LoadTimedOut)
@@ -1021,12 +1070,50 @@ mod imp {
                 sync_maximized(&webview, page_maximized);
             }
             #[cfg(target_os = "macos")]
-            Event::UserEvent(UserEvent::Menu(id)) if id == quit_item.id() => {
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_),
+                ..
+            } => align_traffic_lights(&window, zoom_percent),
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::Menu(id)) if id.as_ref() == "app.quit" => {
                 begin_quit(&mut quit, &window, &webview, control_flow);
             }
             #[cfg(target_os = "macos")]
-            Event::UserEvent(UserEvent::Menu(id)) if id == reload_item.id() => {
-                let _ = webview.reload();
+            Event::UserEvent(UserEvent::Menu(id)) if id.as_ref() == "window.close" => {
+                NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::MenuSpec(spec)) => match build_menu(&spec) {
+                Ok(next) => {
+                    next.init_for_nsapp();
+                    menu = next;
+                }
+                Err(error) => eprintln!("openresearch app: could not build menu: {error}"),
+            },
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::MenuState(states)) => {
+                for submenu in menu.items().iter().filter_map(MenuItemKind::as_submenu) {
+                    for item in submenu.items() {
+                        let Some(state) = states.get(item.id().as_ref()) else { continue; };
+                        match item {
+                            MenuItemKind::MenuItem(item) => {
+                                if let Some(enabled) = state.enabled { item.set_enabled(enabled); }
+                            }
+                            MenuItemKind::Check(item) => {
+                                if let Some(enabled) = state.enabled { item.set_enabled(enabled); }
+                                if let Some(checked) = state.checked { item.set_checked(checked); }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::Menu(id)) => {
+                let _ = webview.evaluate_script(&format!(
+                    "window.dispatchEvent(new CustomEvent('orx:command', {{ detail: {} }}));",
+                    serde_json::Value::from(id.as_ref())
+                ));
             }
             Event::UserEvent(UserEvent::Zoom(action)) if matches!(quit, Quit::No) => {
                 let next = action.next(zoom_percent);
@@ -1034,6 +1121,8 @@ mod imp {
                     Ok(()) => {
                         if next != zoom_percent {
                             zoom_percent = next;
+                            #[cfg(target_os = "macos")]
+                            align_traffic_lights(&window, zoom_percent);
                             if let Err(error) = crate::config::set_desktop_zoom_percent(next) {
                                 eprintln!("openresearch app: could not save page zoom: {error}");
                             }
@@ -1059,8 +1148,12 @@ mod imp {
                 ..
             } => {
                 #[cfg(target_os = "macos")]
-                // AppKit switches Spaces when hiding the app, unlike ordering out its window.
-                NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
+                if external_server {
+                    begin_quit(&mut quit, &window, &webview, control_flow);
+                } else {
+                    // AppKit switches Spaces when hiding the app, unlike ordering out its window.
+                    NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
+                }
                 #[cfg(not(target_os = "macos"))]
                 begin_quit(&mut quit, &window, &webview, control_flow);
             }
@@ -1070,8 +1163,51 @@ mod imp {
                 window.set_visible(true);
                 window.set_focus();
             }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::PageReady) if matches!(quit, Quit::No) => {
+                if let Some(path) = pending_link.take() {
+                    open_in_page(&webview, &path);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Event::Opened { urls } if matches!(quit, Quit::No) => {
+                let Some(path) = urls
+                    .iter()
+                    .find_map(|url| super::deep_link_path(url.scheme(), url.host_str(), url.path()))
+                else {
+                    return;
+                };
+                if page_ready.get() {
+                    open_in_page(&webview, &path);
+                } else if server_ready
+                    && !webview
+                        .url()
+                        .is_ok_and(|url| super::is_dashboard_url(&url, &origin))
+                {
+                    // A timed-out or failed first load has nothing coming to deliver it.
+                    let _ = webview.load_url(&format!("{origin}{path}"));
+                } else {
+                    // ServerReady loads it, or PageReady hands it to the loading page.
+                    pending_link = Some(path);
+                }
+                // Before the first page shows, the page-load handler reveals the window.
+                if shown.get() {
+                    window.set_minimized(false);
+                    window.set_visible(true);
+                    window.set_focus();
+                }
+            }
             _ => {}
         })
+    }
+
+    /// In-page navigation keeps the page's unsaved-work guards; a reload would skip them.
+    #[cfg(target_os = "macos")]
+    fn open_in_page(webview: &WebView, path: &str) {
+        let _ = webview.evaluate_script(&format!(
+            "window.dispatchEvent(new CustomEvent('orx:open-path', {{ detail: {} }}));",
+            serde_json::Value::from(path)
+        ));
     }
 
     fn begin_quit(
@@ -1173,69 +1309,136 @@ mod imp {
     }
 
     #[cfg(target_os = "macos")]
-    fn build_menu(
-        quit: &MenuItem,
-        reload: &MenuItem,
-        zoom_items: &[MenuItem; 3],
-    ) -> muda::Result<Menu> {
-        let about = AboutMetadata {
-            name: Some("OpenResearch".into()),
-            version: Some(env!("CARGO_PKG_VERSION").into()),
-            ..Default::default()
-        };
-        Menu::with_items(&[
-            &Submenu::with_items(
-                "OpenResearch",
-                true,
-                &[
-                    &PredefinedMenuItem::about(None, Some(about)),
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::services(None),
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::hide(None),
-                    &PredefinedMenuItem::hide_others(None),
-                    &PredefinedMenuItem::show_all(None),
-                    &PredefinedMenuItem::separator(),
-                    quit,
-                ],
-            )?,
-            &Submenu::with_items(
-                "Edit",
-                true,
-                &[
-                    &PredefinedMenuItem::undo(None),
-                    &PredefinedMenuItem::redo(None),
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::cut(None),
-                    &PredefinedMenuItem::copy(None),
-                    &PredefinedMenuItem::paste(None),
-                    &PredefinedMenuItem::select_all(None),
-                ],
-            )?,
-            &Submenu::with_items(
-                "View",
-                true,
-                &[
-                    reload,
-                    &PredefinedMenuItem::separator(),
-                    &zoom_items[0],
-                    &zoom_items[1],
-                    &zoom_items[2],
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::fullscreen(None),
-                ],
-            )?,
-            &Submenu::with_items(
-                "Window",
-                true,
-                &[
-                    &PredefinedMenuItem::minimize(None),
-                    &PredefinedMenuItem::maximize(None),
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::close_window(None),
-                ],
-            )?,
-        ])
+    fn align_traffic_lights(window: &Window, percent: i32) {
+        use objc2_app_kit::{NSWindow, NSWindowButton};
+        use objc2_foundation::NSPoint;
+        use tao::dpi::LogicalPosition;
+        use tao::platform::macos::WindowExtMacOS;
+
+        let zoom = (f64::from(percent) / 100.0).max(1.0);
+        // Tao owns this window for the duration of the main-thread event.
+        let native_window = unsafe { &*window.ns_window().cast::<NSWindow>() };
+        let inset = native_window
+            .standardWindowButton(NSWindowButton::CloseButton)
+            .and_then(|button| {
+                let container = unsafe { button.superview()?.superview()? };
+                let bounds = button.bounds();
+                let center = button.convertPoint_toView(
+                    NSPoint::new(
+                        bounds.origin.x + bounds.size.width / 2.0,
+                        bounds.origin.y + bounds.size.height / 2.0,
+                    ),
+                    None,
+                );
+                let current = native_window.frame().size.height - center.y;
+                Some(
+                    container.frame().size.height - button.frame().size.height + 20.0 * zoom
+                        - current,
+                )
+            })
+            .unwrap_or(22.0 + 20.0 * (zoom - 1.0));
+        window.set_traffic_light_inset(LogicalPosition::new(16.0, inset));
+        // Tao reapplies the inset on a title change, not on request_redraw.
+        window.set_title(&window.title());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(serde::Deserialize)]
+    struct PageMenu {
+        id: String,
+        label: String,
+        items: Vec<PageMenuEntry>,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "lowercase")]
+    enum PageMenuEntry {
+        Command {
+            id: String,
+            label: String,
+            hotkey: Option<serde_json::Value>,
+            checked: Option<bool>,
+        },
+        Native {
+            name: String,
+        },
+        Separator,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(serde::Deserialize)]
+    struct PageMenuState {
+        enabled: Option<bool>,
+        checked: Option<bool>,
+    }
+
+    #[cfg(target_os = "macos")]
+    fn build_menu(spec: &[PageMenu]) -> anyhow::Result<Menu> {
+        let menu = Menu::new();
+        for section in spec {
+            let submenu = Submenu::with_id(&section.id, &section.label, true);
+            for entry in &section.items {
+                match entry {
+                    PageMenuEntry::Command {
+                        id,
+                        label,
+                        hotkey,
+                        checked,
+                    } => {
+                        let accelerator = hotkey
+                            .as_ref()
+                            .and_then(serde_json::Value::as_str)
+                            .map(|hotkey| hotkey.replace("Mod", "CmdOrCtrl").parse::<Accelerator>())
+                            .transpose()?;
+                        if let Some(checked) = checked {
+                            submenu.append(&CheckMenuItem::with_id(
+                                id,
+                                label,
+                                true,
+                                *checked,
+                                accelerator,
+                            ))?;
+                        } else {
+                            submenu.append(&MenuItem::with_id(id, label, true, accelerator))?;
+                        }
+                    }
+                    PageMenuEntry::Separator => submenu.append(&PredefinedMenuItem::separator())?,
+                    PageMenuEntry::Native { name } => {
+                        let item = match name.as_str() {
+                            "about" => PredefinedMenuItem::about(
+                                None,
+                                Some(AboutMetadata {
+                                    name: Some("OpenResearch".into()),
+                                    version: Some(env!("CARGO_PKG_VERSION").into()),
+                                    ..Default::default()
+                                }),
+                            ),
+                            "services" => PredefinedMenuItem::services(None),
+                            "hide" => PredefinedMenuItem::hide(None),
+                            "hide_others" => PredefinedMenuItem::hide_others(None),
+                            "show_all" => PredefinedMenuItem::show_all(None),
+                            "undo" => PredefinedMenuItem::undo(None),
+                            "redo" => PredefinedMenuItem::redo(None),
+                            "cut" => PredefinedMenuItem::cut(None),
+                            "copy" => PredefinedMenuItem::copy(None),
+                            "paste" => PredefinedMenuItem::paste(None),
+                            "select_all" => PredefinedMenuItem::select_all(None),
+                            "fullscreen" => PredefinedMenuItem::fullscreen(None),
+                            "minimize" => PredefinedMenuItem::minimize(None),
+                            "maximize" => PredefinedMenuItem::maximize(None),
+                            _ => anyhow::bail!("unknown native menu item: {name}"),
+                        };
+                        submenu.append(&item)?;
+                    }
+                }
+            }
+            if section.id == "window" {
+                submenu.set_as_windows_menu_for_nsapp();
+            }
+            menu.append(&submenu)?;
+        }
+        Ok(menu)
     }
 
     /// Without a handler WKWebView drops downloads and WebView2 saves them
@@ -1428,7 +1631,9 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    use super::{desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser};
+    use super::{
+        deep_link_path, desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser,
+    };
     use std::ffi::OsStr;
     use std::path::Path;
 
@@ -1445,6 +1650,22 @@ mod tests {
         ));
         assert!(entry.contains("\nStartupWMClass=OpenResearch\n"));
         assert!(!entry.contains("orx app"));
+    }
+
+    #[test]
+    fn reproduce_links_open_the_reproduce_page_for_their_paper() {
+        assert_eq!(
+            deep_link_path("openresearch", Some("reproduce"), "/1706.03762"),
+            Some("/reproduce/1706.03762".to_string())
+        );
+        assert_eq!(
+            deep_link_path("openresearch", Some("reproduce"), "/hep-th/9901001"),
+            Some("/reproduce/hep-th/9901001".to_string())
+        );
+        assert_eq!(deep_link_path("openresearch", Some("reproduce"), "/"), None);
+        assert_eq!(deep_link_path("openresearch", Some("reproduce"), ""), None);
+        assert_eq!(deep_link_path("openresearch", Some("settings"), "/x"), None);
+        assert_eq!(deep_link_path("https", Some("reproduce"), "/x"), None);
     }
 
     const EXE: &str = "/Applications/OpenResearch.app/Contents/MacOS/OpenResearch";

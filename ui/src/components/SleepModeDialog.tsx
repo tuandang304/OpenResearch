@@ -13,6 +13,7 @@ import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { Button, Input, Switch } from "./ui";
+import { EscapeScope } from "./EscapeScope";
 import { useDialogFocus } from "./useDialogFocus";
 
 export const chatSleepQuery = (sessionId: string) => ({
@@ -62,7 +63,7 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
   const [saving, setSaving] = useState(false);
   const active = !!sleep && !sleep.state.finished;
 
-  useDialogFocus(dialogRef, onClose);
+  useDialogFocus(dialogRef);
 
   const run = async (action: () => Promise<SleepStatus | null>, close: boolean) => {
     setSaving(true);
@@ -113,6 +114,7 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
     m.sleep_mode_strategy_record({ wins: ltr(String(stats?.wins ?? 0)), judged: ltr(String((stats?.wins ?? 0) + (stats?.losses ?? 0))) });
 
   return createPortal(
+    <EscapeScope onEscape={onClose}>
     <div
       className="fixed inset-0 z-200 flex items-center justify-center bg-modal-backdrop p-5"
       onClick={(event) => {
@@ -289,7 +291,8 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
           </Button>
         </div>
       </div>
-    </div>,
+    </div>
+    </EscapeScope>,
     document.body,
   );
 }

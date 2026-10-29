@@ -1,4 +1,6 @@
+import { EscapeScope } from "./EscapeScope";
 import { cn } from "./ui/cn";
+import { Dialog } from "@base-ui/react/dialog";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
@@ -6,6 +8,7 @@ import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { SETTINGS_SECTIONS, harnessSetupPath } from "./settingsNav";
 export { SETTINGS_NAV, harnessSetupPath } from "./settingsNav";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
+import { AddHarnessDialog } from "./AddHarnessDialog";
 import {
   setScopedQueryData,
   workspaceScope,
@@ -44,29 +47,24 @@ import { githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRu
 import {
   ArrowLeft,
   ArrowRight,
-  Bot,
   ChevronDown,
   ExternalLink,
-  HardDrive,
   Info,
-  MessagesSquare,
   Monitor,
   Moon,
-  Plug,
   Plus,
   RefreshCw,
   Settings,
-  SlidersHorizontal,
   SquareTerminal,
   Sun,
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { useNavOrder } from "../navOrder";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
   listAcpHarnesses,
+  listAcpPresets,
   removeAcpHarness,
   type AcpDefinition,
   deleteOverleafSession,
@@ -109,7 +107,6 @@ import {
   type TelemetrySettings,
   type Harness,
   type HarnessId,
-  harnessModelLabel,
   type HfSettings,
   type TinkerSettings,
   type K8sSettings,
@@ -128,6 +125,7 @@ import {
   applyUpdate,
   installCli,
   setAutoUpdate as setAutoUpdateApi,
+  setReleaseChannel,
   type InstallChannel,
   type InstalledCli,
 } from "../api";
@@ -146,7 +144,9 @@ import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
-import { OptionPicker, usePopover } from "./ModelPicker";
+import { OptionPicker } from "./ModelPicker";
+import { Popover } from "@base-ui/react/popover";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { HarnessLogo } from "./HarnessLogo";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
@@ -182,7 +182,7 @@ export const SETTINGS_CARD_CLASS_NAME = [
 export const KV_CLASS_NAME = [
   "kv grid grid-cols-[auto_1fr] items-baseline gap-y-[3px] gap-x-3.5 text-base",
   "[&_.k]:text-sm [&_.k]:text-subtext [&_.v]:text-base [&_.v]:text-text",
-  "[&_.v]:break-all",
+  "[&_.v]:wrap-anywhere",
 ].join(" ");
 
 const COMPUTE_DETAILS_CLASS_NAME = [
@@ -388,14 +388,17 @@ function AuthLabel({ h }: { h: Harness }) {
 
 function HarnessesTab({ remote }: { remote: boolean }) {
   const harnessesOptions = getHarnessesQuery();
-  const { data: harnesses = null } = useQuery(harnessesOptions);
+  const { data: harnesses = null, isError: harnessesError } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [candidate, setCandidate] = useState<HarnessId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
   const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
   const [authHarness, setAuthHarness] = useState<Harness | null>(null);
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const definitions = useQuery({ queryKey: workspaceKey("getAcpHarnesses"), queryFn: listAcpHarnesses });
+  const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets });
   const [acpDialog, setAcpDialog] = useState<AcpDefinition | "new" | null>(null);
   const reloadAcp = () => { void definitions.refetch(); load(true); };
   const removeAcp = async (id: string) => {
@@ -410,145 +413,213 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       .finally(() => setRefreshing(false));
   };
 
-  const orderedHarnesses = [...(harnesses ?? [])].sort(
-    (a, b) => Number(b.agentReady) - Number(a.agentReady),
-  );
-  const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
-  const recommended = h?.models?.find((model) => model.id === h.recommendedModel);
-  useEffect(() => {
-    // Pin the settled default so a failed refresh cannot switch harnesses.
-    if (h && active !== h.id && !orderedHarnesses.some((x) => x.catalogPending)) setActive(h.id);
-  }, [h, active, orderedHarnesses]);
-  const acp = definitions.data?.find((definition) => definition.id === h?.id);
+  const orderedHarnesses = [...(harnesses ?? [])].sort((a, b) => {
+    const rank = (id: HarnessId) => id === "claude-code" ? 0 : id === "codex" ? 1 : id === "opencode" ? 2 : 3;
+    return rank(a.id) - rank(b.id);
+  });
+  const added = orderedHarnesses.filter((h) => h.installed || h.installBroken || definitions.data?.some((definition) => definition.id === h.id));
+  const ready = added.filter((h) => h.agentReady);
+  const suggestions = orderedHarnesses
+    .filter((h) => !h.agentReady && !h.catalogPending && (["claude-code", "codex", "opencode"].includes(h.id) || h.installed || (!h.setupUrl && definitions.data?.some((definition) => definition.id === h.id))))
+    .filter((h, index, all) => !h.setupUrl || all.findIndex((other) => other.setupUrl === h.setupUrl) === index);
+  const candidateHarness = orderedHarnesses.find((h) => h.id === candidate);
+
+  const chooseHarness = (id: HarnessId | null) => {
+    if (!id) { setCandidate(null); return; }
+    const harness = orderedHarnesses.find((item) => item.id === id);
+    if (!harness) return;
+    const acpLogin = harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing;
+    const needsZCode = harness.logo === "zcode-acp-server" && !harness.installed && !harness.adapterMissing;
+    const nativeSetup = !needsZCode && !remote && setupCommands.data?.[harness.id] && (!harness.installed || harness.installBroken || harness.adapterMissing || harness.authState === "unsupported" || (harness.authState === "needsLogin" && (harness.id !== "claude-code" || harness.loginEligible)));
+    if (!harness.needsConfigRepair && (acpLogin || nativeSetup)) {
+      setAdding(false);
+      setCandidate(null);
+      if (acpLogin) setAuthHarness(harness);
+      else setSetupHarness(harness);
+    } else {
+      setAdding(true);
+      setCandidate(id);
+    }
+  };
 
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
-      {acpDialog && <AcpHarnessDialog definition={acpDialog === "new" ? undefined : acpDialog} onClose={() => setAcpDialog(null)} onSaved={reloadAcp} />}
+      {acpDialog && <AcpHarnessDialog customOnly={acpDialog === "new"} definition={acpDialog === "new" ? undefined : acpDialog} onClose={() => setAcpDialog(null)} onSaved={reloadAcp} />}
       {authHarness && <AcpAuthDialog remote={remote} harness={authHarness} onClose={() => setAuthHarness(null)} />}
       {!remote && setupHarness && setupCommands.data && (
         <HarnessSetupDialog
           harness={setupHarness}
           commands={setupCommands.data[setupHarness.id]}
+          onAuth={(harness) => { setSetupHarness(null); setAuthHarness(harness); }}
+          onBack={() => { setSetupHarness(null); setAdding(true); }}
           onClose={() => setSetupHarness(null)}
         />
       )}
-      <div className="mt-3 mb-3.5 flex w-full flex-wrap items-center justify-between gap-3 [&_.option-menu]:w-max">
-        <div className="w-96 max-w-full">
-          <OptionPicker
-            variant="field"
-            dropDown
-            title={m.settings_page_harnesses()}
-            choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
-            value={h?.id ?? null}
-            onSelect={(id) => {
-              const selected = orderedHarnesses.find((harness) => harness.id === id);
-              if (selected) setActive(selected.id);
-            }}
-            renderIcon={(choice) => {
-              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-              return harness && <HarnessLogo harness={harness.id} logo={harness.logo} />;
-            }}
-            renderLabel={(choice) => {
-              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-              const status = harness && harnessStatus(harness);
-              return (
-                <span className="inline-flex items-center gap-2 whitespace-nowrap">
-                  {choice.label}
-                  {status && (
-                    <>
-                      <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
-                      <span className="sr-only">{status.label}</span>
-                    </>
-                  )}
-                </span>
-              );
-            }}
-          />
-        </div>
-        <Button className="ms-auto shrink-0" onClick={() => setAcpDialog("new")} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
+      {adding && (
+        <AddHarnessDialog
+          harnesses={orderedHarnesses}
+          added={added}
+          candidate={candidateHarness}
+          remote={remote}
+          refreshing={refreshing}
+          acpAvailable={definitions.data !== undefined && !definitions.isError}
+          acpError={definitions.isError}
+          onRetryAcp={() => void definitions.refetch()}
+          onSelect={chooseHarness}
+          onRefresh={() => load(true, true)}
+          onClose={() => { setAdding(false); setCandidate(null); }}
+          onCustom={() => { setAdding(false); setCandidate(null); setAcpDialog("new"); }}
+          onEdit={(harness) => {
+            const definition = definitions.data?.find((item) => item.id === harness.id);
+            if (definition) { setAdding(false); setCandidate(null); setAcpDialog(definition); }
+          }}
+          onSetup={(harness) => {
+            setAdding(false);
+            setCandidate(null);
+            if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) setAuthHarness(harness);
+            else setSetupHarness(harness);
+          }}
+          canSetup={(harness) => Boolean(setupCommands.data?.[harness.id])}
+        />
+      )}
+      <div className="my-3 flex flex-wrap items-center gap-2">
+        <Button onClick={() => setAdding(true)} disabled={!harnesses} aria-haspopup="dialog"><Plus size={14} />{m.harness_add()}</Button>
+        <Button onClick={() => load(true, true)} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+        </Button>
       </div>
-      {!harnesses ? (
-        <LoadingRow>
-          <Spinner /> {m.settings_page_detecting_harnesses()}
-        </LoadingRow>
-      ) : !h ? null : (
-        <div className={SETTINGS_CARD_CLASS_NAME}>
-          <div className="settings-card-head flex items-center gap-2.5 mb-3">
-            {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
-            <Badge variant={harnessStatus(h).variant}>{h.adapterMissing ? m.acp_adapter_required() : harnessStatus(h).label}</Badge>
-            <div className="spacer flex-1" />
-            {!remote && h.adapterMissing && <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
-            {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => setAuthHarness(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
-            {acp && <><Button size="small" onClick={() => setAcpDialog(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
-            {!h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
-              <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
-                <SquareTerminal size={14} /> {m.harness_setup_login()}
-              </Button>
-            )}
-            <Button size="small" onClick={() => load(true, true)} disabled={refreshing}>
-              <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-            </Button>
-          </div>
-          <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
-            <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
-            <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
-            <span className="k">{m.settings_page_version()}</span>
-            <span className="v">{h.version ?? "—"}</span>
-            {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
-              <>
-                <span className="k">{m.settings_page_auth()}</span>
-                <span className="v"><AuthLabel h={h} /></span>
-              </>
-            )}
-            {h.account && (
-              <>
-                <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
-                <span className="v">{h.account}</span>
-              </>
-            )}
-            {h.org && (
-              <>
-                <span className="k">{m.settings_page_org()}</span>
-                <span className="v">{h.org}</span>
-              </>
-            )}
-            <span className="k">{m.settings_page_agent_models()}</span>
-            <span className="v">
-              {h.catalogPending
-                ? m.onboarding_checking()
-                : recommended && h.models.length > 1
-                ? (
-                  <Tooltip content={m.settings_models_recommended_hint()}>
-                    <span>{m.settings_models_recommended({ model: harnessModelLabel(recommended), count: fmtNumber(h.models.length - 1) })}</span>
-                  </Tooltip>
-                )
-                : recommended
-                ? harnessModelLabel(recommended)
-                : h.models.length > 0
-                ? m.settings_models_available({ count: fmtNumber(h.models.length) })
-                : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
-            </span>
-          </div>
-          {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
-            note={h.agentNote}
-            className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
-            disabled={remote}
-            resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
-            onRun={(command, path) => setupRun.start(command, path, h.id)}
-          />}
-          {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
-          {setupRun.run && (
-            // Hidden, not unmounted, while another harness tab is showing: a
-            // switch mid-OAuth must not kill the sign-in.
-            <div hidden={setupRun.run.owner !== h.id}>
-              <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />
+      {definitions.isError && <p role="alert" className="text-sm text-accent-red">{m.acp_definitions_load_failed()} <Button variant="ghost" onClick={() => void definitions.refetch()}>{m.app_retry()}</Button></p>}
+      {!harnesses && harnessesError ? (
+        <p role="alert" className="text-sm text-accent-red">{m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => load(true, true)}>{m.app_retry()}</Button></p>
+      ) : !harnesses ? (
+        <LoadingRow><Spinner /> {m.settings_page_detecting_harnesses()}</LoadingRow>
+      ) : ready.length === 0 && suggestions.length === 0 && definitions.data && !definitions.isError ? (
+        <p className="text-sm text-subtext">{m.harness_none_added()}</p>
+      ) : ready.map((h) => {
+        const acp = definitions.data?.find((definition) => definition.id === h.id);
+        const expanded = active === h.id;
+        const optionalLogin = h.id === "opencode" && !h.authenticated && !remote && !h.catalogPending && !h.needsConfigRepair;
+        const status = harnessStatus(h);
+        const detail = h.authCheckFailed
+          ? status.label
+          : [h.accountName, h.id === "opencode" ? h.account : undefined, h.plan].filter(Boolean).join(" · ") ||
+            (h.accountLoading
+              ? m.onboarding_loading_account()
+              : h.id === "opencode" && !h.authenticated && !h.authMethod
+                ? m.settings_free_models_no_sign_in()
+                : claudeProviderLabel(h) ||
+                  (h.authMethod === "apiKey" ? m.onboarding_api_key() : h.authMethod === "local" ? m.projects_local() : status.label));
+        return (
+          <div key={h.id} className={cn(SETTINGS_CARD_CLASS_NAME, "mb-3 p-0")}>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setActive(expanded ? null : h.id)}
+                aria-expanded={expanded}
+                aria-controls={`harness-details-${h.id}`}
+                className="flex min-h-14 w-full items-center gap-3 rounded-lg px-4.5 py-2 text-start text-text hover:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-[-2px]"
+              >
+                <HarnessLogo harness={h.id} logo={h.logo} size={22} />
+                <span className={cn("flex min-w-0 flex-1 flex-col", optionalLogin && "me-24")}>
+                  <span className="font-medium">{h.name}</span>
+                  <span dir="auto" className={cn("wrap-anywhere text-sm", h.authCheckFailed ? "text-accent-amber" : "text-subtext")}>{detail}</span>
+                </span>
+                <ChevronDown size={16} aria-hidden="true" className={cn("shrink-0 text-muted", expanded && "rotate-180")} />
+              </button>
+              {optionalLogin && (
+                <Button size="small" className="absolute end-9 top-1/2 -translate-y-1/2" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
+                  <SquareTerminal size={14} />
+                  {m.harness_setup_login()}
+                </Button>
+              )}
             </div>
-          )}
-          {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
+            <div id={`harness-details-${h.id}`} hidden={!expanded} className="px-4.5 pb-4 pt-2">
+              {expanded && (
+                <>
+                  <div className="settings-card-head flex items-center gap-2.5 mb-3">
+                    {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
+                    {!remote && h.adapterMissing && <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
+                    {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => setAuthHarness(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
+                    {acp && <><Button size="small" onClick={() => setAcpDialog(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
+                    {!h.id.startsWith("acp:") && !remote && !h.catalogPending && !h.needsConfigRepair && (h.installBroken || h.authState === "unsupported") && (
+                      <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
+                        <SquareTerminal size={14} />
+                        {h.installBroken ? m.harness_setup_install() : m.harness_setup_update()}
+                      </Button>
+                    )}
+                    {h.id !== "opencode" && !h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
+                      <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
+                        <SquareTerminal size={14} /> {m.harness_setup_login()}
+                      </Button>
+                    )}
+                  </div>
+                  <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
+                    <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
+                    <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
+                    <span className="k">{m.settings_page_version()}</span>
+                    <span className="v">{h.version ?? "—"}</span>
+                    {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
+                      <>
+                        <span className="k">{m.settings_page_auth()}</span>
+                        <span className="v"><AuthLabel h={h} /></span>
+                      </>
+                    )}
+                    {h.account && (
+                      <>
+                        <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
+                        <span className="v">{h.account}</span>
+                      </>
+                    )}
+                    {h.org && (
+                      <>
+                        <span className="k">{m.settings_page_org()}</span>
+                        <span className="v">{h.org}</span>
+                      </>
+                    )}
+                    <span className="k">{m.settings_page_agent_models()}</span>
+                    <span className="v">
+                      {h.catalogPending
+                        ? m.onboarding_checking()
+                        : h.models.length > 0
+                        ? m.settings_models_available({ count: fmtNumber(h.models.length) })
+                        : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
+                    </span>
+                  </div>
+                  {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
+                    note={h.agentNote}
+                    className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
+                    disabled={remote}
+                    resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
+                    onRun={(command, path) => setupRun.start(command, path, h.id)}
+                  />}
+                  {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
+                  {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
+                  {ACCOUNT_HARNESSES.includes(h.id) && <HarnessAccountsCard harness={h} remote={remote} />}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {suggestions.length > 0 && (
+        <div className="mt-4">
+          <h3 className="mb-2 text-sm font-medium text-subtext">{m.harness_suggested()}</h3>
+          <div className="flex flex-wrap gap-2">
+            {suggestions.map((h) => {
+              const name = presets.data?.find((preset) => preset.setupUrl === h.setupUrl)?.name ?? h.name;
+              return (
+                <Button key={h.id} onClick={() => chooseHarness(h.id)} aria-haspopup="dialog" aria-label={`${m.harness_add()}: ${name}`}>
+                  <HarnessLogo harness={h.id} logo={h.logo} size={16} />
+                  {name}
+                  <Plus size={14} aria-hidden="true" />
+                </Button>
+              );
+            })}
+          </div>
         </div>
       )}
-      {h && ACCOUNT_HARNESSES.includes(h.id) && <HarnessAccountsCard harness={h} remote={remote} />}
+      {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />}
       {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
       <DecisionModelCard />
       <CrossHarnessCard harnesses={harnesses} />
@@ -1276,7 +1347,7 @@ function SlurmSection() {
                 />
               </label>
             </div>
-            <div className="actions">
+            <div className="actions flex-wrap items-center">
               <Button
                 type="button"
                 onClick={() => {
@@ -1288,7 +1359,7 @@ function SlurmSection() {
                   }
                 }}
                 disabled={!host}
-                title={host ? undefined : m.settings_pick_login_node()}
+                aria-describedby={!host ? "slurm-login-node-hint" : undefined}
               >
                 {connecting
                   ? connectionFailed
@@ -1298,6 +1369,7 @@ function SlurmSection() {
                     ? m.settings_reconnect()
                     : m.settings_connect()}
               </Button>
+              {!host && <span id="slurm-login-node-hint" className="text-sm text-subtext">{m.settings_pick_login_node()}</span>}
               <span role="status">
                 <SlurmTestBadge
                   test={test}
@@ -2052,18 +2124,11 @@ function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSu
     onClose();
   };
 
-  return (
+  return <EscapeScope onEscape={close}>
     <dialog
       ref={dialogRef}
       className="m-auto w-140 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
       aria-labelledby="compute-quick-setup-title"
-      // Escape on keydown (not just cancel) so a declined discard confirm can't be
-      // force-closed by the close watcher; an open OptionPicker swallows it first.
-      onKeyDown={(event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        close();
-      }}
       onCancel={(event) => {
         event.preventDefault();
         close();
@@ -2076,9 +2141,11 @@ function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSu
             {TARGET_LABELS[target.id]()}
           </h2>
         </div>
-        <IconButton title={m.app_close_panel()} aria-label={m.app_close_panel()} onClick={close} disabled={editState.saving}>
-          <X size={14} />
-        </IconButton>
+        <Tooltip interactive content={m.app_close_panel()}>
+          <IconButton aria-label={m.app_close_panel()} onClick={close} disabled={editState.saving}>
+            <X size={14} />
+          </IconButton>
+        </Tooltip>
       </div>
       {target.id === "tinker" && <TinkerSection target={target} />}
       {target.id === "colab" && <ColabSection />}
@@ -2089,7 +2156,7 @@ function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSu
       {target.id === "ray" && <RaySection />}
       {target.id === "k8s" && <K8sSection onEditState={setEditState} />}
     </dialog>
-  );
+  </EscapeScope>;
 }
 
 function ComputeTab({
@@ -2160,7 +2227,7 @@ function ComputeTab({
 
   return (
     <>
-      <h1>{m.settings_page_compute()}</h1>
+      <h1 tabIndex={-1}>{m.settings_page_compute()}</h1>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
@@ -2539,15 +2606,16 @@ function EnvRow({
         </td>
         <td>
           {entry && !(plain && dirty && value.trim()) ? (
-            <IconButton
-              className="[&:hover:not(:disabled)]:text-accent-red"
-              title={m.a11y_delete_item({ name: ltr(name) })}
-              aria-label={m.a11y_delete_item({ name: ltr(name) })}
-              onClick={() => void remove()}
-              disabled={saving}
-            >
-              <Trash2 size={14} />
-            </IconButton>
+            <Tooltip interactive content={m.a11y_delete_item({ name: ltr(name) })}>
+              <IconButton
+                className="[&:hover:not(:disabled)]:text-accent-red"
+                aria-label={m.a11y_delete_item({ name: ltr(name) })}
+                onClick={() => void remove()}
+                disabled={saving}
+              >
+                <Trash2 size={14} />
+              </IconButton>
+            </Tooltip>
           ) : (
             value.trim() && (
               <Button size="small" onClick={() => void save()} disabled={saving}>
@@ -2637,14 +2705,16 @@ function AddVarRow({
           >
             {saving ? m.common_saving() : m.common_save()}
           </Button>
-          <IconButton
-            title={m.settings_page_cancel()}
-            aria-label={m.settings_page_cancel_new_variable()}
-            onClick={onDone}
-            disabled={saving}
-          >
-            <X size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.settings_page_cancel()}>
+            <IconButton
+              aria-description={m.settings_page_cancel()}
+              aria-label={m.settings_page_cancel_new_variable()}
+              onClick={onDone}
+              disabled={saving}
+            >
+              <X size={14} />
+            </IconButton>
+          </Tooltip>
         </td>
       </tr>
       {key.trim() !== "HF_TOKEN" && HF_TOKEN_RE.test(value.trim()) && <HfHintRow />}
@@ -2806,7 +2876,7 @@ function AppearanceTab() {
     <>
       <h2>{m.settings_appearance_heading()}</h2>
       <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
-        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`}>
           <div className="project-default-title text-base font-medium">{m.settings_theme_heading()}</div>
           <div
             className={`${SEGMENTED_CLASS_NAME} theme-segmented flex-none`}
@@ -2875,8 +2945,10 @@ function UpdatesTab() {
   const { status, error: loadError, apply } = useUpdateStatus();
   // Per-action only so the right button reads "Working…"; any write disables
   // all of them, since they mutate overlapping state.
-  const [busy, setBusy] = useState<"auto" | "apply" | "cli" | null>(null);
+  const [busy, setBusy] = useState<"auto" | "apply" | "cli" | "channel" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmCanary, setConfirmCanary] = useState(false);
+  const channelGroupRef = useRef<HTMLDivElement>(null);
   const restart = useRestartApp(status);
   const locked = busy !== null || restart.restarting;
 
@@ -2899,7 +2971,7 @@ function UpdatesTab() {
 
   // Every mutating call returns the authoritative status; adopting it is what
   // keeps the switch honest when a write fails or another client changes it.
-  const run = async (which: "auto" | "apply" | "cli", action: () => Promise<unknown>) => {
+  const run = async (which: "auto" | "apply" | "cli" | "channel", action: () => Promise<unknown>) => {
     setBusy(which);
     setError(null);
     try {
@@ -2911,7 +2983,24 @@ function UpdatesTab() {
     }
   };
 
-  return (
+  const applyChannel = (channel: "stable" | "canary") => {
+    void run("channel", async () => {
+      const next = await setReleaseChannel(channel);
+      apply(next);
+      requestAnimationFrame(() => {
+        const group = channelGroupRef.current;
+        if (group?.contains(document.activeElement)) group.querySelector<HTMLButtonElement>(`[data-channel="${next.releaseChannel}"]`)?.focus();
+      });
+    });
+  };
+
+  const changeChannel = (channel: "stable" | "canary") => {
+    if (locked || status.releaseChannel === channel) return;
+    if (channel === "canary") setConfirmCanary(true);
+    else applyChannel(channel);
+  };
+
+  return <>{(
     <>
       <h2>{m.settings_page_updates()}</h2>
       <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
@@ -2951,6 +3040,31 @@ function UpdatesTab() {
 
         {status.selfUpdates ? (
           <>
+            {status.releaseChannelsAvailable && (
+              <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+                <div>
+                  <div className="project-default-title text-base font-medium">{m.settings_update_channel()}</div>
+                  <p>{status.releaseChannel === "stable" ? m.settings_update_stable_description() : m.settings_update_canary_description()}</p>
+                </div>
+                <div ref={channelGroupRef} className={SEGMENTED_CLASS_NAME} role="radiogroup" aria-label={m.settings_update_channel()}
+                  aria-disabled={locked}
+                  onKeyDown={(event) => {
+                    if (locked || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+                    event.preventDefault();
+                    const next = status.releaseChannel === "stable" ? "canary" : "stable";
+                    changeChannel(next);
+                  }}>
+                  {(["stable", "canary"] as const).map((channel) => (
+                    <button key={channel} type="button" role="radio" data-channel={channel}
+                      aria-checked={status.releaseChannel === channel} tabIndex={status.releaseChannel === channel ? 0 : -1}
+                      className={status.releaseChannel === channel ? "active" : ""}
+                      onClick={() => changeChannel(channel)}>
+                      {channel === "stable" ? m.settings_update_channel_stable() : m.settings_update_channel_canary()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-base font-medium">
@@ -2975,10 +3089,14 @@ function UpdatesTab() {
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-base font-medium">
-                  {status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
+                  {status.waitingForStable ? m.settings_waiting_for_stable() : status.waitingForCanary ? m.settings_waiting_for_canary() : status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
                 </div>
                 <p>
-                  {status.updateAvailable
+                  {status.waitingForStable
+                    ? m.settings_stable_catches_up()
+                    : status.waitingForCanary
+                    ? m.settings_canary_catches_up()
+                    : status.updateAvailable
                     ? m.settings_install_release_now()
                     : m.settings_checks_automatically()}
                   {status.updateAvailable && status.latestTag && (
@@ -3019,8 +3137,28 @@ function UpdatesTab() {
         )}
         {error && <div className="error">{error}</div>}
       </div>
+      <Dialog.Root open={confirmCanary} onOpenChange={setConfirmCanary}>
+        <Dialog.Portal>
+          <Dialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop" />
+          <Dialog.Viewport className="fixed inset-0 z-200 flex items-center justify-center p-5">
+            <Dialog.Popup className="w-120 max-w-full rounded-xl border border-border bg-background p-6 shadow-modal"
+              aria-labelledby="canary-confirm-title" aria-describedby="canary-confirm-description"
+              finalFocus={() => channelGroupRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')}>
+              <h2 id="canary-confirm-title" className="m-0 text-xl font-medium text-text">{m.settings_canary_confirm_title()}</h2>
+              <p id="canary-confirm-description" className="mt-4 text-sm text-text">{m.settings_canary_confirm_description()}</p>
+              <div className="mt-6 flex justify-end gap-2.5">
+                <Button onClick={() => setConfirmCanary(false)}>{m.settings_page_cancel()}</Button>
+                <Button variant="primary" onClick={() => {
+                  setConfirmCanary(false);
+                  if (!locked && status.releaseChannel !== "canary") applyChannel("canary");
+                }}>{m.settings_canary_confirm_action()}</Button>
+              </div>
+            </Dialog.Popup>
+          </Dialog.Viewport>
+        </Dialog.Portal>
+      </Dialog.Root>
     </>
-  );
+  )}<EscapeScope enabled={confirmCanary} onEscape={() => setConfirmCanary(false)} /></>;
 }
 
 function TelemetryTab() {
@@ -3090,7 +3228,7 @@ function InstallCliRow({
   disabled,
   run,
 }: {
-  busy: "auto" | "apply" | "cli" | null;
+  busy: "auto" | "apply" | "cli" | "channel" | null;
   disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {
@@ -3430,10 +3568,9 @@ export function GitTab({
   });
   const checkingAccess = hasGithubRepository && !accessQuery.data && !accessQuery.error;
   const canResumeRepository = hasGithubRepository && Boolean(accessQuery.data?.canPush);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const ownerMenu = usePopover(triggerRef);
-  const accountQuery = useQuery({ ...githubAccountQuery(), enabled: ownerMenu.open });
-  const organizationsQuery = useQuery({ ...githubOrganizationsQuery(), enabled: ownerMenu.open });
+  const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
+  const accountQuery = useQuery({ ...githubAccountQuery(), enabled: ownerMenuOpen });
+  const organizationsQuery = useQuery({ ...githubOrganizationsQuery(), enabled: ownerMenuOpen });
   const githubLogin = accountQuery.data?.login ?? null;
   const owners = [
     ...(githubLogin ? [githubLogin] : []),
@@ -3459,7 +3596,7 @@ export function GitTab({
   };
 
   const enableSync = (owner?: string) => {
-    ownerMenu.setOpen(false);
+    setOwnerMenuOpen(false);
     if (!project) return;
     setSaving(true);
     setError(null);
@@ -3499,34 +3636,40 @@ export function GitTab({
             {status.github.authenticated && !status.github.enabled && (
               <div className="flex flex-wrap gap-2 mt-3.5">
                 {hasGithubRepository && status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
-                <div ref={ownerMenu.ref} className="relative">
-                  <Button variant="primary" disabled={saving || checkingAccess || Boolean(accessQuery.error)} aria-expanded={ownerMenu.open} aria-haspopup={canResumeRepository ? undefined : "menu"} onClick={(event) => {
-                    triggerRef.current = event.currentTarget;
-                    if (canResumeRepository) enableSync();
-                    else ownerMenu.setOpen(!ownerMenu.open);
-                  }}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()} {!canResumeRepository && !checkingAccess && <ChevronDown size={14} />}</Button>
-                  {ownerMenu.open && (
-                    <div role="menu" aria-label={m.settings_github_new_repository_destination()} className="absolute start-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-2rem)] max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-2 shadow-modal">
-                      <div className="px-2 py-1 text-sm font-medium text-subtext">{m.settings_github_enable_under()}</div>
-                      {hasGithubRepository && <p className="px-2 py-1 m-0 text-sm text-text">{m.settings_create_private_github_repository()}</p>}
-                      {owners.map((owner) => <MenuItem key={owner} role="menuitem" onClick={() => enableSync(owner)}>{owner}</MenuItem>)}
-                      {!owners.length && (accountQuery.isFetching || organizationsQuery.isFetching) && (
-                        <div role="status" aria-label={m.settings_page_loading()} aria-busy="true" className="px-2 py-2">
-                          <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse">
-                            <div className="h-4 w-28 rounded-xs bg-surface" />
-                            <div className="h-4 w-36 rounded-xs bg-surface" />
-                          </div>
-                        </div>
+                <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+                  <Popover.Root open={ownerMenuOpen} onOpenChange={setOwnerMenuOpen}>
+                    <div className="relative">
+                      {canResumeRepository ? (
+                        <Button variant="primary" disabled={saving || checkingAccess || Boolean(accessQuery.error)} onClick={() => enableSync()}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()}</Button>
+                      ) : (
+                        <Popover.Trigger render={<Button variant="primary" />} disabled={saving || checkingAccess || Boolean(accessQuery.error)}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()} {!checkingAccess && <ChevronDown size={14} />}</Popover.Trigger>
                       )}
-                      {(accountQuery.error || organizationsQuery.error || !githubLogin && !accountQuery.isFetching) && (
-                        <div className="px-2 py-1 text-sm text-text">
-                          <p className="m-0">{accountQuery.error?.message ?? organizationsQuery.error?.message ?? m.settings_github_account_unavailable()}</p>
-                          <Button size="small" className="mt-2" onClick={() => { void accountQuery.refetch(); void organizationsQuery.refetch(); }}>{m.app_retry()}</Button>
-                        </div>
-                      )}
+                      <Popover.Portal>
+                        <Popover.Positioner positionMethod="fixed" side="bottom" align="start" sideOffset={8} collisionPadding={16} className="z-50">
+                          <Popover.Popup aria-label={m.settings_github_new_repository_destination()} className="outline-none w-72 max-w-[calc(100vw-2rem)] max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-2 shadow-modal">
+                            <div className="px-2 py-1 text-sm font-medium text-subtext">{m.settings_github_enable_under()}</div>
+                            {hasGithubRepository && <p className="px-2 py-1 m-0 text-sm text-text">{m.settings_create_private_github_repository()}</p>}
+                            {owners.map((owner) => <MenuItem key={owner} onClick={() => enableSync(owner)}>{owner}</MenuItem>)}
+                            {!owners.length && (accountQuery.isFetching || organizationsQuery.isFetching) && (
+                              <div role="status" aria-label={m.settings_page_loading()} aria-busy="true" className="px-2 py-2">
+                                <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse">
+                                  <div className="h-4 w-28 rounded-xs bg-surface" />
+                                  <div className="h-4 w-36 rounded-xs bg-surface" />
+                                </div>
+                              </div>
+                            )}
+                            {(accountQuery.error || organizationsQuery.error || !githubLogin && !accountQuery.isFetching) && (
+                              <div className="px-2 py-1 text-sm text-text">
+                                <p className="m-0">{accountQuery.error?.message ?? organizationsQuery.error?.message ?? m.settings_github_account_unavailable()}</p>
+                                <Button size="small" className="mt-2" onClick={() => { void accountQuery.refetch(); void organizationsQuery.refetch(); }}>{m.app_retry()}</Button>
+                              </div>
+                            )}
+                          </Popover.Popup>
+                        </Popover.Positioner>
+                      </Popover.Portal>
                     </div>
-                  )}
-                </div>
+                  </Popover.Root>
+                </DirectionProvider>
                 {accessQuery.error && (
                   <div className="basis-full text-sm text-text">
                     <p className="mt-2 mb-0">{accessQuery.error.message}</p>
@@ -3814,21 +3957,22 @@ function InstancesTable({ instances, kernels = [], emptyLabel }: { instances: Ru
                   <span className="backend-cell inline-flex items-center gap-0.5">
                     <BackendBadge backend={inst.backend} />
                     {url && (
-                      <IconButtonLink size="small"
-                        href={url}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={m.settings_page_open_job_page()}
-                        aria-label={m.settings_page_open_job_page()}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <ExternalLink size={12} />
-                      </IconButtonLink>
+                      <Tooltip interactive content={m.settings_page_open_job_page()}>
+                        <IconButtonLink size="small"
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={m.settings_page_open_job_page()}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ExternalLink size={12} />
+                        </IconButtonLink>
+                      </Tooltip>
                     )}
                   </span>
                 </td>
                 <td>
-                  <StatusBadge status={runDisplayStatus(inst)} />
+                  <StatusBadge status={runDisplayStatus(inst)} className="flex" />
                 </td>
                 <td>{timeAgo(inst.createdAt)}</td>
                 <td>{runtimeLabel(inst)}</td>
@@ -3852,7 +3996,7 @@ function InstancesTable({ instances, kernels = [], emptyLabel }: { instances: Ru
                       href={kernel.url}
                       target="_blank"
                       rel="noreferrer"
-                      title={m.settings_page_open_job_page()}
+                      data-tip={m.settings_page_open_job_page()}
                       aria-label={m.settings_page_open_job_page()}
                     >
                       <ExternalLink size={12} />
@@ -3902,7 +4046,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
 
   return (
     <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-1 [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
-      <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
+      <div className="compute-activity-head flex flex-wrap items-start justify-between gap-x-5 gap-y-2 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
         <div>
           <h2>
             {m.settings_page_running_instances()}
@@ -3965,18 +4109,6 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
 
 // --- embedded view -----------------------------------------------------------
 
-type SettingsPane = "settings" | "harnesses" | "context" | "projects" | "storage";
-
-/** The Settings page's own sidebar, in its default order. */
-const SETTINGS_PANES: { id: SettingsPane; label: () => string; icon: React.ReactNode }[] = [
-  { id: "settings", label: m.settings_nav_general, icon: <SlidersHorizontal size={15} /> },
-  { id: "harnesses", label: m.settings_nav_agents, icon: <Bot size={15} /> },
-  { id: "context", label: m.settings_nav_chat, icon: <MessagesSquare size={15} /> },
-  { id: "projects", label: m.settings_nav_integrations, icon: <Plug size={15} /> },
-  { id: "storage", label: m.settings_nav_storage, icon: <HardDrive size={15} /> },
-];
-const SETTINGS_PANE_IDS = SETTINGS_PANES.map((pane) => pane.id);
-
 function isSettingsSection(tab: Tab): boolean {
   return SETTINGS_SECTIONS.includes(tab);
 }
@@ -3996,89 +4128,62 @@ export function SettingsView({
   remote?: boolean;
 }) {
   const showsSettings = tab === "settings" || isSettingsSection(tab);
-  const pane: SettingsPane = isSettingsSection(tab) ? tab as SettingsPane : "settings";
-  const panes = SETTINGS_PANES.filter((item) => !(remote && item.id === "storage"));
-  const nav = useNavOrder("settings-nav-order", SETTINGS_PANE_IDS);
+  const sectionRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const section = sectionRef.current;
+    const stack = section?.parentElement;
+    if (!section || !stack) return;
+    const reveal = () => section.scrollIntoView({ block: "start" });
+    // Earlier sections load asynchronously; keep the target visible until the user interacts.
+    const observer = new ResizeObserver(reveal);
+    observer.observe(stack);
+    reveal();
+    const stop = () => observer.disconnect();
+    const events = ["wheel", "touchstart", "pointerdown", "keydown"];
+    for (const event of events) window.addEventListener(event, stop, { passive: true });
+    return () => {
+      stop();
+      for (const event of events) window.removeEventListener(event, stop);
+    };
+  }, [tab, project?.id]);
 
   return (
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
       {showsSettings && (
         <>
-          <h1>{m.settings_page_settings()}</h1>
-          <div className="mt-4.5 flex flex-col gap-6 md:flex-row md:items-start">
-            <nav
-              aria-label={m.settings_page_settings()}
-              className="settings-nav flex shrink-0 gap-1 overflow-x-auto md:sticky md:top-0 md:w-48 md:flex-col md:overflow-visible"
-            >
-              {nav.order.map((id) => panes.find((item) => item.id === id)).filter((item) => item !== undefined).map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  {...nav.itemProps(item.id)}
-                  title={m.settings_nav_drag_hint()}
-                  className={`settings-nav-item flex shrink-0 cursor-grab items-center gap-2.5 py-2 px-3 text-sm text-subtext rounded-md text-start [&:hover:not(.active)]:bg-surface [&:hover]:text-text [&.active]:bg-surface [&.active]:text-text [&.active]:font-medium [&[data-dragging]]:opacity-50 ${pane === item.id ? "active" : ""}`}
-                  aria-current={pane === item.id ? "page" : undefined}
-                  onClick={() => onSelectTab(item.id)}
-                >
-                  {item.icon}
-                  {item.label()}
-                </button>
-              ))}
-              {nav.customized && (
-                <button
-                  type="button"
-                  className="shrink-0 py-1.5 px-3 text-sm text-muted text-start hover:text-text"
-                  onClick={nav.reset}
-                >
-                  {m.settings_nav_reset_order()}
-                </button>
-              )}
-            </nav>
-            <div className="settings-stack min-w-0 flex-1">
-              {pane === "settings" && (
-                <>
-                  <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                    <AppearanceTab />
-                  </section>
-                  <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                    <TelemetryTab />
-                  </section>
-                  {!remote && (
-                    <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                      <UpdatesTab />
-                    </section>
-                  )}
-                </>
-              )}
-              {pane === "harnesses" && (
-                <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                  <HarnessesTab remote={remote} />
-                </section>
-              )}
-              {pane === "context" && (
-                <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                  <AutoCompactCard />
-                </section>
-              )}
-              {pane === "projects" && (
-                <>
-                  <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                    <GithubSettings
-                      remote={remote}
-                      onProjectUpdate={onProjectUpdate}
-                    />
-                  </section>
-                  <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                    <OverleafCard />
-                  </section>
-                </>
-              )}
-              {pane === "storage" && !remote && (
-                <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                  <StorageTab />
-                </section>
-              )}
-            </div>
+          <h1 tabIndex={-1}>{m.settings_page_settings()}</h1>
+          <div className="settings-stack mt-4.5">
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <AppearanceTab />
+            </section>
+            <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <GithubSettings
+                remote={remote}
+                onProjectUpdate={onProjectUpdate}
+              />
+            </section>
+            <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <HarnessesTab remote={remote} />
+            </section>
+            <section ref={tab === "context" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <AutoCompactCard />
+            </section>
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <OverleafCard />
+            </section>
+            {!remote && (
+              <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                <StorageTab />
+              </section>
+            )}
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <TelemetryTab />
+            </section>
+            {!remote && (
+              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                <UpdatesTab />
+              </section>
+            )}
           </div>
         </>
       )}

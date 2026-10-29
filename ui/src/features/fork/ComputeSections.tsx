@@ -112,7 +112,7 @@ function ColabAccountCard({
         <Button
           size="small"
           variant="ghost"
-          title={m.settings_colab_pause_hint()}
+          data-tip={m.settings_colab_pause_hint()}
           disabled={busy != null}
           onClick={() => onAction(`pause:${saved.id}`, () => pauseColabAccount(saved.id, !saved.paused))}
         >
@@ -120,7 +120,7 @@ function ColabAccountCard({
           {saved.paused ? m.settings_colab_resume() : m.settings_colab_pause()}
         </Button>
         <IconButton
-          title={m.settings_colab_remove()}
+          data-tip={m.settings_colab_remove()}
           aria-label={m.settings_colab_remove()}
           disabled={busy != null}
           onClick={() => {
@@ -633,7 +633,7 @@ export function KaggleSection() {
                         </Button>
                       )}
                       <IconButton
-                        title={m.settings_kaggle_remove()}
+                        data-tip={m.settings_kaggle_remove()}
                         aria-label={m.settings_kaggle_remove()}
                         disabled={busy != null}
                         onClick={() => {
