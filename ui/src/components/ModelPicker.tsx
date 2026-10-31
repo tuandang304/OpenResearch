@@ -31,7 +31,8 @@ import { HarnessLogo } from "./HarnessLogo";
 import { IconButton, MenuItem, SwitchIndicator, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
-import { LocalModelSetup } from "./LocalModelSetup";
+import { LocalModelDialog } from "./LocalModelSetup";
+import { showCustomDialog } from "../dialog";
 import { formatCodexModel, groupModels, resolveHarnessDefaultModel } from "../modelSelection";
 
 const MODEL_GROUP_CLASS_NAME = [
@@ -223,7 +224,8 @@ export function ModelPicker({
     [catalog, sessionHarness],
   );
   const queryClient = useQueryClient();
-  const [addingLocalModel, setAddingLocalModel] = useState(false);
+  const localModelConnected = useRef<(model: string) => void>(() => {});
+  useEffect(() => () => { localModelConnected.current = () => {}; }, []);
   const [menu, setMenu] = useState<"model" | "settings" | null>(null);
   const [legacyMenu, setLegacyMenu] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -291,6 +293,11 @@ export function ModelPicker({
     });
 
     close();
+  };
+
+  localModelConnected.current = (model) => {
+    const harness = queryClient.getQueryData(getHarnessesQuery().queryKey)?.find((entry) => entry.id === "opencode");
+    if (harness && (!lockHarness || value?.harness === "opencode")) pick(harness, model);
   };
 
   const selectedHarness = harnesses.find((harness) => harness.id === value?.harness);
@@ -548,7 +555,12 @@ export function ModelPicker({
                           aria-haspopup="dialog"
                           onClick={() => {
                             close();
-                            setAddingLocalModel(true);
+                            showCustomDialog({
+                              component: LocalModelDialog,
+                              props: { onConnected: (model) => localModelConnected.current(model) },
+                              onConfirm: (connect) => connect(),
+                              onCancel: "close",
+                            });
                           }}
                         >
                           <span className="inline-flex items-center gap-1.5">
@@ -729,19 +741,6 @@ export function ModelPicker({
               </Menu.Positioner>
             </Menu.Portal>
           </Menu.Root>
-        )}
-        {addingLocalModel && (
-          <LocalModelSetup
-            dialogOnly
-            installed={harnesses.find((harness) => harness.id === "opencode")?.installed ?? false}
-            onClose={() => setAddingLocalModel(false)}
-            onConnected={(model) => {
-              const harness = queryClient
-                .getQueryData(getHarnessesQuery().queryKey)
-                ?.find((entry) => entry.id === "opencode");
-              if (harness && (!lockHarness || value?.harness === "opencode")) pick(harness, model);
-            }}
-          />
         )}
       </div>
       <EscapeScope enabled={menu !== null} onEscape={() => setMenu(null)} />

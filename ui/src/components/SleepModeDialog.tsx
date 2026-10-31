@@ -14,7 +14,7 @@ import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { Button, Input, Switch } from "./ui";
 import { EscapeScope } from "./EscapeScope";
-import { useDialogFocus } from "./useDialogFocus";
+import { useDialogFocus } from "../features/fork/useDialogFocus";
 
 export const chatSleepQuery = (sessionId: string) => ({
   queryKey: ["chat-sleep", sessionId] as const,

@@ -46,6 +46,7 @@ use crate::error::{anyhow, Result};
 use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
 use crate::local::harness::claude::{
     claude_permission_mode, find_claude, uses_permission_bridge, write_mcp_config, write_settings,
+    CLAUDE_ENTRYPOINT,
 };
 use crate::local::harness::{HarnessAuthState, PermissionMode};
 use crate::local::native_store::NativeStore;
@@ -688,6 +689,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         }
     }
     crate::local::chat::prepare_env(&mut cmd);
+    cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
     let native_store = spec.config.native_store;
     let account = spec.config.account.clone();
     let account_env = tokio::task::spawn_blocking(move || match account {

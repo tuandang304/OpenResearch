@@ -1,3 +1,4 @@
+import { showCustomDialog } from "./dialog";
 import { EscapeScope } from "./components/EscapeScope";
 import { navigateKeyboardList } from "./keyboardNavigation";
 import {
@@ -36,7 +37,7 @@ import {
   type TaskWorkspace,
 } from "./workspaceState";
 import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
-import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth, sideChatPanelWidth, sidebarFitsWithPanel } from "./panelLayout";
+import { PANEL_MIN_WIDTH, RAIL_DEFAULT_WIDTH, clampRailWidth, initialPanelWidth, panelMaxWidth, railWidthBesidePanel, sideChatPanelWidth, sidebarFitsWithPanel } from "./panelLayout";
 import {
   type ExpViewDef,
   sameExpTab,
@@ -451,15 +452,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     }
   }, [projectId]);
   const deleteExperimentNode = useCallback(async (id: string) => {
-    try {
-      await deleteExperiment(id);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: listExperimentsQuery(projectId).queryKey }),
-        queryClient.invalidateQueries({ queryKey: listRunsQuery(projectId).queryKey }),
-      ]);
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    }
+    await deleteExperiment(id);
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: listExperimentsQuery(projectId).queryKey }),
+      queryClient.invalidateQueries({ queryKey: listRunsQuery(projectId).queryKey }),
+    ]);
   }, [projectId]);
   const restoreArchivedRegion = useCallback((id: string) => {
     void archiveExperiment(id, effectiveScope === "agent" ? "taskRegion" : "region", false);
@@ -515,6 +512,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [panelMax, setPanelMax] = useState(false);
   const [treeViewport, setTreeViewport] = useState<Viewport | null>(null);
   const [panelWidth, setPanelWidth] = useState(initialPanelWidth);
+  const [railWidth, setRailWidth] = useState(RAIL_DEFAULT_WIDTH);
   const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
   const workspaceWide = windowWidth >= WORKSPACE_CARD_MIN_WIDTH;
   const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
@@ -523,10 +521,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const mobile = windowWidth < 768;
   useEffect(() => { setMobileRailOpen(false); }, [mobile, location.href]);
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
-  const railTemporarilyHidden = mainView === "chat" && panelOpen && !sidebarFitsWithPanel(windowWidth);
+  const railTemporarilyHidden = mainView === "chat" && panelOpen && !sidebarFitsWithPanel(windowWidth, railWidth);
   const railVisible = mobile ? mobileRailOpen : railOpen && !railTemporarilyHidden;
   const stackPanel = !mobile && mainView === "chat" && panelOpen && windowWidth < PANEL_MIN_WIDTH * 2;
-  const visiblePanelWidth = Math.min(panelWidth, panelMaxWidth(windowWidth, railVisible));
+  const visiblePanelWidth = Math.min(panelWidth, panelMaxWidth(windowWidth, railVisible ? railWidth : 0));
   const bodyRef = useRef<HTMLDivElement>(null);
   const pendingTabFocus = useRef<string | null>(null);
   const pendingViewFocus = useRef<"settings" | "compute" | null>(null);
@@ -571,7 +569,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       focusAfterRailChange.current = null;
     }
   }, [railVisible]);
-  const [newProjectOpen, setNewProjectOpen] = useState(false);
   const currentRightPaneStateRef = useRef<RightPaneSessionState>(initialRightPaneSessionState());
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
@@ -809,41 +806,60 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     }
   }, [workspaceReady, destination?.kind, workspaceRef, sessions]);
   useBlocker({
-    shouldBlockFn: ({ next }) => parseDestination(next.pathname)?.projectId !== projectId
-      && [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection) && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes()),
+    shouldBlockFn: async ({ next }) => parseDestination(next.pathname)?.projectId !== projectId
+      && [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection) && !await confirmFileDiscard(m.file_viewer_discard_unsaved_changes()),
     enableBeforeUnload: () => [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection),
   });
   const lastGlobalLocation = useRef<string | null>(null);
   useEffect(() => {
     const savedLocation = safeLocation(location.href);
     if (!uiState || !workspaceReady || !preferencesLoaded || !savedLocation) return;
-    globalWorkspaceWriter.queue({ lastLocation: savedLocation, railOpen, panelWidth, experimentsView: view }, lastGlobalLocation.current === savedLocation ? 250 : 0);
+    globalWorkspaceWriter.queue({ lastLocation: savedLocation, railOpen, panelWidth, railWidth, experimentsView: view }, lastGlobalLocation.current === savedLocation ? 250 : 0);
     lastGlobalLocation.current = savedLocation;
-  }, [location.href, uiState, workspaceReady, preferencesLoaded, railOpen, panelWidth, view]);
+  }, [location.href, uiState, workspaceReady, preferencesLoaded, railOpen, panelWidth, railWidth, view]);
   const onboarded = uiState?.onboardingCompleted ?? false;
-  const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
-  const openDemoWelcome = useCallback(() => setDemoWelcomeOpen(true), []);
   const closeDemoWelcome = useCallback(async (choice: "explore_demo" | "create_project" | "dismiss") => {
     const firstClose = tourCompletedRef.current === false;
     const saved = await updateUiStateMutation.mutateAsync({ tourCompleted: true });
     if (firstClose) captureUiEvent({ name: "demo_welcome_choice", choice });
     setUiState((current) => current && { ...current, tourCompleted: saved.tourCompleted });
-    setDemoWelcomeOpen(false);
     if (choice === "explore_demo") setComposerFocusNonce((n) => n + 1);
   }, []);
-  const createProjectFromDemoWelcome = useCallback(async () => {
-    await closeDemoWelcome("create_project");
-    setNewProjectOpen(true);
-  }, [closeDemoWelcome]);
+  const openNewProject = () => showCustomDialog({
+    component: NewProjectDialog,
+    props: {
+      preferredAgent: uiState?.preferredAgent ?? null,
+      remote: runtime.kind === "ssh",
+      onCreated: onProjectCreated,
+    },
+    onConfirm: () => {},
+    onCancel: "close",
+  });
+  const demoWelcomeShown = useRef(false);
 
   // Show the welcome once the bundled demo is first visible. User projects
   // never open it automatically.
   useEffect(() => {
     if (!projectId || !isDemoProjectId(projectId) || !onboarded) return;
+    if (!projects?.some((project) => project.id === projectId)) return;
     if (uiState?.tourCompleted) return;
-    openDemoWelcome();
-  }, [projectId, onboarded, openDemoWelcome, uiState?.tourCompleted]);
+    if (demoWelcomeShown.current) return;
+    demoWelcomeShown.current = true;
+    showCustomDialog({
+      component: DemoWelcomeModal,
+      props: {},
+      onConfirm: async (choice) => {
+        try {
+          await closeDemoWelcome(choice);
+        } catch {
+          throw new Error(m.tour_save_error());
+        }
+        if (choice === "create_project") openNewProject();
+      },
+      onCancel: () => closeDemoWelcome("dismiss"),
+    });
+  }, [projectId, projects, onboarded, uiState?.tourCompleted]);
 
   const activeProject = projects?.find((p) => p.id === projectId) ?? null;
 
@@ -892,6 +908,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (prefs) {
       setRailOpen(prefs.railOpen);
       setPanelWidth(prefs.panelWidth);
+      if (prefs.railWidth) setRailWidth(clampRailWidth(prefs.railWidth));
       setView(prefs.experimentsView === "tree" ? "tree" : "table");
     }
     setPreferencesLoaded(true);
@@ -940,7 +957,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   useEffect(() => {
     const onResize = () => {
       const focused = document.activeElement;
-      if (railOpen && railTemporarilyHidden && sidebarFitsWithPanel(window.innerWidth)
+      if (railOpen && railTemporarilyHidden && sidebarFitsWithPanel(window.innerWidth, railWidth)
         && focused?.closest(".chat-pane") && focused.getAttribute("aria-label") === m.chat_panel_show_sidebar()) {
         focusAfterRailChange.current = focused;
       } else if (focusAfterRailChange.current && typeof focusAfterRailChange.current !== "string") {
@@ -950,7 +967,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [railOpen, railTemporarilyHidden]);
+  }, [railOpen, railTemporarilyHidden, railWidth]);
 
   // Open an experiment view as a right-panel tab (creating it if needed) and
   // focus it.
@@ -1285,12 +1302,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   );
 
   const closeFileTab = useCallback(
-    (tab: FileViewDef) => {
-      const idx = fileTabs.findIndex((t) => sameFileTab(t, tab));
-      if (idx === -1) return;
+    async (tab: FileViewDef) => {
+      if (!fileTabs.some((candidate) => sameFileTab(candidate, tab))) return;
       const key = projectId ? fileScrollKey(projectId, activeSessionId, tab) : null;
-      if (key && fileBuffersRef.current.get(key)?.needsProtection && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes())) return;
-      setFileTabs((prev) => prev.filter((_, i) => i !== idx));
+      if (key && fileBuffersRef.current.get(key)?.needsProtection && !await confirmFileDiscard(m.file_viewer_discard_unsaved_changes())) return;
+
+      setFileTabs((prev) => prev.filter((candidate) => !sameFileTab(candidate, tab)));
       if (key) {
         fileScrollPositionsRef.current.delete(key);
         fileBuffersRef.current.delete(key);
@@ -1659,7 +1676,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         return;
       }
       const w = Math.round(window.innerWidth - ev.clientX);
-      const max = panelMaxWidth(window.innerWidth, railVisible);
+      const max = panelMaxWidth(window.innerWidth, railVisible ? railWidth : 0);
       // Drag past the usable max by the slop threshold → snap to fullscreen.
       // Dragging back below it drops out of fullscreen to the clamped width.
       if (w > max + FULLSCREEN_SNAP_SLOP) {
@@ -1675,13 +1692,38 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     window.addEventListener("pointercancel", stop);
   };
 
-  const onProjectCreated = (project: Project, publicationError: string | null) => {
+  const resizeRail = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+    const direction = getComputedStyle(handle).direction === "rtl" ? -1 : 1;
+    const startX = e.clientX;
+    const startWidth = railWidth;
+    const panelBesideRail = mainView === "chat" && panelOpen;
+    function stop() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.style.userSelect = prevUserSelect;
+    }
+    function onMove(ev: PointerEvent) {
+      const width = clampRailWidth(startWidth + direction * (ev.clientX - startX));
+      setRailWidth(panelBesideRail ? Math.min(width, railWidthBesidePanel(window.innerWidth)) : width);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  };
+
+  function onProjectCreated(project: Project, publicationError: string | null) {
     setProjects((cur) => (cur ? upsert(cur, project) : [project]));
     void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}` });
     if (publicationError) {
       showAlert(publicationError, "error");
     }
-  };
+  }
 
   const expTab =
     typeof rightTab === "object" && "id" in rightTab ? rightTab : null;
@@ -1952,7 +1994,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   return (
     <div className="app relative flex flex-col h-full">
-      {projectId && <div className="absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-2px/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-[calc(44px/min(1,var(--desktop-page-zoom,1)))] items-center mac-titlebar:flex">
+      {projectId && <div className="titlebar-sidebar-toggle absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-2px/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-[calc(44px/min(1,var(--desktop-page-zoom,1)))] items-center mac-titlebar:flex">
         <Tooltip interactive content={`${railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} className="rounded-md">
           <IconButton aria-label={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} aria-expanded={railVisible} onClick={toggleSidebar}>
             <PanelLeft size={18} />
@@ -1973,6 +2015,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onRetryContent={retryConversation}
             railHeader={railHeader}
             railOpen={railVisible}
+            railWidth={railWidth}
+            onResizeRail={resizeRail}
             mobileRail={mobile}
             onCloseMobileRail={() => setMobileRailOpen(false)}
             contentInert={mobile && panelOpen && mainView === "chat"}
@@ -1984,7 +2028,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 if (railTemporarilyHidden) closePanel();
               }
             }}
-            onNewProject={() => { setMobileRailOpen(false); setNewProjectOpen(true); }}
+            onNewProject={() => { setMobileRailOpen(false); openNewProject(); }}
             mainView={mainView}
             onSelectMainView={(view) => { setMobileRailOpen(false); selectMainView(view); }}
             onOpenFile={openChatFile}
@@ -2599,23 +2643,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           </aside>
         )}
       </div>
-      {newProjectOpen && (
-        <NewProjectDialog
-          preferredAgent={uiState.preferredAgent}
-          remote={runtime.kind === "ssh"}
-          onClose={() => setNewProjectOpen(false)}
-          onCreated={(project, publicationError) => {
-            setNewProjectOpen(false);
-            onProjectCreated(project, publicationError);
-          }}
-        />
-      )}
-      {demoWelcomeOpen && activeProject && isDemoProjectId(activeProject.id) && (
-        <DemoWelcomeModal
-          onClose={closeDemoWelcome}
-          onCreateProject={createProjectFromDemoWelcome}
-        />
-      )}
       <EscapeScope enabled={scopeMenuOpen} onEscape={() => { setScopeMenuOpen(false); scopeTriggerRef.current?.focus(); }} />
     </div>
   );

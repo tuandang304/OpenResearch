@@ -44,19 +44,47 @@ pub fn launched_as_app_bundle() -> bool {
     is_bundle_exe_launch(&exe, std::env::args_os().next().as_deref())
 }
 
-/// The whole argument list the Windows launcher and the Linux AppImage's AppRun
-/// start `orx` with; `orx app` with anything after it is not the app.
-#[cfg(all(desktop_app, not(target_os = "macos")))]
+/// The argument the Windows launcher and the Linux AppImage's AppRun start `orx`
+/// with, followed by nothing or the `openresearch:` link that opened the app.
+#[cfg_attr(not(all(desktop_app, not(target_os = "macos"))), allow(dead_code))]
 pub const APP_ARG: &str = "app";
 
-/// Carries `--no-telemetry` into `orx app`, whose argument list must stay exactly [`APP_ARG`].
+// Also in windows/launcher.
+const LINK_SCHEME: &str = "openresearch:";
+
+/// Carries `--no-telemetry` into `orx app`, whose argument list must stay [`APP_ARG`] and at most a link.
 #[cfg(all(desktop_app, not(target_os = "macos")))]
 pub const APP_NO_TELEMETRY_ENV: &str = "ORX_APP_NO_TELEMETRY";
 
 #[cfg(all(desktop_app, not(target_os = "macos")))]
 pub fn launched_with_app_arg() -> bool {
-    let mut args = std::env::args_os().skip(1);
-    args.next().is_some_and(|arg| arg == APP_ARG) && args.next().is_none()
+    app_launch(std::env::args_os().skip(1)).is_some()
+}
+
+/// The `openresearch:` link `orx app` was started with.
+#[cfg(all(desktop_app, not(target_os = "macos")))]
+fn launch_link() -> Option<String> {
+    app_launch(std::env::args_os().skip(1)).flatten()
+}
+
+/// `None` unless `args` are `app` or `app <openresearch: link>`; then `Some` of the link, if any.
+#[cfg_attr(not(all(desktop_app, not(target_os = "macos"))), allow(dead_code))]
+fn app_launch(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<Option<String>> {
+    if args.next()? != APP_ARG {
+        return None;
+    }
+    let link = match args.next() {
+        None => None,
+        Some(arg) => Some(arg.into_string().ok().filter(|arg| is_app_link(arg))?),
+    };
+    args.next().is_none().then_some(link)
+}
+
+/// Whether `arg` is an `openresearch:` link, the only argument the app takes.
+#[cfg_attr(not(all(desktop_app, not(target_os = "macos"))), allow(dead_code))]
+fn is_app_link(arg: &str) -> bool {
+    arg.get(..LINK_SCHEME.len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(LINK_SCHEME))
 }
 
 /// The dock and app grid name and icon a window only through a desktop entry.
@@ -72,27 +100,52 @@ fn install_desktop_entry() {
         return;
     };
     let entry = desktop_entry(appimage, icon_path);
-    let installed = || -> std::io::Result<()> {
+    let entry_changed = || -> std::io::Result<bool> {
         write_if_changed(&icon, include_bytes!("../../linux/OpenResearch.png"))?;
         write_if_changed(
             &data.join("applications/openresearch.desktop"),
             entry.as_bytes(),
         )
     };
-    if let Err(err) = installed() {
-        eprintln!("openresearch app: could not add OpenResearch to your applications: {err}");
+    match entry_changed() {
+        // The entry's MimeType offers it; this makes it the handler for openresearch: links.
+        Ok(true) => {
+            let mut handler = std::process::Command::new("xdg-mime");
+            handler.args([
+                "default",
+                "openresearch.desktop",
+                "x-scheme-handler/openresearch",
+            ]);
+            crate::local::shell_env::restore_host_gui_env(&mut handler);
+            std::thread::spawn(move || match handler.output() {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => eprintln!(
+                    "openresearch app: could not register openresearch: links: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(err) => {
+                    eprintln!("openresearch app: could not register openresearch: links: {err}")
+                }
+            });
+        }
+        Ok(false) => {}
+        Err(err) => {
+            eprintln!("openresearch app: could not add OpenResearch to your applications: {err}")
+        }
     }
 }
 
+/// Whether it wrote the file.
 #[cfg(all(desktop_app, target_os = "linux"))]
-fn write_if_changed(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+fn write_if_changed(path: &std::path::Path, contents: &[u8]) -> std::io::Result<bool> {
     if std::fs::read(path).is_ok_and(|current| current == contents) {
-        return Ok(());
+        return Ok(false);
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, contents)
+    std::fs::write(path, contents)?;
+    Ok(true)
 }
 
 /// linux/OpenResearch.desktop, launching the AppImage at `appimage` with the icon at `icon`.
@@ -113,7 +166,11 @@ fn desktop_entry(appimage: &str, icon: &str) -> String {
         .lines()
         .map(|line| match line.split_once('=') {
             Some(("Exec", _)) => {
-                format!("Exec=\"{}\"\nTryExec={}\n", string(&arg), string(appimage))
+                format!(
+                    "Exec=\"{}\" %u\nTryExec={}\n",
+                    string(&arg),
+                    string(appimage)
+                )
             }
             Some(("Icon", _)) => format!("Icon={}\n", string(icon)),
             _ => format!("{line}\n"),
@@ -130,12 +187,13 @@ const APP_PORT: u16 = 4792;
 #[cfg(desktop_app)]
 pub async fn run() {
     #[cfg(not(target_os = "macos"))]
-    let focus_requests = {
+    let (focus_requests, link) = {
         // A relaunched Windows app first waits out its predecessor, which holds
         // the claim (Linux relaunches by exec, which releases it).
         crate::updates::await_replaced_parent();
-        match instance::claim() {
-            Some(requests) => requests,
+        let link = launch_link();
+        match instance::claim(link.as_deref()) {
+            Some(requests) => (requests, link),
             None => return,
         }
     };
@@ -188,7 +246,12 @@ pub async fn run() {
     #[cfg(target_os = "macos")]
     imp::run_event_loop(port, false);
     #[cfg(not(target_os = "macos"))]
-    imp::run_event_loop(port, false, focus_requests);
+    imp::run_event_loop(
+        port,
+        false,
+        focus_requests,
+        link.as_deref().and_then(link_path),
+    );
 }
 
 #[cfg(all(target_os = "macos", debug_assertions))]
@@ -327,12 +390,63 @@ fn opens_in_browser(url: &str) -> bool {
 }
 
 /// The dashboard path an `openresearch://reproduce/<paper id>` link opens; the page validates the id.
-#[cfg_attr(not(all(desktop_app, target_os = "macos")), allow(dead_code))]
-fn deep_link_path(scheme: &str, host: Option<&str>, path: &str) -> Option<String> {
-    if scheme != "openresearch" || host != Some("reproduce") || path.len() < 2 {
+#[cfg_attr(not(desktop_app), allow(dead_code))]
+fn deep_link_path(url: &url::Url) -> Option<String> {
+    let path = url.path();
+    if url.scheme() != "openresearch" || url.host_str() != Some("reproduce") || path.len() < 2 {
         return None;
     }
     Some(format!("/reproduce{path}"))
+}
+
+/// [`deep_link_path`] for a link that arrived as text, on the command line or from a second launch.
+#[cfg_attr(not(all(desktop_app, not(target_os = "macos"))), allow(dead_code))]
+fn link_path(link: &str) -> Option<String> {
+    deep_link_path(&url::Url::parse(link).ok()?)
+}
+
+/// The link a second Windows launch leaves for the running app, whose focus
+/// event has no room for one. Written before the event is set.
+#[cfg(any(windows, test))]
+mod link_file {
+    use std::path::Path;
+
+    const NAME: &str = "app-link";
+
+    pub(super) fn leave(dir: &Path, link: &str) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        // Renamed into place, so the app never reads half a link.
+        let staged = dir.join(format!("{NAME}.{}", std::process::id()));
+        std::fs::write(&staged, link)?;
+        std::fs::rename(staged, dir.join(NAME))
+    }
+
+    pub(super) fn take(dir: &Path) -> Option<String> {
+        // Renamed away first, so a link left meanwhile waits for its own event.
+        let taken = dir.join(format!("{NAME}.taken"));
+        std::fs::rename(dir.join(NAME), &taken).ok()?;
+        let link = std::fs::read_to_string(&taken).ok();
+        let _ = std::fs::remove_file(&taken);
+        link.filter(|link| super::is_app_link(link))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{leave, take};
+
+        #[test]
+        fn the_running_app_takes_the_link_a_second_launch_left_once() {
+            let dir = std::env::temp_dir().join(format!("orx-link-{}", uuid::Uuid::new_v4()));
+            assert_eq!(take(&dir), None);
+            leave(&dir, "openresearch://reproduce/1").unwrap();
+            leave(&dir, "openresearch://reproduce/2").unwrap();
+            assert_eq!(take(&dir).as_deref(), Some("openresearch://reproduce/2"));
+            assert_eq!(take(&dir), None);
+            leave(&dir, "https://example.com").unwrap();
+            assert_eq!(take(&dir), None);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -344,6 +458,8 @@ fn wide(text: &str) -> Vec<u16> {
 /// second launch brings the running window forward and exits.
 #[cfg(windows)]
 mod instance {
+    use std::path::PathBuf;
+
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0,
     };
@@ -356,41 +472,58 @@ mod instance {
     const MUTEX: &str = r"Local\OpenResearchApp";
     const FOCUS_EVENT: &str = r"Local\OpenResearchAppFocus";
 
-    /// Signalled by each later launch.
-    pub(super) struct FocusRequests(HANDLE);
+    /// Signalled by each later launch, which may first leave a link in the directory.
+    pub(super) struct FocusRequests {
+        event: HANDLE,
+        link_dir: Option<PathBuf>,
+    }
 
     // SAFETY: an event handle may be waited on from any thread.
     unsafe impl Send for FocusRequests {}
 
     /// Claims the app for this process. `None` means another instance has it
-    /// and was asked to come forward.
-    pub(super) fn claim() -> Option<FocusRequests> {
+    /// and was asked to come forward, opening `link`.
+    pub(super) fn claim(link: Option<&str>) -> Option<FocusRequests> {
+        let link_dir = dirs::data_local_dir().map(|dir| dir.join("OpenResearch"));
         // SAFETY: plain syscalls on NUL-terminated names. The handles stay open
         // on purpose: the claim lasts until the process exits.
         // Bound before the calls, so no drop runs between CreateMutexW and GetLastError.
         let (event_name, mutex_name) = (super::wide(FOCUS_EVENT), super::wide(MUTEX));
-        unsafe {
+        let (event, running) = unsafe {
             // The event first, so it exists by the time anyone sees the claim.
             // For a second launch this opens the running app's event.
             let event = CreateEventW(std::ptr::null(), 0, 0, event_name.as_ptr());
             CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
-            if GetLastError() == ERROR_ALREADY_EXISTS {
+            (event, GetLastError() == ERROR_ALREADY_EXISTS)
+        };
+        if running {
+            if let (Some(link), Some(dir)) = (link, &link_dir) {
+                if let Err(error) = super::link_file::leave(dir, link) {
+                    eprintln!("openresearch app: could not pass the link on: {error}");
+                }
+            }
+            // SAFETY: plain syscalls on the event opened above.
+            unsafe {
                 // Windows lets the running app take the foreground only with our leave.
                 AllowSetForegroundWindow(ASFW_ANY);
                 SetEvent(event);
                 CloseHandle(event);
-                return None;
             }
-            Some(FocusRequests(event))
+            return None;
         }
+        // Left for an app that quit before it read it.
+        if let Some(dir) = &link_dir {
+            let _ = super::link_file::take(dir);
+        }
+        Some(FocusRequests { event, link_dir })
     }
 
     impl FocusRequests {
-        /// Calls `on_request` for every later launch, from a thread of its own.
-        pub(super) fn listen(self, on_request: impl Fn() + Send + 'static) {
+        /// Calls `on_request` with its link for every later launch, from a thread of its own.
+        pub(super) fn listen(self, on_request: impl Fn(Option<String>) + Send + 'static) {
             std::thread::spawn(move || {
                 while self.wait() {
-                    on_request();
+                    on_request(self.link_dir.as_deref().and_then(super::link_file::take));
                 }
             });
         }
@@ -399,7 +532,7 @@ mod instance {
         // its bare handle.
         fn wait(&self) -> bool {
             // SAFETY: waits on the event this process created and never closes.
-            unsafe { WaitForSingleObject(self.0, INFINITE) == WAIT_OBJECT_0 }
+            unsafe { WaitForSingleObject(self.event, INFINITE) == WAIT_OBJECT_0 }
         }
     }
 }
@@ -410,6 +543,7 @@ mod instance {
 #[cfg(all(desktop_app, target_os = "linux"))]
 mod instance {
     use std::fs::{File, OpenOptions, TryLockError};
+    use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -443,8 +577,8 @@ mod instance {
     }
 
     /// Claims the app for this process. `None` means another instance has it
-    /// and was asked to come forward.
-    pub(super) fn claim() -> Option<FocusRequests> {
+    /// and was asked to come forward, opening `link`.
+    pub(super) fn claim(link: Option<&str>) -> Option<FocusRequests> {
         let Some((dir, name)) = claim_paths() else {
             eprintln!(
                 "openresearch app: found no private directory for the app lock; a second \
@@ -452,10 +586,15 @@ mod instance {
             );
             return Some(FocusRequests(None));
         };
-        claim_at(&dir, &name, Duration::from_secs(5))
+        claim_at(&dir, &name, Duration::from_secs(5), link)
     }
 
-    fn claim_at(dir: &Path, name: &str, wait: Duration) -> Option<FocusRequests> {
+    fn claim_at(
+        dir: &Path,
+        name: &str,
+        wait: Duration,
+        link: Option<&str>,
+    ) -> Option<FocusRequests> {
         let socket = dir.join(format!("{name}.sock"));
         let lock_path = dir.join(format!("{name}.lock"));
         let lock = std::fs::create_dir_all(dir)
@@ -466,7 +605,7 @@ mod instance {
                     .write(true)
                     .open(&lock_path)
             })
-            .and_then(|file| take_lock(file, &socket, wait));
+            .and_then(|file| take_lock(file, &socket, wait, link));
         let lock = match lock {
             Ok(Some(file)) => Some(file),
             Ok(None) => return None,
@@ -477,7 +616,7 @@ mod instance {
                     lock_path.display()
                 );
                 // Unguarded, so only the socket can say whether an app is running.
-                if UnixStream::connect(&socket).is_ok() {
+                if hand_over(&socket, link) {
                     return None;
                 }
                 None
@@ -508,7 +647,12 @@ mod instance {
     /// The lock, or `None` once the app holding it was asked to come forward (or
     /// never answered). Retries both: when two launch together, the winner may not
     /// have bound its socket yet, or may give the lock up because it can't.
-    fn take_lock(file: File, socket: &Path, wait: Duration) -> std::io::Result<Option<File>> {
+    fn take_lock(
+        file: File,
+        socket: &Path,
+        wait: Duration,
+        link: Option<&str>,
+    ) -> std::io::Result<Option<File>> {
         let deadline = Instant::now() + wait;
         loop {
             match file.try_lock() {
@@ -516,8 +660,7 @@ mod instance {
                 Err(TryLockError::Error(error)) => return Err(error),
                 Err(TryLockError::WouldBlock) => {}
             }
-            // The running app takes the connection itself as the request.
-            if UnixStream::connect(socket).is_ok() {
+            if hand_over(socket, link) {
                 return Ok(None);
             }
             if Instant::now() >= deadline {
@@ -531,17 +674,36 @@ mod instance {
         }
     }
 
+    /// The running app takes the connection itself as the request, and what is
+    /// written on it as the link to open.
+    fn hand_over(socket: &Path, link: Option<&str>) -> bool {
+        let Ok(mut stream) = UnixStream::connect(socket) else {
+            return false;
+        };
+        if let Some(link) = link {
+            // An app from before links closes without reading; it still comes forward.
+            let _ = stream.write_all(link.as_bytes());
+        }
+        true
+    }
+
+    fn read_link(stream: UnixStream) -> Option<String> {
+        // A launch that never closes its end must not hold up the next one.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+        let mut link = String::new();
+        stream.take(8192).read_to_string(&mut link).ok()?;
+        Some(link).filter(|link| super::is_app_link(link))
+    }
+
     impl FocusRequests {
-        /// Calls `on_request` for every later launch, from a thread of its own.
-        pub(super) fn listen(self, on_request: impl Fn() + Send + 'static) {
+        /// Calls `on_request` with its link for every later launch, from a thread of its own.
+        pub(super) fn listen(self, on_request: impl Fn(Option<String>) + Send + 'static) {
             let Some(listener) = self.0 else {
                 return;
             };
             std::thread::spawn(move || {
-                for connection in listener.incoming() {
-                    if connection.is_ok() {
-                        on_request();
-                    }
+                for stream in listener.incoming().flatten() {
+                    on_request(read_link(stream));
                 }
             });
         }
@@ -552,6 +714,7 @@ mod instance {
         use super::{claim_at, is_private};
         use std::os::unix::fs::PermissionsExt;
         use std::path::{Path, PathBuf};
+        use std::sync::mpsc;
         use std::time::Duration;
 
         fn private_dir() -> PathBuf {
@@ -564,9 +727,27 @@ mod instance {
         #[test]
         fn a_second_launch_defers_to_the_running_app() {
             let dir = private_dir();
-            let first = claim_at(&dir, "app", Duration::ZERO).expect("the first launch is the app");
+            let first =
+                claim_at(&dir, "app", Duration::ZERO, None).expect("the first launch is the app");
             assert!(first.0.is_some());
-            assert!(claim_at(&dir, "app", Duration::from_secs(1)).is_none());
+            assert!(claim_at(&dir, "app", Duration::from_secs(1), None).is_none());
+        }
+
+        #[test]
+        fn a_second_launch_hands_its_link_to_the_running_app() {
+            let dir = private_dir();
+            let (sent, requests) = mpsc::channel();
+            claim_at(&dir, "app", Duration::ZERO, None)
+                .expect("the first launch is the app")
+                .listen(move |link| sent.send(link).unwrap());
+            let link = "openresearch://reproduce/1706.03762";
+            assert!(claim_at(&dir, "app", Duration::from_secs(1), Some(link)).is_none());
+            assert!(claim_at(&dir, "app", Duration::from_secs(1), None).is_none());
+            assert!(claim_at(&dir, "app", Duration::from_secs(1), Some("https://x.y")).is_none());
+            let wait = Duration::from_secs(5);
+            assert_eq!(requests.recv_timeout(wait).unwrap().as_deref(), Some(link));
+            assert_eq!(requests.recv_timeout(wait).unwrap(), None);
+            assert_eq!(requests.recv_timeout(wait).unwrap(), None);
         }
 
         #[test]
@@ -574,9 +755,9 @@ mod instance {
             let dir = private_dir();
             // Past sun_path's 108 bytes, so the bind fails after the lock is taken.
             let name = "x".repeat(120);
-            let first = claim_at(&dir, &name, Duration::ZERO).expect("still runs");
+            let first = claim_at(&dir, &name, Duration::ZERO, None).expect("still runs");
             assert!(first.0.is_none());
-            assert!(claim_at(&dir, &name, Duration::ZERO).is_some());
+            assert!(claim_at(&dir, &name, Duration::ZERO, None).is_some());
         }
 
         #[test]
@@ -648,10 +829,10 @@ mod imp {
         MenuSpec(Vec<PageMenu>),
         #[cfg(target_os = "macos")]
         MenuState(HashMap<String, PageMenuState>),
+        /// A later launch, with the `openresearch:` link it was opened with.
         #[cfg(not(target_os = "macos"))]
-        Focus,
+        Focus(Option<String>),
         /// The dashboard page finished loading and can take `orx:open-path`.
-        #[cfg(target_os = "macos")]
         PageReady,
         #[cfg(windows)]
         Close,
@@ -686,6 +867,7 @@ mod imp {
         port: u16,
         external_server: bool,
         #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
+        #[cfg(not(target_os = "macos"))] launch_path: Option<String>,
     ) {
         let origin = format!(
             "http://{}:{port}",
@@ -748,8 +930,8 @@ mod imp {
         #[cfg(not(target_os = "macos"))]
         {
             let focus = event_loop.create_proxy();
-            focus_requests.listen(move || {
-                let _ = focus.send_event(UserEvent::Focus);
+            focus_requests.listen(move |link| {
+                let _ = focus.send_event(UserEvent::Focus(link));
             });
         }
         #[cfg(windows)]
@@ -811,23 +993,14 @@ mod imp {
                 return;
             }
         };
-        // The dashboard's --base until the page reports what it shows under the titlebar.
-        #[cfg(target_os = "macos")]
-        set_titlebar_color(
-            &window,
-            None,
-            match window.theme() {
-                Theme::Dark => [0x0e, 0x0c, 0x0c],
-                _ => [0xff, 0xff, 0xff],
-            },
-        );
 
         let shown = Rc::new(Cell::new(false));
-        #[cfg(target_os = "macos")]
         let page_ready = Rc::new(Cell::new(false));
         let replaced = Rc::new(RefCell::new(HashMap::new()));
         let builder = WebViewBuilder::new()
             .with_accept_first_mouse(true)
+            // Shows the window material (`add_window_material`) where the page is transparent.
+            .with_transparent(cfg!(target_os = "macos"))
             // Lets the dashboard tell it is in the app, where pop-ups open in the browser.
             .with_initialization_script("window.__ORX_DESKTOP__ = true;")
             .with_initialization_script_for_main_only(
@@ -859,11 +1032,9 @@ mod imp {
                 let window = window.clone();
                 let origin = origin.clone();
                 let shown = shown.clone();
-                #[cfg(target_os = "macos")]
                 let page_ready = page_ready.clone();
                 let proxy = event_loop.create_proxy();
                 move |event, url| {
-                    #[cfg(target_os = "macos")]
                     if matches!(event, PageLoadEvent::Started) {
                         page_ready.set(false);
                     }
@@ -872,11 +1043,8 @@ mod imp {
                     }
                     if super::is_dashboard_url(&url, &origin) {
                         let _ = proxy.send_event(UserEvent::SyncZoom);
-                        #[cfg(target_os = "macos")]
-                        {
-                            page_ready.set(true);
-                            let _ = proxy.send_event(UserEvent::PageReady);
-                        }
+                        page_ready.set(true);
+                        let _ = proxy.send_event(UserEvent::PageReady);
                     }
                     #[cfg(windows)]
                     let _ = proxy.send_event(UserEvent::SyncMaximized);
@@ -916,6 +1084,13 @@ mod imp {
                     }
                     #[cfg(not(target_os = "linux"))]
                     "titlebar:zoom" => window.set_maximized(!window.is_maximized()),
+                    // The window material and traffic lights follow the page's theme preference.
+                    #[cfg(target_os = "macos")]
+                    "appearance:system" => window.set_theme(None),
+                    #[cfg(target_os = "macos")]
+                    "appearance:light" => window.set_theme(Some(Theme::Light)),
+                    #[cfg(target_os = "macos")]
+                    "appearance:dark" => window.set_theme(Some(Theme::Dark)),
                     #[cfg(windows)]
                     "titlebar:minimize" => window.set_minimized(true),
                     #[cfg(windows)]
@@ -953,8 +1128,6 @@ mod imp {
                                     eprintln!("openresearch app: invalid menu state: {error}")
                                 }
                             }
-                        } else if let Some((appearance, color)) = parse_titlebar_message(message) {
-                            set_titlebar_color(&window, appearance, color);
                         }
                     }
                 }
@@ -999,6 +1172,8 @@ mod imp {
         };
         #[cfg(target_os = "macos")]
         add_confirm_panel(&webview);
+        #[cfg(target_os = "macos")]
+        add_window_material(&webview);
 
         let mut zoom_percent = crate::config::desktop_zoom_percent();
         if let Err(error) = sync_page_zoom(&webview, zoom_percent, false) {
@@ -1007,9 +1182,14 @@ mod imp {
         #[cfg(target_os = "macos")]
         align_traffic_lights(&window, zoom_percent);
         let mut quit = Quit::No;
-        // A link that opens the app arrives before its server answers.
-        #[cfg(target_os = "macos")]
-        let (mut server_ready, mut pending_link) = (false, None::<String>);
+        let mut links = DeepLinks {
+            server_ready: false,
+            page_ready,
+            #[cfg(target_os = "macos")]
+            pending: None,
+            #[cfg(not(target_os = "macos"))]
+            pending: launch_path,
+        };
         // What the loaded page was last told; a new page starts unmaximized.
         #[cfg(windows)]
         let mut page_maximized = false;
@@ -1035,14 +1215,7 @@ mod imp {
                 Quit::ShuttingDown => *control_flow = ControlFlow::Exit,
             },
             Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
-                #[cfg(target_os = "macos")]
-                let path = {
-                    server_ready = true;
-                    pending_link.take().unwrap_or_else(|| "/".to_string())
-                };
-                #[cfg(not(target_os = "macos"))]
-                let path = "/";
-                let _ = webview.load_url(&format!("{origin}{path}"));
+                let _ = webview.load_url(&format!("{origin}{}", links.on_server_ready()));
             }
             // A window that never appears is worse than a blank one.
             Event::UserEvent(UserEvent::LoadTimedOut)
@@ -1133,11 +1306,17 @@ mod imp {
             }
             Event::UserEvent(UserEvent::SyncZoom) if matches!(quit, Quit::No) => {
                 let _ = sync_page_zoom(&webview, zoom_percent, false);
+                // The startup alignment measures a window that is still hidden and unlaid-out.
+                #[cfg(target_os = "macos")]
+                align_traffic_lights(&window, zoom_percent);
             }
             // Even before the page loads: a launch that brings nothing up looks
             // like a broken app. While quitting it must stay hidden.
             #[cfg(not(target_os = "macos"))]
-            Event::UserEvent(UserEvent::Focus) if matches!(quit, Quit::No) => {
+            Event::UserEvent(UserEvent::Focus(link)) if matches!(quit, Quit::No) => {
+                if let Some(path) = link.as_deref().and_then(super::link_path) {
+                    links.open(path, &webview, &origin);
+                }
                 shown.set(true);
                 window.set_minimized(false);
                 window.set_visible(true);
@@ -1163,33 +1342,15 @@ mod imp {
                 window.set_visible(true);
                 window.set_focus();
             }
-            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::PageReady) if matches!(quit, Quit::No) => {
-                if let Some(path) = pending_link.take() {
-                    open_in_page(&webview, &path);
-                }
+                links.on_page_ready(&webview);
             }
             #[cfg(target_os = "macos")]
             Event::Opened { urls } if matches!(quit, Quit::No) => {
-                let Some(path) = urls
-                    .iter()
-                    .find_map(|url| super::deep_link_path(url.scheme(), url.host_str(), url.path()))
-                else {
+                let Some(path) = urls.iter().find_map(super::deep_link_path) else {
                     return;
                 };
-                if page_ready.get() {
-                    open_in_page(&webview, &path);
-                } else if server_ready
-                    && !webview
-                        .url()
-                        .is_ok_and(|url| super::is_dashboard_url(&url, &origin))
-                {
-                    // A timed-out or failed first load has nothing coming to deliver it.
-                    let _ = webview.load_url(&format!("{origin}{path}"));
-                } else {
-                    // ServerReady loads it, or PageReady hands it to the loading page.
-                    pending_link = Some(path);
-                }
+                links.open(path, &webview, &origin);
                 // Before the first page shows, the page-load handler reveals the window.
                 if shown.get() {
                     window.set_minimized(false);
@@ -1201,8 +1362,44 @@ mod imp {
         })
     }
 
+    /// Where `openresearch:` links go. One that opens the app arrives before its server answers.
+    struct DeepLinks {
+        server_ready: bool,
+        page_ready: Rc<Cell<bool>>,
+        pending: Option<String>,
+    }
+
+    impl DeepLinks {
+        /// The path the first page load opens.
+        fn on_server_ready(&mut self) -> String {
+            self.server_ready = true;
+            self.pending.take().unwrap_or_else(|| "/".to_string())
+        }
+
+        fn on_page_ready(&mut self, webview: &WebView) {
+            if let Some(path) = self.pending.take() {
+                open_in_page(webview, &path);
+            }
+        }
+
+        fn open(&mut self, path: String, webview: &WebView, origin: &str) {
+            if self.page_ready.get() {
+                open_in_page(webview, &path);
+            } else if self.server_ready
+                && !webview
+                    .url()
+                    .is_ok_and(|url| super::is_dashboard_url(&url, origin))
+            {
+                // A timed-out or failed first load has nothing coming to deliver it.
+                let _ = webview.load_url(&format!("{origin}{path}"));
+            } else {
+                // ServerReady loads it, or PageReady hands it to the loading page.
+                self.pending = Some(path);
+            }
+        }
+    }
+
     /// In-page navigation keeps the page's unsaved-work guards; a reload would skip them.
-    #[cfg(target_os = "macos")]
     fn open_in_page(webview: &WebView, path: &str) {
         let _ = webview.evaluate_script(&format!(
             "window.dispatchEvent(new CustomEvent('orx:open-path', {{ detail: {} }}));",
@@ -1251,30 +1448,6 @@ mod imp {
         let id = super::wide("alphaXiv.OpenResearch");
         // SAFETY: the string is NUL-terminated and outlives the call.
         unsafe { SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
-    }
-
-    /// Reads desktopTitlebar.ts's `titlebar:<preference>:<rrggbb>` message. A "system"
-    /// preference leaves the appearance unforced so the page still sees OS changes.
-    #[cfg(target_os = "macos")]
-    fn parse_titlebar_message(message: &str) -> Option<(Option<Theme>, [u8; 3])> {
-        let (preference, hex) = message.strip_prefix("titlebar:")?.split_once(':')?;
-        let appearance = match preference {
-            "system" => None,
-            "light" => Some(Theme::Light),
-            "dark" => Some(Theme::Dark),
-            _ => return None,
-        };
-        if hex.len() != 6 {
-            return None;
-        }
-        let channel = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
-        Some((appearance, [channel(0)?, channel(2)?, channel(4)?]))
-    }
-
-    #[cfg(target_os = "macos")]
-    fn set_titlebar_color(window: &Window, appearance: Option<Theme>, [r, g, b]: [u8; 3]) {
-        window.set_theme(appearance);
-        window.set_background_color(Some((r, g, b, 0xff)));
     }
 
     /// The top edge only: the shadow frame tao keeps around an undecorated window
@@ -1535,6 +1708,31 @@ mod imp {
         path.with_file_name(name)
     }
 
+    /// The sidebar's blur: the page leaves the sidebar transparent over this view.
+    #[cfg(target_os = "macos")]
+    fn add_window_material(webview: &WebView) {
+        use objc2_app_kit::{
+            NSAutoresizingMaskOptions, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+            NSVisualEffectState, NSVisualEffectView, NSWindowOrderingMode,
+        };
+
+        let mtm = MainThreadMarker::new().expect("desktop app runs on the main thread");
+        let wk = webview.webview();
+        let Some(parent) = (unsafe { wk.superview() }) else {
+            return;
+        };
+        let material = NSVisualEffectView::new(mtm);
+        material.setFrame(parent.bounds());
+        material.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        material.setMaterial(NSVisualEffectMaterial::Sidebar);
+        material.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        material.setState(NSVisualEffectState::FollowsWindowActiveState);
+        parent.addSubview_positioned_relativeTo(&material, NSWindowOrderingMode::Below, Some(&wk));
+    }
+
     /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
     /// every `window.confirm` with false, so add it to the delegate's class.
     #[cfg(target_os = "macos")]
@@ -1588,11 +1786,7 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        #[cfg(target_os = "macos")]
-        use super::parse_titlebar_message;
         use super::ZoomAction;
-        #[cfg(target_os = "macos")]
-        use tao::window::Theme;
 
         #[test]
         fn zoom_steps_clamp_and_reset() {
@@ -1603,38 +1797,16 @@ mod imp {
             assert_eq!(ZoomAction::Reset.next(50), 100);
             assert_eq!(ZoomAction::Reset.next(200), 100);
         }
-
-        #[cfg(target_os = "macos")]
-        #[test]
-        fn titlebar_messages_carry_a_preference_and_an_opaque_color() {
-            assert_eq!(
-                parse_titlebar_message("titlebar:system:0e0c0c"),
-                Some((None, [0x0e, 0x0c, 0x0c]))
-            );
-            assert_eq!(
-                parse_titlebar_message("titlebar:dark:FfFfFf"),
-                Some((Some(Theme::Dark), [0xff, 0xff, 0xff]))
-            );
-            for message in [
-                "titlebar:drag",
-                "titlebar:dark:fff",
-                "titlebar:sepia:ffffff",
-                "titlebar:dark:zzzzzz",
-                "titlebar:dark:ffffé",
-                "theme:dark:ffffff",
-            ] {
-                assert_eq!(parse_titlebar_message(message), None, "{message}");
-            }
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        deep_link_path, desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser,
+        app_launch, desktop_entry, is_bundle_exe_launch, is_dashboard_url, link_path,
+        opens_in_browser,
     };
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::path::Path;
 
     #[test]
@@ -1643,29 +1815,57 @@ mod tests {
             r"/home/me/My Apps/Open$Re%1\x.AppImage",
             "/home/me/.local/share/icons/hicolor/256x256/apps/openresearch.png",
         );
-        assert!(entry.contains("\nExec=\"/home/me/My Apps/Open\\\\$Re%%1\\\\\\\\x.AppImage\"\n"));
+        assert!(entry.contains("\nExec=\"/home/me/My Apps/Open\\\\$Re%%1\\\\\\\\x.AppImage\" %u\n"));
         assert!(entry.contains("\nTryExec=/home/me/My Apps/Open$Re%1\\\\x.AppImage\n"));
         assert!(entry.contains(
             "\nIcon=/home/me/.local/share/icons/hicolor/256x256/apps/openresearch.png\n"
         ));
         assert!(entry.contains("\nStartupWMClass=OpenResearch\n"));
+        assert!(entry.contains("\nMimeType=x-scheme-handler/openresearch;\n"));
         assert!(!entry.contains("orx app"));
     }
 
     #[test]
     fn reproduce_links_open_the_reproduce_page_for_their_paper() {
         assert_eq!(
-            deep_link_path("openresearch", Some("reproduce"), "/1706.03762"),
-            Some("/reproduce/1706.03762".to_string())
+            link_path("openresearch://reproduce/1706.03762").as_deref(),
+            Some("/reproduce/1706.03762")
         );
         assert_eq!(
-            deep_link_path("openresearch", Some("reproduce"), "/hep-th/9901001"),
-            Some("/reproduce/hep-th/9901001".to_string())
+            link_path("openresearch://reproduce/hep-th/9901001").as_deref(),
+            Some("/reproduce/hep-th/9901001")
         );
-        assert_eq!(deep_link_path("openresearch", Some("reproduce"), "/"), None);
-        assert_eq!(deep_link_path("openresearch", Some("reproduce"), ""), None);
-        assert_eq!(deep_link_path("openresearch", Some("settings"), "/x"), None);
-        assert_eq!(deep_link_path("https", Some("reproduce"), "/x"), None);
+        assert_eq!(link_path("openresearch://reproduce/"), None);
+        assert_eq!(link_path("openresearch://reproduce"), None);
+        assert_eq!(link_path("openresearch://settings/x"), None);
+        assert_eq!(link_path("https://reproduce/x"), None);
+        assert_eq!(link_path("not a link"), None);
+        assert_eq!(
+            link_path("OPENRESEARCH://reproduce/1").as_deref(),
+            Some("/reproduce/1")
+        );
+    }
+
+    fn app_args(args: &[&str]) -> Option<Option<String>> {
+        app_launch(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn the_app_takes_only_an_openresearch_link_after_app() {
+        let link = "openresearch://reproduce/1706.03762";
+        assert_eq!(app_args(&["app"]), Some(None));
+        assert_eq!(app_args(&["app", link]), Some(Some(link.to_string())));
+        assert_eq!(
+            app_args(&["app", "OpenResearch://reproduce/x"]),
+            Some(Some("OpenResearch://reproduce/x".to_string()))
+        );
+        assert_eq!(app_args(&[]), None);
+        assert_eq!(app_args(&["up"]), None);
+        assert_eq!(app_args(&["app", "--help"]), None);
+        assert_eq!(app_args(&["app", "https://example.com"]), None);
+        assert_eq!(app_args(&["app", link, link]), None);
+        assert_eq!(app_args(&["app", "openresearch"]), None);
+        assert_eq!(app_args(&["app", "openresearché"]), None);
     }
 
     const EXE: &str = "/Applications/OpenResearch.app/Contents/MacOS/OpenResearch";
