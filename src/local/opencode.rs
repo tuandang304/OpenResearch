@@ -363,11 +363,6 @@ fn playbook_md_for_session(
         cross_harness_bullet(session_harness)
     );
     let project_state = project_state_md(project, state);
-    let skill_names = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
-        .iter()
-        .map(|skill| format!("- `{}`: {}", skill.name, skill.description))
-        .collect::<Vec<_>>()
-        .join("\n");
     let template = SYSTEM_PROMPT
         .split_once("-->\n\n")
         .map(|(_, rest)| rest)
@@ -380,7 +375,6 @@ fn playbook_md_for_session(
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)
-        .replace("{skill_names}", &skill_names)
 }
 
 /// Keep the files we drop into the checkout out of `git status` / accidental
@@ -1576,9 +1570,10 @@ mod tests {
         assert!(md.contains("Use the available OpenResearch skills"));
         assert!(md.contains("execute important user flows"));
         assert!(!md.contains("orx skill <name>"));
-        // Native catalogs may abbreviate descriptions; preserve routing context here.
+        assert!(md.contains("Native OpenResearch skills start with `orx-`"));
+        assert!(md.contains("Load the relevant skill before acting"));
         for skill in agent_skills::skills(SkillSet::Local) {
-            assert!(md.contains(&format!("- `{}`: {}", skill.name, skill.description)));
+            assert!(!md.contains(&format!("- `{}`:", skill.name)));
         }
         assert!(md.contains("orx-compute"));
         assert!(md.contains("helping the user across the research process"));
@@ -1597,7 +1592,6 @@ mod tests {
         let md = playbook_md(&project, &ProjectState::default());
         assert!(md.contains("default target"));
         assert!(md.contains("orx-compute"));
-        assert!(md.contains("orx-instances"));
         assert!(!md.contains("## Cardinal rules"));
         assert!(!md.contains("## Command index"));
         assert!(!md.contains("## The auto-research loop"));
