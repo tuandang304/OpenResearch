@@ -2631,6 +2631,8 @@ export interface SleepStatus {
   plan: {
     gpuBudgetUsd: number;
     goal?: string;
+    notes?: string;
+    askFirst?: boolean;
     until?: number;
     objective?: {
       metric: string;
@@ -2644,6 +2646,10 @@ export interface SleepStatus {
   state: {
     finished?: { reason: string; detail: string; at: number };
     assessment?: { verdict: string; note: string; revisedImprovePct?: number };
+    kickedOff?: boolean;
+    briefingAsked?: boolean;
+    briefed?: boolean;
+    understanding?: string;
     researchRounds?: number;
     interrupts?: number;
   };
@@ -2690,6 +2696,8 @@ export interface SleepRequest {
   budgetUsd: number;
   hours: number | null;
   goal: string | null;
+  notes: string | null;
+  askFirst: boolean;
   metric: string | null;
   direction: "max" | "min";
   targetPct: number | null;

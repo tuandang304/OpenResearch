@@ -9685,6 +9685,11 @@ async fn process_sleep_sessions(chat: &Arc<ChatHost>) -> Result<()> {
                     if latest.state.assessment != stored.state.assessment {
                         state.assessment = latest.state.assessment;
                     }
+                    if latest.state.understanding != stored.state.understanding {
+                        state.understanding = latest.state.understanding;
+                        state.briefed = latest.state.briefed;
+                        state.kicked_off = latest.state.kicked_off;
+                    }
                     if latest.state.finished != stored.state.finished {
                         state.finished = latest.state.finished;
                         state.finish_notified = latest.state.finish_notified;

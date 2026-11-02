@@ -18,6 +18,11 @@
 //!   metrics rather than the agent's own claim. A target written in plain
 //!   words is judged by the agent instead, which finishes the plan with
 //!   `orx sleep done` once the evidence shows it is reached.
+//! - **A briefing first.** Unless the user skips it, the agent starts by
+//!   asking the user a short round of clarifying questions while they are
+//!   still at the computer, and records the agreed direction with
+//!   `orx sleep begin` before it works alone. The user's own notes for the
+//!   night ride every turn beside the plan.
 //! - **Escalation.** When finished runs stop improving the best result, the
 //!   agent is told to fan out cheap research subagents across sources before
 //!   trying again, and to reassess whether the target is still feasible.
@@ -44,6 +49,13 @@ pub const MAX_BACKOFF_SECS: u64 = 60 * 60;
 pub const ACTIVE_RUN_CHECK_SECS: u64 = 30 * 60;
 /// The longest target the user can write; it is sent with every turn.
 pub const MAX_GOAL_CHARS: usize = 2000;
+/// The longest notes the user can write; they are sent with every turn.
+pub const MAX_NOTES_CHARS: usize = 2000;
+/// The longest agreed direction the agent can record after the briefing.
+pub const MAX_UNDERSTANDING_CHARS: usize = 4000;
+/// How long the agent waits, idle, for the user to answer its briefing
+/// questions before it starts on the defaults it proposed.
+pub const BRIEFING_WAIT_SECS: u64 = 20 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -105,6 +117,14 @@ pub struct SleepPlan {
     /// reached and then finishes the plan itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
+    /// What the user wants kept in mind while they are away, in their words:
+    /// preferences, things to avoid, priorities. Sent with every turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Ask the user clarifying questions about the direction before working
+    /// unattended.
+    #[serde(default)]
+    pub ask_first: bool,
     /// Stop at this time (Unix ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<i64>,
@@ -146,6 +166,8 @@ impl Default for SleepPlan {
         Self {
             gpu_budget_usd: 0.0,
             goal: None,
+            notes: None,
+            ask_first: false,
             until: None,
             objective: None,
             idle_secs: default_idle_secs(),
@@ -162,18 +184,22 @@ impl SleepPlan {
         if !self.gpu_budget_usd.is_finite() || self.gpu_budget_usd < 0.0 {
             return Err(anyhow!("The GPU budget must be zero or more US dollars."));
         }
-        let goal = self
-            .goal
-            .as_deref()
-            .map(str::trim)
-            .filter(|goal| !goal.is_empty())
-            .map(str::to_string);
+        let goal = trimmed(self.goal.as_deref());
         if goal
             .as_ref()
             .is_some_and(|goal| goal.chars().count() > MAX_GOAL_CHARS)
         {
             return Err(anyhow!(
                 "Keep the target under {MAX_GOAL_CHARS} characters."
+            ));
+        }
+        let notes = trimmed(self.notes.as_deref());
+        if notes
+            .as_ref()
+            .is_some_and(|notes| notes.chars().count() > MAX_NOTES_CHARS)
+        {
+            return Err(anyhow!(
+                "Keep the notes under {MAX_NOTES_CHARS} characters."
             ));
         }
         if let Some(objective) = &self.objective {
@@ -201,9 +227,17 @@ impl SleepPlan {
         Ok(Self {
             stall_runs: self.stall_runs.max(1),
             goal,
+            notes,
             ..self
         })
     }
+}
+
+/// The text trimmed, or `None` when nothing is left.
+pub fn trimmed(text: Option<&str>) -> Option<String> {
+    text.map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +311,16 @@ pub struct SleepState {
     pub nudges: u32,
     #[serde(default)]
     pub kicked_off: bool,
+    /// The briefing questions went out and the agent waits for answers.
+    #[serde(default)]
+    pub briefing_asked: bool,
+    /// The briefing is over: the agent recorded the agreed direction, or the
+    /// user did not answer in time.
+    #[serde(default)]
+    pub briefed: bool,
+    /// The direction the agent understood from the briefing, in its words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub understanding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_since: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -303,6 +347,31 @@ pub struct SleepState {
     pub retrospective_key: Option<String>,
     #[serde(default)]
     pub retrospectives: u32,
+}
+
+/// Whether the agent still has to brief with the user before working alone.
+pub fn briefing_pending(plan: &SleepPlan, state: &SleepState) -> bool {
+    plan.ask_first && !state.briefed && !state.kicked_off && state.finished.is_none()
+}
+
+/// Ends the briefing with the direction the agent understood. Returns whether
+/// the briefing was still open.
+pub fn record_briefing(state: &mut SleepState, understanding: &str) -> Result<bool> {
+    let Some(understanding) = trimmed(Some(understanding)) else {
+        return Err(anyhow!(
+            "Summarize in --understanding the direction you agreed on with the user."
+        ));
+    };
+    if understanding.chars().count() > MAX_UNDERSTANDING_CHARS {
+        return Err(anyhow!(
+            "Keep the understanding under {MAX_UNDERSTANDING_CHARS} characters."
+        ));
+    }
+    let was_open = !state.briefed;
+    state.understanding = Some(understanding);
+    state.briefed = true;
+    state.kicked_off = true;
+    Ok(was_open)
 }
 
 // --- progress -----------------------------------------------------------------
@@ -735,6 +804,13 @@ pub async fn admit_run(project_id: &str, args: &crate::ExpRunArgs) -> Result<Opt
         ));
     };
     let now = crate::store::now_ms();
+    if rate > 0.0 && briefing_pending(&sleep.plan, &sleep.state) {
+        return Err(anyhow!(
+            "Sleep mode is still in its briefing: ask the user your clarifying questions and \
+             record the agreed direction with `orx sleep begin --understanding \"…\"` before \
+             paid runs start. Free hardware is allowed."
+        ));
+    }
     if let Some(finish) = sleep.state.finished.as_ref().filter(|_| rate > 0.0) {
         return Err(anyhow!(
             "Sleep mode has finished ({}), so no more paid runs start. Free hardware is still \
@@ -790,6 +866,10 @@ pub enum Action {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NudgeKind {
+    /// Ask the user clarifying questions before working alone.
+    Briefing,
+    /// The user did not answer the briefing; start on the proposed defaults.
+    BriefingTimeout,
     Kickoff,
     Continue,
     Research,
@@ -861,6 +941,17 @@ pub fn tick(plan: &SleepPlan, state: &mut SleepState, obs: &Observation) -> Vec<
             return actions;
         }
         NudgeKind::Finished
+    } else if briefing_pending(plan, state) {
+        if !state.briefing_asked {
+            NudgeKind::Briefing
+        } else {
+            // The questions are out; wait for the user while the chat is idle.
+            let idle_since = *state.idle_since.get_or_insert(obs.now);
+            if obs.now - idle_since < BRIEFING_WAIT_SECS as i64 * 1000 {
+                return actions;
+            }
+            NudgeKind::BriefingTimeout
+        }
     } else if !state.kicked_off {
         NudgeKind::Kickoff
     } else {
@@ -886,6 +977,11 @@ pub fn tick(plan: &SleepPlan, state: &mut SleepState, obs: &Observation) -> Vec<
         }
     };
     match kind {
+        NudgeKind::Briefing => state.briefing_asked = true,
+        NudgeKind::BriefingTimeout => {
+            state.briefed = true;
+            state.kicked_off = true;
+        }
         NudgeKind::Kickoff => state.kicked_off = true,
         NudgeKind::Finished => state.finish_notified = true,
         NudgeKind::Continue | NudgeKind::Research | NudgeKind::Retrospective => state.nudges += 1,
@@ -913,6 +1009,31 @@ fn stall_key(plan: &SleepPlan, progress: Option<&Progress>) -> Option<String> {
 /// `<orx-sleep>` block (see [`turn_context`]), so it is not repeated here.
 fn nudge_text(kind: NudgeKind, state: &SleepState, obs: &Observation) -> String {
     match kind {
+        NudgeKind::Briefing => "[orx] The user just turned on sleep mode and is still at the \
+             computer. Before you work unattended, make sure you understand where they want \
+             this to go.\n\
+             Read the plan and the user's notes in the <orx-sleep> block, and look through the \
+             project as far as you need (read-only; launch nothing). Then ask the user a short \
+             numbered list of clarifying questions, typically 3 to 7, in the language they write \
+             in. Cover what is unclear about: the direction and the hypotheses to pursue first, \
+             what counts as success and when to stop, what must not change (data, code, \
+             evaluation), how to spend the GPU budget, and what to do when results are \
+             ambiguous or something breaks. Skip what the plan and notes already answer. Give \
+             your proposed default for each question so the user can simply confirm. End your \
+             turn and wait for the answers.\n\
+             Ask follow-ups if the answers leave the direction unclear. Once it is settled, \
+             restate your understanding in a few sentences, record it with `orx sleep begin \
+             --understanding \"…\"`, and start. If the user says to go ahead without answering, \
+             use your defaults."
+            .to_string(),
+        NudgeKind::BriefingTimeout => format!(
+            "[orx] Sleep mode: the user has not answered your briefing questions for {} minutes \
+             and is likely away.\nProceed on the defaults you proposed: record them with `orx \
+             sleep begin --understanding \"…\"`, then start with the feasibility analysis the \
+             sleep-mode rules ask for, record it with `orx sleep assess`, and plan and launch the \
+             first runs. If the user answers later, follow their answers from then on.",
+            BRIEFING_WAIT_SECS / 60
+        ),
         NudgeKind::Kickoff => {
             "[orx] Sleep mode is on: the user is away and you drive the research until the plan \
              finishes.\nStart with the feasibility analysis the sleep-mode rules ask \
@@ -966,6 +1087,22 @@ fn status_lines(
     let mut lines = Vec::new();
     if let Some(goal) = &plan.goal {
         lines.push(format!("- Target (the user's words): {goal}"));
+    }
+    if let Some(notes) = &plan.notes {
+        lines.push(format!(
+            "- The user's notes for this session (keep them in mind in every decision): {notes}"
+        ));
+    }
+    if let Some(understanding) = &state.understanding {
+        lines.push(format!(
+            "- Direction agreed in the briefing (your words): {understanding}"
+        ));
+    } else if briefing_pending(plan, state) {
+        lines.push(
+            "- Briefing: in progress. Clarify the direction with the user, then record it with \
+             `orx sleep begin --understanding \"…\"`."
+                .to_string(),
+        );
     }
     if let Some(budget) = budget {
         lines.push(format!(
@@ -1095,10 +1232,18 @@ pub fn turn_context(
     let strategy = crate::local::strategy::turn_context(store, &sleep, delivered)
         .map_err(|err| eprintln!("orx: strategy: {err}"))
         .ok();
+    let intro = if briefing_pending(&sleep.plan, &sleep.state) {
+        "Sleep mode is starting. The user is still here for a short briefing: until you run `orx \
+sleep begin`, ask them the clarifying questions you need and wait for their answers, and launch \
+no paid runs. The rule against asking questions applies once the briefing is over; from then on \
+the user is away (often asleep) and cannot answer, approve, or unblock anything."
+    } else {
+        "Sleep mode is on. The user is away (often asleep) and cannot answer, approve, or unblock \
+anything."
+    };
     Some(format!(
         "<orx-sleep>\n\
-Sleep mode is on. The user is away (often asleep) and cannot answer, approve, or unblock anything. \
-You own the research decisions; orx enforces the limits below.\n\
+{intro} You own the research decisions; orx enforces the limits below.\n\
 {status}\n\n\
 {}\n\
 </orx-sleep>{}",
@@ -1576,5 +1721,81 @@ mod tests {
         let lines = status_lines(&plan, &SleepState::default(), None, None);
         assert!(lines.contains("Target (the user's words): reproduce Table 2 within 1 point"));
         assert!(lines.contains("Feasibility: not assessed yet"));
+    }
+
+    #[test]
+    fn watchdog_briefs_first_and_starts_alone_when_nobody_answers() {
+        let plan = SleepPlan {
+            ask_first: true,
+            idle_secs: 60,
+            ..SleepPlan::default()
+        };
+        let mut state = SleepState::default();
+        let obs = |now: i64, busy: bool| Observation {
+            now,
+            busy,
+            ..Observation::default()
+        };
+        let actions = tick(&plan, &mut state, &obs(0, false));
+        assert!(
+            matches!(&actions[0], Action::Nudge(text) if text.contains("clarifying questions"))
+        );
+        assert!(state.briefing_asked && !state.kicked_off);
+        // The agent asks; the chat goes idle and nothing is nudged while it waits.
+        assert!(tick(&plan, &mut state, &obs(10_000, true)).is_empty());
+        assert!(tick(&plan, &mut state, &obs(20_000, false)).is_empty());
+        let wait = BRIEFING_WAIT_SECS as i64 * 1000;
+        assert!(tick(&plan, &mut state, &obs(20_000 + wait - 1, false)).is_empty());
+        let actions = tick(&plan, &mut state, &obs(20_000 + wait, false));
+        assert!(
+            matches!(&actions[0], Action::Nudge(text) if text.contains("defaults you proposed"))
+        );
+        assert!(state.briefed && state.kicked_off);
+        assert!(!briefing_pending(&plan, &state));
+    }
+
+    #[test]
+    fn a_recorded_briefing_skips_the_kickoff_and_rides_every_turn() {
+        let plan = SleepPlan {
+            ask_first: true,
+            notes: Some("  không đổi tập test \n".into()),
+            ..SleepPlan::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(plan.notes.as_deref(), Some("không đổi tập test"));
+        let mut state = SleepState {
+            briefing_asked: true,
+            ..SleepState::default()
+        };
+        assert!(briefing_pending(&plan, &state));
+        let lines = status_lines(&plan, &state, None, None);
+        assert!(lines.contains("The user's notes for this session"));
+        assert!(lines.contains("không đổi tập test"));
+        assert!(lines.contains("Briefing: in progress"));
+        assert!(record_briefing(&mut state, "  ").is_err());
+        assert!(record_briefing(&mut state, "Try LoRA ranks first.").unwrap());
+        assert!(!record_briefing(&mut state, "Try LoRA ranks first.").unwrap());
+        assert!(!briefing_pending(&plan, &state));
+        let lines = status_lines(&plan, &state, None, None);
+        assert!(
+            lines.contains("Direction agreed in the briefing (your words): Try LoRA ranks first.")
+        );
+        // Kicked off by the agent itself: the watchdog only checks in later.
+        assert!(tick(
+            &plan,
+            &mut state,
+            &Observation {
+                now: 0,
+                ..Observation::default()
+            }
+        )
+        .is_empty());
+        assert!(SleepPlan {
+            notes: Some("x".repeat(MAX_NOTES_CHARS + 1)),
+            ..SleepPlan::default()
+        }
+        .validated()
+        .is_err());
     }
 }
