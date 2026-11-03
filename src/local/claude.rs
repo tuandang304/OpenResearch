@@ -709,6 +709,11 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     for (key, value) in account_env {
         cmd.env(key, value);
     }
+    // Sub-agent limits: the model Claude Code's own Task subagents run on.
+    // Read at spawn, so a change reaches a live chat when its CLI restarts.
+    if let Some(model) = crate::config::delegation_policy().claude_subagent_model() {
+        cmd.env("CLAUDE_CODE_SUBAGENT_MODEL", model);
+    }
     // Stamp the launching session so `orx exp run` (a fresh subprocess the
     // agent shells out) tags its run and can explicitly subscribe this chat.
     // After prepare_env so it wins.

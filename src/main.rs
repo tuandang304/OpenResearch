@@ -436,6 +436,9 @@ pub enum AgentCommand {
         /// Model for `--harness`; defaults to that harness's strongest model.
         #[arg(long, requires = "harness")]
         model: Option<String>,
+        /// Reasoning effort for `--harness` (the model's own ids, e.g. `high`).
+        #[arg(long, requires = "harness")]
+        effort: Option<String>,
     },
     /// List the agent harnesses a chat can run on here, with each one's
     /// model vendor, so independent checks can use a different vendor.

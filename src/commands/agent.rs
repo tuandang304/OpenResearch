@@ -1,7 +1,7 @@
 //! Create an ordinary project chat through the resident server's chat API.
 //!
 //!   orx agent spawn "<message>"   create a chat with the user's New Chat settings
-//!   orx agent spawn "<message>" --harness <id> [--model <model>]
+//!   orx agent spawn "<message>" --harness <id> [--model <model>] [--effort <level>]
 //!                                 create it on another agent, for cross-harness review
 //!   orx agent harnesses           list the agents a chat can run on, with their vendors
 //!   orx agent quota               quota left per harness account and model pool
@@ -22,6 +22,7 @@ pub async fn run(args: crate::AgentArgs) -> Result<()> {
             project,
             harness,
             model,
+            effort,
         } => {
             let prompt = task_text(task, stdin)?;
             let port = chat::trusted_up_port()?.ok_or_else(|| anyhow!(
@@ -52,7 +53,7 @@ pub async fn run(args: crate::AgentArgs) -> Result<()> {
                 }
             };
             let agent = match harness {
-                Some(harness) => Some(agent_choice(port, harness, model).await?),
+                Some(harness) => Some(agent_choice(port, harness, model, effort).await?),
                 None => None,
             };
             spawn(port, &project, &prompt, title.as_deref(), agent).await
@@ -80,7 +81,7 @@ async fn route(task: &str, json: bool) -> Result<()> {
     use crate::local::harness::accounts;
     let now = crate::store::now_ms();
     let mut request = decision::RouteRequest::new(decision::Purpose::Plan, task);
-    request.harnesses = ready_harnesses().await;
+    request.harnesses = within_limits(ready_harnesses().await, &crate::config::delegation_policy());
     request.accounts = accounts::statuses(None)?
         .iter()
         .filter(|account| account.signed_in && !account.paused)
@@ -195,6 +196,34 @@ async fn ready_harnesses() -> Vec<crate::local::decision::HarnessOption> {
             vendor: harness_vendor(&info.id).to_string(),
             models: crate::local::decision::model_ids(&info.models),
             recommended_model: info.recommended_model.clone(),
+        })
+        .collect()
+}
+
+/// Only the harnesses and models the user's sub-agent limits allow, with the
+/// limits' default model as each harness's recommendation.
+fn within_limits(
+    harnesses: Vec<crate::local::decision::HarnessOption>,
+    policy: &crate::local::delegation::DelegationPolicy,
+) -> Vec<crate::local::decision::HarnessOption> {
+    harnesses
+        .into_iter()
+        .filter(|option| policy.allows_harness(&option.id))
+        .map(|mut option| {
+            let allowed = policy.allowed_models(&option.id);
+            if !allowed.is_empty() {
+                option.models = allowed.to_vec();
+            }
+            if let Some(model) = policy.default_model(&option.id) {
+                option.recommended_model = Some(model.to_string());
+            } else if option
+                .recommended_model
+                .as_deref()
+                .is_some_and(|model| !policy.allows_model(&option.id, model))
+            {
+                option.recommended_model = option.models.first().cloned();
+            }
+            option
         })
         .collect()
 }
@@ -490,13 +519,22 @@ async fn harness_catalog(port: u16) -> Option<Vec<serde_json::Value>> {
     .cloned()
 }
 
-/// The harness and model a `--harness` chat runs on. The harness must be
-/// ready; the model defaults to that harness's strongest one.
+/// What a `--harness` chat asks to run on.
+struct AgentChoice {
+    harness: String,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+/// The harness, model and effort a `--harness` chat asks for. The harness must
+/// be ready; the server fills the model (the harness's strongest one) and fits
+/// all three to the user's sub-agent limits.
 async fn agent_choice(
     port: u16,
     harness: String,
     model: Option<String>,
-) -> Result<(String, Option<String>)> {
+    effort: Option<String>,
+) -> Result<AgentChoice> {
     if !crate::local::harness::is_chat_harness(&harness) {
         return Err(anyhow!(
             "Unknown harness `{harness}`. `orx agent harnesses` lists them."
@@ -506,16 +544,18 @@ async fn agent_choice(
         all.into_iter()
             .find(|entry| entry["id"] == harness.as_str())
     });
-    if let Some(refusal) = entry.as_ref().and_then(|entry| not_ready(&harness, entry)) {
-        return Err(anyhow!(refusal));
+    // A harness the limits turn off gets the server's refusal, which names
+    // the allowed ones, rather than an installation hint.
+    if crate::config::delegation_policy().allows_harness(&harness) {
+        if let Some(refusal) = entry.as_ref().and_then(|entry| not_ready(&harness, entry)) {
+            return Err(anyhow!(refusal));
+        }
     }
-    let model = model.or_else(|| {
-        entry
-            .as_ref()
-            .and_then(|entry| entry["recommendedModel"].as_str())
-            .map(str::to_string)
-    });
-    Ok((harness, model))
+    Ok(AgentChoice {
+        harness,
+        model,
+        effort,
+    })
 }
 
 fn not_ready(harness: &str, entry: &serde_json::Value) -> Option<String> {
@@ -540,6 +580,47 @@ struct HarnessRow {
     current: bool,
     /// The user allows this harness for cross-harness review.
     review: bool,
+    /// What the user's sub-agent limits allow here; `None` while they are off.
+    limits: Option<HarnessLimits>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HarnessLimits {
+    allowed: bool,
+    /// Empty = any model.
+    models: Vec<String>,
+    default_model: Option<String>,
+    effort: Option<String>,
+}
+
+impl HarnessLimits {
+    fn of(policy: &crate::local::delegation::DelegationPolicy, harness: &str) -> Option<Self> {
+        policy.enabled.then(|| Self {
+            allowed: policy.allows_harness(harness),
+            models: policy.allowed_models(harness).to_vec(),
+            default_model: policy.default_model(harness).map(str::to_string),
+            effort: policy.rule(harness).and_then(|rule| rule.effort.clone()),
+        })
+    }
+
+    fn summary(&self) -> String {
+        if !self.allowed {
+            return "off".to_string();
+        }
+        let mut parts = vec![if self.models.is_empty() {
+            "any model".to_string()
+        } else {
+            self.models.join(", ")
+        }];
+        if let Some(model) = &self.default_model {
+            parts.push(format!("default {model}"));
+        }
+        if let Some(effort) = &self.effort {
+            parts.push(format!("effort {effort}"));
+        }
+        parts.join("; ")
+    }
 }
 
 async fn harnesses(json: bool) -> Result<()> {
@@ -556,6 +637,7 @@ async fn harnesses(json: bool) -> Result<()> {
         Some(port) => harness_catalog(port).await,
         None => None,
     };
+    let policy = crate::config::delegation_policy();
     let rows: Vec<HarnessRow> = crate::local::harness::registry()
         .into_iter()
         .filter(|harness| harness.supports_chat())
@@ -569,6 +651,7 @@ async fn harnesses(json: bool) -> Result<()> {
             }),
             current: current.as_deref() == Some(harness.id()),
             review: crate::config::cross_harness_allows(harness.id()),
+            limits: HarnessLimits::of(&policy, harness.id()),
         })
         .collect();
     if json {
@@ -588,12 +671,23 @@ async fn harnesses(json: bool) -> Result<()> {
                     None => "unknown".to_string(),
                 },
                 if row.review { "on" } else { "off" }.to_string(),
+                row.limits
+                    .as_ref()
+                    .map_or_else(|| "no limits".to_string(), HarnessLimits::summary),
                 if row.current { "this session" } else { "" }.to_string(),
             ]
         })
         .collect();
     crate::output::print_table(
-        &["HARNESS", "NAME", "VENDOR", "INSTALLED", "REVIEW", ""],
+        &[
+            "HARNESS",
+            "NAME",
+            "VENDOR",
+            "INSTALLED",
+            "REVIEW",
+            "SUB-AGENTS",
+            "",
+        ],
         &table,
     );
     if catalog.is_none() {
@@ -603,6 +697,29 @@ async fn harnesses(json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// "Created chat … on <harness> (<model>, effort <level>)." from the session
+/// the server created, so the line shows what the limits let it run on.
+fn created_line(id: &str, session: &serde_json::Value) -> String {
+    let Some(harness) = session["harness"].as_str() else {
+        return format!("Created chat {id}.");
+    };
+    let mut details = Vec::new();
+    if let Some(model) = session["model"].as_str() {
+        details.push(model.to_string());
+    }
+    if let Some(effort) = session["reasoningLevel"]
+        .as_str()
+        .filter(|effort| *effort != crate::local::harness::REASONING_DEFAULT_ID)
+    {
+        details.push(format!("effort {effort}"));
+    }
+    if details.is_empty() {
+        format!("Created chat {id} on {harness}.")
+    } else {
+        format!("Created chat {id} on {harness} ({}).", details.join(", "))
+    }
 }
 
 fn task_text(task: Option<String>, stdin: bool) -> Result<String> {
@@ -632,14 +749,19 @@ async fn spawn(
     project: &str,
     prompt: &str,
     title: Option<&str>,
-    agent: Option<(String, Option<String>)>,
+    agent: Option<AgentChoice>,
 ) -> Result<()> {
     use crate::commands::up::chat_request_via_up;
     use reqwest::Method;
     use serde_json::json;
 
-    let mut body = json!({"projectId": project});
-    if let Some((harness, model)) = &agent {
+    let mut body = json!({"projectId": project, "delegated": true});
+    if let Some(AgentChoice {
+        harness,
+        model,
+        effort,
+    }) = &agent
+    {
         // The rest of the chat's settings are that harness's defaults; only
         // the autonomy carries over from New Chat.
         let autonomy = crate::store::Store::open()
@@ -649,6 +771,7 @@ async fn spawn(
             .unwrap_or_default();
         body["harness"] = json!(harness);
         body["model"] = json!(model);
+        body["reasoningLevel"] = json!(effort);
         body["autonomy"] = json!(autonomy.id());
     }
     let created = chat_request_via_up(port, Method::POST, "/api/chat/sessions", &body).await?;
@@ -656,11 +779,12 @@ async fn spawn(
         .pointer("/session/id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow!("OpenResearch returned no created chat ID."))?;
-    match &agent {
-        Some((harness, Some(model))) => println!("Created chat {id} on {harness} ({model})."),
-        Some((harness, None)) => println!("Created chat {id} on {harness}."),
-        None => println!("Created chat {id}."),
+    for note in created["policyNotes"].as_array().into_iter().flatten() {
+        if let Some(note) = note.as_str() {
+            println!("Sub-agent limits: {note}");
+        }
     }
+    println!("{}", created_line(id, &created["session"]));
     println!("Open it in OpenResearch: http://127.0.0.1:{port}/projects/{project}/tasks/{id}");
     if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
         chat_request_via_up(
@@ -694,7 +818,50 @@ async fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use super::{harness_options_from_catalog, not_ready, task_text};
+    use super::{created_line, harness_options_from_catalog, not_ready, task_text, within_limits};
+    use crate::local::delegation::{DelegationPolicy, HarnessRule};
+
+    #[test]
+    fn route_offers_only_what_the_sub_agent_limits_allow() {
+        let catalog = vec![
+            serde_json::json!({"id": "codex", "agentReady": true, "recommendedModel": "gpt-6.1-sol",
+                "models": [{"id": "gpt-6.1-sol"}, {"id": "gpt-6-luna"}]}),
+            serde_json::json!({"id": "claude-code", "agentReady": true, "recommendedModel": "opus",
+                "models": [{"id": "opus"}, {"id": "sonnet"}]}),
+        ];
+        let mut codex = HarnessRule::new("codex");
+        codex.models = vec!["gpt-6-luna".into()];
+        let mut claude = HarnessRule::new("claude-code");
+        claude.allowed = false;
+        let policy = DelegationPolicy {
+            enabled: true,
+            harnesses: vec![codex, claude],
+        };
+        let options = within_limits(harness_options_from_catalog(&catalog), &policy);
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].models, ["gpt-6-luna"]);
+        assert_eq!(options[0].recommended_model.as_deref(), Some("gpt-6-luna"));
+
+        let all = within_limits(
+            harness_options_from_catalog(&catalog),
+            &DelegationPolicy::default(),
+        );
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn the_created_line_reports_what_the_chat_runs_on() {
+        let session = serde_json::json!({"harness": "codex", "model": "gpt-6-luna", "reasoningLevel": "high"});
+        assert_eq!(
+            created_line("chat_1", &session),
+            "Created chat chat_1 on codex (gpt-6-luna, effort high)."
+        );
+        let session = serde_json::json!({"harness": "codex", "reasoningLevel": "default"});
+        assert_eq!(
+            created_line("chat_1", &session),
+            "Created chat chat_1 on codex."
+        );
+    }
 
     #[test]
     fn route_offers_only_ready_harnesses_from_the_catalog() {

@@ -13,6 +13,7 @@ import {
   getHarnessAccountsQuery,
   getGcpSettingsQuery,
   getCrossHarnessSettingsQuery,
+  getDelegationPolicyQuery,
   getComputeRoutingSettingsQuery,
   getAutoCompactSettingsQuery,
   getComputePricesQuery,
@@ -28,6 +29,7 @@ import {
   Square,
   SquareTerminal,
   Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
@@ -56,6 +58,13 @@ import {
   getComputePrices,
   updateUiState,
   setCrossHarnessSettings,
+  setDelegationPolicy,
+  type DelegationPolicy,
+  type DelegationRule,
+  type OptionChoice,
+  harnessModelLabel,
+  modelLabel,
+  reasoningFor,
   setComputeRoutingSettings,
   setAutoCompactSettings,
   fmtTokens,
@@ -441,6 +450,231 @@ export function CrossHarnessCard({ harnesses }: { harnesses: Harness[] | null })
       )}
       {error && <div className="error">{error}</div>}
     </div>
+  );
+}
+
+/** Picker id for "no limit here": the agent's choice, or the automatic default. */
+const DELEGATION_AUTO = "__auto";
+
+/** Limits on the harness, model and effort of the helper chats agents create
+ * with `orx agent spawn`, so delegated work does not stall on a harness or
+ * model the user did not want. */
+export function DelegationPolicyCard({ harnesses }: { harnesses: Harness[] | null }) {
+  const options = getDelegationPolicyQuery();
+  const query = useQuery(options);
+  const mutation = useMutation({ mutationFn: setDelegationPolicy });
+  const [error, setError] = useState<string | null>(null);
+  const policy = query.data;
+  const enabled = policy?.enabled ?? false;
+
+  const ruleFor = (id: HarnessId): DelegationRule =>
+    policy?.harnesses.find((rule) => rule.harness === id) ?? { harness: id, allowed: true, models: [] };
+
+  async function save(next: DelegationPolicy) {
+    setError(null);
+    const previous = query.data;
+    setScopedQueryData(options.queryKey, () => next);
+    try {
+      const saved = await mutation.mutateAsync(next);
+      setScopedQueryData(options.queryKey, () => saved);
+    } catch (err) {
+      setScopedQueryData(options.queryKey, () => previous);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function updateRule(id: HarnessId, patch: Partial<DelegationRule>) {
+    if (!policy) return;
+    const rule = { ...ruleFor(id), ...patch };
+    void save({ ...policy, harnesses: [...policy.harnesses.filter((entry) => entry.harness !== id), rule] });
+  }
+
+  const allowedReady = (harnesses ?? []).filter((harness) => harness.agentReady && ruleFor(harness.id).allowed);
+
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "mt-4")}>
+      <div className="flex items-center justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_delegation_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_delegation_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={enabled}
+          aria-label={m.settings_delegation_title()}
+          disabled={!policy || mutation.isPending}
+          onClick={() => policy && void save({ ...policy, enabled: !enabled })}
+        />
+      </div>
+      {harnesses && (
+        <ul className="mt-3 mb-0 flex flex-col gap-3 p-0 list-none">
+          {harnesses.map((harness) => (
+            <DelegationRuleRow
+              key={harness.id}
+              harness={harness}
+              rule={ruleFor(harness.id)}
+              enabled={enabled}
+              disabled={!policy || !enabled}
+              onChange={(patch) => updateRule(harness.id, patch)}
+            />
+          ))}
+        </ul>
+      )}
+      {enabled && harnesses && allowedReady.length === 0 && (
+        <p className="mt-3 mb-0 text-sm text-accent-red">{m.settings_delegation_none_ready()}</p>
+      )}
+      {enabled && <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_delegation_footer()}</p>}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+function DelegationRuleRow({ harness, rule, enabled, disabled, onChange }: {
+  harness: Harness;
+  rule: DelegationRule;
+  enabled: boolean;
+  disabled: boolean;
+  onChange: (patch: Partial<DelegationRule>) => void;
+}) {
+  const status = harnessStatus(harness);
+  const catalog: OptionChoice[] = harness.models.map((model) => ({ id: model.id, label: harnessModelLabel(model) }));
+  const labelOf = (id: string) => catalog.find((choice) => choice.id === id)?.label ?? modelLabel(id);
+  // The models a default or an effort can come from: the allowed ones, else all.
+  const pool = rule.models.length > 0 ? rule.models : catalog.map((choice) => choice.id);
+  const addable = catalog.filter((choice) => !rule.models.includes(choice.id));
+  const defaultChoices: OptionChoice[] = [
+    {
+      id: DELEGATION_AUTO,
+      label: rule.models.length > 0 ? m.settings_delegation_first_allowed() : m.settings_delegation_recommended(),
+    },
+    ...pool.map((id) => ({ id, label: labelOf(id) })),
+  ];
+  const efforts = new Map<string, OptionChoice>();
+  for (const id of pool) {
+    for (const choice of reasoningFor(harness, id).choices) efforts.set(choice.id, choice);
+  }
+  for (const choice of harness.options?.reasoningLevels ?? []) {
+    if (!efforts.has(choice.id)) efforts.set(choice.id, choice);
+  }
+  const effortChoices: OptionChoice[] = [
+    { id: DELEGATION_AUTO, label: m.settings_delegation_agent_choice() },
+    ...efforts.values(),
+  ];
+  const subagentChoices: OptionChoice[] = [
+    { id: DELEGATION_AUTO, label: m.settings_delegation_agent_choice() },
+    ...catalog,
+  ];
+  const fromPicker = (id: string) => (id === DELEGATION_AUTO ? undefined : id);
+
+  return (
+    <li className="flex flex-col gap-2.5 border-t border-border-variant pt-3 first:border-t-0 first:pt-0">
+      <div className="flex items-center gap-2.5 text-sm">
+        <HarnessLogo harness={harness.id} />
+        <span className="font-medium">{harness.name}</span>
+        <span className="flex-1" />
+        <Badge variant={status.variant}>{status.label}</Badge>
+        <Switch
+          type="button"
+          checked={rule.allowed}
+          aria-label={m.settings_delegation_use({ harness: harness.name })}
+          disabled={disabled}
+          onClick={() => onChange({ allowed: !rule.allowed })}
+        />
+      </div>
+      {enabled && rule.allowed && harness.agentReady && (
+        <div className="grid gap-3 ps-7 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5 sm:col-span-2">
+            <span className="text-xs text-subtext">{m.settings_delegation_models()}</span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {rule.models.length === 0 && <span className="text-sm text-text">{m.settings_delegation_any_model()}</span>}
+              {rule.models.map((id) => (
+                <span key={id} className="inline-flex items-center gap-0.5 rounded-full border border-border bg-surface py-px ps-2.5 pe-0.5 text-sm">
+                  {labelOf(id)}
+                  <IconButton
+                    type="button"
+                    size="small"
+                    shape="circle"
+                    className="h-5 w-5"
+                    aria-label={m.settings_delegation_remove_model({ model: labelOf(id) })}
+                    disabled={disabled}
+                    onClick={() => {
+                      const models = rule.models.filter((model) => model !== id);
+                      onChange({ models, defaultModel: rule.defaultModel === id ? undefined : rule.defaultModel });
+                    }}
+                  >
+                    <X size={12} />
+                  </IconButton>
+                </span>
+              ))}
+            </div>
+            {addable.length > 0 && (
+              <div className="max-w-xs">
+                <OptionPicker
+                  variant="field"
+                  dropDown
+                  floating
+                  title={m.settings_delegation_add_model()}
+                  searchPlaceholder={m.settings_delegation_search_models()}
+                  choices={[{ id: DELEGATION_AUTO, label: m.settings_delegation_add_model() }, ...addable]}
+                  value={DELEGATION_AUTO}
+                  disabled={disabled}
+                  onSelect={(id) => {
+                    if (id !== DELEGATION_AUTO) onChange({ models: [...rule.models, id] });
+                  }}
+                />
+              </div>
+            )}
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs text-subtext">{m.settings_delegation_default_model()}</span>
+            <OptionPicker
+              variant="field"
+              dropDown
+              floating
+              title={m.settings_delegation_default_model()}
+              searchPlaceholder={pool.length > 8 ? m.settings_delegation_search_models() : undefined}
+              choices={defaultChoices}
+              value={rule.defaultModel ?? DELEGATION_AUTO}
+              disabled={disabled}
+              onSelect={(id) => onChange({ defaultModel: fromPicker(id) })}
+            />
+          </div>
+          {effortChoices.length > 1 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs text-subtext">{m.settings_delegation_effort()}</span>
+              <OptionPicker
+                variant="field"
+                dropDown
+                floating
+                title={m.settings_delegation_effort()}
+                choices={effortChoices}
+                value={rule.effort ?? DELEGATION_AUTO}
+                disabled={disabled}
+                onSelect={(id) => onChange({ effort: fromPicker(id) })}
+              />
+            </div>
+          )}
+          {harness.id === "claude-code" && (
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <span className="text-xs text-subtext">{m.settings_delegation_subagent_model()}</span>
+              <div className="max-w-xs">
+                <OptionPicker
+                  variant="field"
+                  dropDown
+                  floating
+                  title={m.settings_delegation_subagent_model()}
+                  choices={subagentChoices}
+                  value={rule.subagentModel ?? DELEGATION_AUTO}
+                  disabled={disabled}
+                  onSelect={(id) => onChange({ subagentModel: fromPicker(id) })}
+                />
+              </div>
+              <span className="text-xs text-subtext">{m.settings_delegation_subagent_hint()}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </li>
   );
 }
 

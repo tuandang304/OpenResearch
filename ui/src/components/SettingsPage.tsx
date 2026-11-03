@@ -135,7 +135,7 @@ import { useColoredMarkdown, useThemePreference, type ThemePreference } from "..
 import { m } from "../paraglide/messages.js";
 import { ComputeDoctor } from "../features/research/ComputeDoctor";
 import { ColabSection, KaggleSection } from "../features/fork/ComputeSections";
-import { ACCOUNT_HARNESSES, HarnessAccountsCard, CrossHarnessCard, AutoCompactCard, ComputeRoutingCard, fmtUsd, ProviderPricesCard, GcpSection, DecisionModelCard, HarnessFailoverCard } from "../features/fork/SettingsCards";
+import { ACCOUNT_HARNESSES, HarnessAccountsCard, CrossHarnessCard, DelegationPolicyCard, AutoCompactCard, ComputeRoutingCard, fmtUsd, ProviderPricesCard, GcpSection, DecisionModelCard, HarnessFailoverCard } from "../features/fork/SettingsCards";
 import { ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
@@ -603,6 +603,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
       <DecisionModelCard />
       <CrossHarnessCard harnesses={harnesses} />
+      <DelegationPolicyCard harnesses={harnesses} />
     </>
   );
 }

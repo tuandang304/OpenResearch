@@ -20,6 +20,7 @@ pub mod codex;
 pub mod datadir;
 pub mod decision;
 pub(crate) mod deep_research;
+pub mod delegation;
 pub mod demo;
 pub mod experiments;
 pub mod files;
