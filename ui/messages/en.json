@@ -775,6 +775,7 @@
   "model_picker_more": "{count} more — search to find",
   "model_picker_use_id": "Use “{id}” as the model ID",
   "model_picker_unverified": "Unverified",
+  "model_picker_wrong_harness": "{family} model · runs on {harness}",
   "skills_overview_description": "Customize the skills and LaTeX templates available across your projects. Upload them here, or ask an OpenResearch agent to create and add them for you.",
   "new_project_run_before_create": "Run {command} before creating the project.",
   "settings_login_help": "Run {command} in a terminal to sign in.",

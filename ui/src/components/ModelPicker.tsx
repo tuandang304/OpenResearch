@@ -33,7 +33,7 @@ import { cn } from "./ui/cn";
 
 import { LocalModelDialog } from "./LocalModelSetup";
 import { showCustomDialog } from "../dialog";
-import { formatCodexModel, groupModels, resolveHarnessDefaultModel } from "../modelSelection";
+import { formatCodexModel, groupModels, modelHarnessMismatch, resolveHarnessDefaultModel } from "../modelSelection";
 
 const MODEL_GROUP_CLASS_NAME = [
   "model-group flex items-center justify-between gap-2",
@@ -304,9 +304,13 @@ export function ModelPicker({
   const selected = selectedHarness?.models.find((model) => model.id === value?.model);
   const displayModel = (harness: Harness, model: Harness["models"][number]) => harness.id === "codex" ? formatCodexModel(harnessModelLabel(model)) : harnessModelLabel(model);
   const defaultModel = selectedHarness?.models.find((model) => model.id === resolveHarnessDefaultModel(selectedHarness));
+  const mismatch = modelHarnessMismatch(value?.harness, value?.model);
+  const harnessName = (id: string) => harnesses.find((harness) => harness.id === id)?.name ?? id;
   const label = value
     ? value.model
-      ? selected
+      ? mismatch
+        ? `${modelLabel(value.model)} · ${m.model_picker_wrong_harness({ family: mismatch.family, harness: harnessName(mismatch.home) })}`
+        : selected
         ? displayModel(selectedHarness!, selected)
         : value.harness.startsWith("acp:") && value.model === "default"
           ? m.model_picker_default_model()
@@ -397,6 +401,7 @@ export function ModelPicker({
               ) : value?.harness ? (
                 <HarnessLogo harness={value.harness} logo={selectedHarness?.logo} size={14} />
               ) : null}
+              {mismatch && <CircleAlert size={14} aria-hidden="true" className="shrink-0 text-accent-amber" />}
               <span className="model-picker-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
                 {label}
               </span>
@@ -534,18 +539,30 @@ export function ModelPicker({
                           )}
                           {filter.trim().length > 0 &&
                             !harness.id.startsWith("acp:") &&
-                            !harness.models.some((model) => model.id === filter.trim()) && (
-                              <MenuItem
-                                type="button"
-                                className="ps-6"
-                                onClick={() => pick(harness, filter.trim())}
-                              >
-                                <span>
-                                  {m.model_picker_use_id({ id: ltr(filter.trim()) })} ·{" "}
-                                  {m.model_picker_unverified()}
-                                </span>
-                              </MenuItem>
-                            )}
+                            !harness.models.some((model) => model.id === filter.trim()) &&
+                            (() => {
+                              const wrong = modelHarnessMismatch(harness.id, filter.trim());
+                              return wrong ? (
+                                <div className="flex items-center gap-1.5 py-1 ps-6 pe-2 text-xs text-accent-amber">
+                                  <CircleAlert size={14} aria-hidden="true" className="shrink-0" />
+                                  <span>
+                                    {ltr(filter.trim())} ·{" "}
+                                    {m.model_picker_wrong_harness({ family: wrong.family, harness: harnessName(wrong.home) })}
+                                  </span>
+                                </div>
+                              ) : (
+                                <MenuItem
+                                  type="button"
+                                  className="ps-6"
+                                  onClick={() => pick(harness, filter.trim())}
+                                >
+                                  <span>
+                                    {m.model_picker_use_id({ id: ltr(filter.trim()) })} ·{" "}
+                                    {m.model_picker_unverified()}
+                                  </span>
+                                </MenuItem>
+                              );
+                            })()}
                         </>
                       )}
                       {harness.agentReady && harness.id === "opencode" && (

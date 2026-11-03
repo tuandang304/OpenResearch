@@ -775,6 +775,7 @@
   "model_picker_more": "{count} और — खोजने के लिए टाइप करें",
   "model_picker_use_id": "मॉडल ID के रूप में “{id}” इस्तेमाल करें",
   "model_picker_unverified": "सत्यापित नहीं",
+  "model_picker_wrong_harness": "{family} मॉडल · {harness} पर चलता है",
   "skills_overview_description": "अपने प्रोजेक्ट में उपलब्ध स्किल और LaTeX टेम्पलेट कस्टमाइज़ करें। उन्हें यहाँ अपलोड करें, या किसी OpenResearch एजेंट से आपके लिए उन्हें बनाने और जोड़ने को कहें।",
   "new_project_run_before_create": "प्रोजेक्ट बनाने से पहले {command} चलाएं।",
   "settings_login_help": "साइन इन करने के लिए टर्मिनल में {command} चलाएं।",

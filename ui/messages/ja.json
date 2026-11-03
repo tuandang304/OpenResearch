@@ -775,6 +775,7 @@
   "model_picker_more": "他 {count} 件 — 検索で探す",
   "model_picker_use_id": "「{id}」をモデル ID として使用",
   "model_picker_unverified": "未検証",
+  "model_picker_wrong_harness": "{family} のモデル · {harness} で実行",
   "skills_overview_description": "プロジェクト全体で使用できるスキルと LaTeX テンプレートをカスタマイズできます。ここでアップロードするか、OpenResearch エージェントに作成と追加を依頼してください。",
   "new_project_run_before_create": "プロジェクトを作成する前に {command} を実行してください。",
   "settings_login_help": "サインインするには、ターミナルで {command} を実行してください。",

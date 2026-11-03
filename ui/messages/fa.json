@@ -769,6 +769,7 @@
   "model_picker_more": "{count} مورد دیگر — برای یافتن جست‌وجو کنید",
   "model_picker_use_id": "از «{id}» به‌عنوان شناسهٔ مدل استفاده کنید",
   "model_picker_unverified": "تأییدنشده",
+  "model_picker_wrong_harness": "مدل {family} · روی {harness} اجرا می‌شود",
   "skills_overview_description": "مهارت‌ها و قالب‌های LaTeX قابل استفاده در همهٔ پروژه‌ها را سفارشی کنید. آن‌ها را اینجا بارگذاری کنید یا از عامل OpenResearch بخواهید برایتان بسازد و اضافه کند.",
   "new_project_run_before_create": "پیش از ساخت پروژه، {command} را اجرا کنید.",
   "settings_login_help": "برای ورود، {command} را در ترمینال اجرا کنید.",

@@ -775,6 +775,7 @@
   "model_picker_more": "{count} más — busca para encontrarlos",
   "model_picker_use_id": "Usar “{id}” como ID del modelo",
   "model_picker_unverified": "Sin verificar",
+  "model_picker_wrong_harness": "Modelo de {family} · se ejecuta en {harness}",
   "skills_overview_description": "Personaliza las skills y plantillas de LaTeX disponibles en todos tus proyectos. Súbelas aquí o pídele a un agente de OpenResearch que las cree y las añada por ti.",
   "new_project_run_before_create": "Ejecuta {command} antes de crear el proyecto.",
   "settings_login_help": "Ejecuta {command} en una terminal para iniciar sesión.",

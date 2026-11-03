@@ -774,6 +774,7 @@
   "model_picker_more": "نماذج إضافية: {count} — ابحث للعثور عليها",
   "model_picker_use_id": "استخدام «{id}» معرّفًا للنموذج",
   "model_picker_unverified": "غير مُتحقَّق منه",
+  "model_picker_wrong_harness": "نموذج {family} · يعمل على {harness}",
   "skills_overview_description": "خصّص المهارات وقوالب LaTeX المتاحة عبر مشاريعك. ارفعها هنا، أو اطلب من وكيل OpenResearch إنشاءها وإضافتها لك.",
   "new_project_run_before_create": "نفّذ {command} قبل إنشاء المشروع.",
   "settings_login_help": "نفّذ {command} في الطرفية لتسجيل الدخول.",
