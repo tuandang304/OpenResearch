@@ -31,7 +31,7 @@ git diff --numstat upstream/main -- . ':!ui/dist' ':!ui/messages' \
 | Fork code | Hook in the upstream file |
 | --- | --- |
 | `src/commands/up/fork_settings.rs` (all fork API routes: research tools, harness accounts, decision model, cross-harness, compute routing) and `fork_compute.rs` (prices, Colab, GCP, Kaggle handlers) | `mod` lines and one `.merge(fork_settings::routes())` in `up.rs`; one `use super::fork_compute::{...}` in `compute_settings.rs` for `orx compute show/configure` |
-| `src/commands/compute/prices.rs` (`orx compute prices`) | `mod prices;` and the `Prices` subcommand variant in `compute.rs` |
+| `src/commands/compute/prices.rs` (`orx compute prices`), `gpu_zones.rs` (`orx compute gpu-zones`) | `mod prices;`, `mod gpu_zones;` and the `Prices` and `GpuZones` subcommand variants in `compute.rs` |
 | `src/commands/supervise/gcp_run.rs`, `memory_guard.rs`, `colab_resume.rs` | `mod` lines, the `gcp_job` dispatch, the memory guard calls and the Colab resume check in `run_local` in `supervise.rs` |
 | `src/jobs/modal/credit.rs` (Modal credit and list prices) | `mod credit; pub use credit::*;` and the `billing` launcher subcommand in `modal.rs` |
 | `ui/src/features/fork/ComputeSections.tsx` (Colab, Kaggle cards), `SettingsCards.tsx` (harness accounts, failover, decision model, cross-harness, compute routing, provider prices, GCP) | two imports and the card mounts in `SettingsPage.tsx`; the shared class names and helpers they use are exported from `SettingsPage.tsx` |

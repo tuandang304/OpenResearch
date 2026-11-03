@@ -13,6 +13,10 @@ use crate::output::print_table;
 mod prices;
 use prices::prices;
 pub use prices::PricesArgs;
+// `orx compute gpu-zones`, added by the tuandang304 fork.
+mod gpu_zones;
+use gpu_zones::gpu_zones;
+pub use gpu_zones::GpuZonesArgs;
 
 pub async fn run(args: crate::ComputeArgs) -> Result<()> {
     if let Some(command) = args.command {
@@ -189,6 +193,8 @@ pub enum ComputeCommand {
     Catalog(CatalogArgs),
     /// Remaining credit and GPU prices on every provider, cheapest first.
     Prices(PricesArgs),
+    /// Google Cloud zones that offer each GPU (`gcloud compute accelerator-types list`).
+    GpuZones(GpuZonesArgs),
     /// List backends and the machine-wide default.
     Status,
     /// Inspect backend configuration and hardware or credential sources.
@@ -585,6 +591,7 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
     let value = match command {
         ComputeCommand::Catalog(a) => return catalog(a, json_output).await,
         ComputeCommand::Prices(a) => return prices(a, json_output).await,
+        ComputeCommand::GpuZones(a) => return gpu_zones(a, json_output).await,
         ComputeCommand::Status => settings::status().await?,
         ComputeCommand::Doctor(args) => serde_json::to_value(
             super::compute_doctor::diagnose(

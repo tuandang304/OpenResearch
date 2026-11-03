@@ -9,6 +9,7 @@ API on and GPU quota in the zone.
 
 ```sh
 orx compute test gcp                    # gcloud, account, project, zone, API
+orx compute gpu-zones --gpu nvidia-tesla-t4   # zones that offer a GPU
 orx exp run <expId> --backend gcp --flavor t4 --timeout 2h
 orx exp run <expId> --backend gcp --flavor a100:2 --timeout 8h
 orx exp run <expId> --backend gcp --flavor n2-standard-16   # CPU only
@@ -38,9 +39,13 @@ orx exp run <expId> --backend gcp --flavor n2-standard-16   # CPU only
   hour after the timeout even if orx cannot, and `orx up` deletes VMs whose run
   has ended. The VM and its disk disappear with the run, so all evidence must
   reach the run log.
-- "No free capacity" means the zone has no GPU of that type right now: try
-  another zone (after asking the user), a different GPU, or another provider.
-  "Quota exceeded" means the project needs more GPU quota, which only the user
-  can request.
+- A GPU run starts in the configured zone when it offers that GPU; otherwise
+  orx looks up the zones that do (`gcloud compute accelerator-types list`)
+  and creates the VM in the nearest one, moving on to the next nearest when a
+  zone is out of stock. `orx compute gpu-zones --gpu <type or text>` shows
+  the same lookup; `--gpu a100` matches every A100.
+- "No zone had a free ..." means every nearby zone was out of stock: try again
+  later, a different GPU, or another provider. "Quota exceeded" means the
+  project needs more GPU quota, which only the user can request.
 - A detached `orx supervise` process starts the run, records its status and
   logs, and deletes the VM; do not kill it.
