@@ -28,10 +28,19 @@ const fmtUsd = (value: number) =>
 const fmtPct = (value: number) =>
   new Intl.NumberFormat(getLocale(), { maximumFractionDigits: 1, signDisplay: "always" }).format(value) + "%";
 
-/** The pill detail in the model picker: off, on with spend, or finished. */
+/** Whether the agent is still asking the user about the direction. */
+export const sleepBriefing = (sleep: SleepStatus | null | undefined) =>
+  !!sleep &&
+  !!sleep.plan.askFirst &&
+  !sleep.state.briefed &&
+  !sleep.state.kickedOff &&
+  !sleep.state.finished;
+
+/** The pill detail in the model picker: off, briefing, on with spend, or finished. */
 export function sleepLabel(sleep: SleepStatus | null | undefined) {
   if (!sleep) return m.sleep_mode_off();
   if (sleep.state.finished) return m.sleep_mode_finished();
+  if (sleepBriefing(sleep)) return m.sleep_mode_briefing();
   return `${m.sleep_mode_on()} · ${fmtUsd(sleep.budget.spentUsd)} / ${fmtUsd(sleep.budget.limitUsd)}`;
 }
 
@@ -52,6 +61,8 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
   const [budget, setBudget] = useState(plan ? String(plan.gpuBudgetUsd) : "10");
   const [hours, setHours] = useState(hoursLeft != null ? hoursLeft.toFixed(1) : "8");
   const [goal, setGoal] = useState(plan?.goal ?? "");
+  const [notes, setNotes] = useState(plan?.notes ?? "");
+  const [askFirst, setAskFirst] = useState(plan?.askFirst ?? true);
   const [metric, setMetric] = useState(objective?.metric ?? "");
   const [direction, setDirection] = useState<"max" | "min">(objective?.direction ?? "max");
   const [target, setTarget] = useState(objective?.improvePct != null ? String(objective.improvePct) : "");
@@ -98,6 +109,8 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
           budgetUsd,
           hours: hoursValue,
           goal: goal.trim() || null,
+          notes: notes.trim() || null,
+          askFirst,
           metric: metric.trim() || null,
           direction,
           targetPct,
@@ -154,6 +167,15 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
             ) : (
               <p className="m-0 text-muted">{m.sleep_mode_no_baseline()}</p>
             ))}
+            {sleepBriefing(sleep) && (
+              <p className="m-0 text-muted">{m.sleep_mode_briefing_status()}</p>
+            )}
+            {sleep.state.understanding && (
+              <p className="m-0">
+                {m.sleep_mode_understanding()}{" "}
+                <span className="text-muted">{sleep.state.understanding}</span>
+              </p>
+            )}
             {sleep.state.assessment && (
               <p className="m-0">
                 {m.sleep_mode_verdict({ verdict: ltr(sleep.state.assessment.verdict) })}{" "}
@@ -232,6 +254,18 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
             <span className="text-muted">{m.sleep_mode_goal_hint()}</span>
           </label>
           <label className="col-span-2 flex flex-col gap-1">
+            {m.sleep_mode_notes()}
+            <textarea
+              className="min-h-16 w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 font-sans text-sm text-text outline-none placeholder:text-muted focus:border-text"
+              rows={2}
+              maxLength={2000}
+              value={notes}
+              placeholder={m.sleep_mode_notes_placeholder()}
+              onChange={(e) => setNotes(e.target.value)}
+            />
+            <span className="text-muted">{m.sleep_mode_notes_hint()}</span>
+          </label>
+          <label className="col-span-2 flex flex-col gap-1">
             {m.sleep_mode_metric()}
             <Input
               value={metric}
@@ -259,6 +293,19 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
               </label>
             </>
           )}
+          {!active || sleepBriefing(sleep) ? (
+            <label className="col-span-2 flex items-start gap-2.5">
+              <Switch
+                checked={askFirst}
+                aria-label={m.sleep_mode_ask_first()}
+                onClick={() => setAskFirst((value) => !value)}
+              />
+              <span className="flex flex-col gap-0.5">
+                {m.sleep_mode_ask_first()}
+                <span className="text-muted">{m.sleep_mode_ask_first_hint()}</span>
+              </span>
+            </label>
+          ) : null}
           <label className="col-span-2 flex items-start gap-2.5">
             <Switch
               checked={selfImprove}

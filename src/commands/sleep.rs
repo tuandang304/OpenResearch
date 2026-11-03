@@ -2,6 +2,7 @@
 //!
 //!   orx sleep start --budget 20 [--for 8h] [--goal "…"] [--metric acc --target 15]
 //!   orx sleep status                  plan, spend, progress, verdict
+//!   orx sleep begin --understanding … the agent ends the briefing and starts
 //!   orx sleep assess --verdict …      the agent's feasibility analysis
 //!   orx sleep done --evidence "…"     the agent reached the target; finish
 //!   orx sleep stop --reason "…"       finish early; paid launches stay blocked
@@ -36,6 +37,16 @@ pub enum SleepCommand {
         session: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// End the briefing: record the direction agreed with the user, then work
+    /// unattended.
+    Begin {
+        /// The agreed direction, in a few sentences: what to pursue first,
+        /// what success means, and what to avoid.
+        #[arg(long)]
+        understanding: String,
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Record whether the target is reachable within the budget and deadline.
     Assess {
@@ -87,6 +98,14 @@ pub struct StartArgs {
     /// reached and then finishes sleep mode (`orx sleep done`).
     #[arg(long)]
     pub goal: Option<String>,
+    /// What to keep in mind while you are away: priorities, preferences,
+    /// things to avoid. Sent to the agent with every turn.
+    #[arg(long)]
+    pub notes: Option<String>,
+    /// Start working right away instead of asking you clarifying questions
+    /// about the direction first.
+    #[arg(long)]
+    pub no_questions: bool,
     /// The run metric the target is measured on (as imported with `orx exp metrics`).
     #[arg(long)]
     pub metric: Option<String>,
@@ -143,6 +162,30 @@ pub async fn run(args: SleepArgs) -> Result<()> {
     match args.command {
         SleepCommand::Start(args) => start(&store, args),
         SleepCommand::Status { session, json } => status(&store, &session_id(session)?, json),
+        SleepCommand::Begin {
+            understanding,
+            session,
+        } => {
+            let session = session_id(session)?;
+            let mut stored = store
+                .get_sleep(&session)?
+                .ok_or_else(|| anyhow!("Sleep mode is not on for this chat."))?;
+            if stored.state.finished.is_some() {
+                return Err(anyhow!("Sleep mode has already finished."));
+            }
+            let was_open = sleep::record_briefing(&mut stored.state, &understanding)?;
+            store.set_sleep_state(&session, &stored.state)?;
+            if was_open {
+                println!(
+                    "\u{2713} Briefing recorded. The user is away from now on: do not ask \
+                     questions. Start with the feasibility analysis (`orx sleep assess`), then \
+                     plan and launch the first runs."
+                );
+            } else {
+                println!("\u{2713} Agreed direction updated.");
+            }
+            Ok(())
+        }
         SleepCommand::Assess {
             verdict,
             note,
@@ -258,6 +301,9 @@ fn start(store: &Store, args: StartArgs) -> Result<()> {
     let plan = SleepPlan {
         gpu_budget_usd: args.budget,
         goal: args.goal,
+        notes: args.notes,
+        // An agent starting sleep mode is already talking with the user.
+        ask_first: !args.no_questions && !from_agent(),
         until: args
             .duration
             .as_deref()
@@ -334,6 +380,14 @@ fn status(store: &Store, session: &str, json: bool) -> Result<()> {
     }
     if let Some(goal) = &stored.plan.goal {
         println!("  goal    {goal}");
+    }
+    if let Some(notes) = &stored.plan.notes {
+        println!("  notes   {notes}");
+    }
+    if let Some(understanding) = &stored.state.understanding {
+        println!("  agreed  {understanding}");
+    } else if sleep::briefing_pending(&stored.plan, &stored.state) {
+        println!("  brief   waiting for the agent's questions and your answers");
     }
     if let (Some(objective), Some(progress)) = (&stored.plan.objective, &progress) {
         println!(
