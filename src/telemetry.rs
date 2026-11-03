@@ -179,6 +179,10 @@ pub(crate) struct Settings {
     /// empty = every harness may be used.
     #[serde(default)]
     pub cross_harness_excluded: Vec<String>,
+    /// Limits on the harnesses, models and effort of the helper chats agents
+    /// create (Settings → Harnesses → Sub-agent limits). Absent = no limits.
+    #[serde(default)]
+    pub delegation_policy: Option<crate::local::delegation::DelegationPolicy>,
     /// Let agents pick the backend per run among the user's connected
     /// providers instead of always using the default. Absent = off.
     #[serde(default)]
@@ -413,6 +417,18 @@ pub(crate) fn cross_harness_excluded() -> Vec<String> {
 
 pub(crate) fn set_cross_harness_excluded(excluded: Vec<String>) -> std::io::Result<()> {
     mutate_settings(|settings| settings.cross_harness_excluded = excluded)
+}
+
+pub(crate) fn delegation_policy() -> crate::local::delegation::DelegationPolicy {
+    load_settings()
+        .and_then(|settings| settings.delegation_policy)
+        .unwrap_or_default()
+}
+
+pub(crate) fn set_delegation_policy(
+    policy: crate::local::delegation::DelegationPolicy,
+) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.delegation_policy = Some(policy))
 }
 
 pub(crate) fn update_channel() -> crate::updates::ReleaseChannel {

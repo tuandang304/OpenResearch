@@ -56,7 +56,7 @@ pub(crate) use detect::{
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
 pub use failover::{carry_permission, is_usage_limit_failure, CarriedPermission, HarnessFailover};
 pub use model_route::{check_model_for_harness, resolve_model};
-pub use options::{HarnessOptions, PermissionMode};
+pub use options::{HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
 pub use plan_gate::command_is_readonly;
 pub use plan_gate::decide as plan_gate_decide;
 

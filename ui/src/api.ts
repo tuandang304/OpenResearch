@@ -1027,6 +1027,35 @@ export const getCrossHarnessSettings = (signal?: AbortSignal) =>
 
 export const setCrossHarnessSettings = (update: { enabled?: boolean; excluded?: HarnessId[] }) =>
   post<CrossHarnessSettings>("/api/settings/cross-harness", update);
+
+/** Limits on one harness for the helper chats agents create (`orx agent spawn`). */
+export interface DelegationRule {
+  harness: HarnessId;
+  /** Whether helper chats may run on this harness. */
+  allowed: boolean;
+  /** Models helper chats may use; empty = any model. */
+  models: string[];
+  /** Used when the agent names no model or one it may not use. */
+  defaultModel?: string;
+  /** Effort every helper chat here runs at; absent = the agent's choice. */
+  effort?: string;
+  /** Claude Code only: the model its own built-in subagents use. */
+  subagentModel?: string;
+}
+
+/** Settings → Harnesses → Sub-agent limits. A harness with no rule is allowed
+ * with no model or effort limits. */
+export interface DelegationPolicy {
+  enabled: boolean;
+  harnesses: DelegationRule[];
+}
+
+export const getDelegationPolicy = (signal?: AbortSignal) =>
+  get<DelegationPolicy>("/api/settings/delegation-policy", signal);
+
+/** Replaces the whole policy; the server returns it cleaned up. */
+export const setDelegationPolicy = (policy: DelegationPolicy) =>
+  post<DelegationPolicy>("/api/settings/delegation-policy", policy);
 export const setReleaseChannel = (channel: ReleaseChannel) =>
   post<UpdateStatus>("/api/update/channel", { channel });
 

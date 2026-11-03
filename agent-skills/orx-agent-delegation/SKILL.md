@@ -1,6 +1,6 @@
 ---
 name: orx-agent-delegation
-description: "Create independent project chats with `orx agent spawn`: opening messages, project selection, worktrees, compute authorization, quota-aware harness, model and compute choice (`orx agent quota`, `orx agent route`), and cross-harness review chats. Use before creating another chat or when cross-harness review is on; keep ordinary literature retrieval local; deep-research has its own contract."
+description: "Create independent project chats with `orx agent spawn`: opening messages, project, worktrees, compute authorization, sub-agent limits, quota-aware harness, model, effort and compute choice (`orx agent quota`, `orx agent route`), cross-harness review. Use before creating another chat or when cross-harness review is on; keep ordinary literature retrieval local; deep-research has its own contract."
 ---
 
 # Create an independent chat
@@ -14,7 +14,7 @@ conversation or this chat's settings.
 orx agent spawn "<standalone opening message>"
 orx agent spawn --title "<chat title>" --stdin
 orx agent spawn "<message>" --project <project-id>
-orx agent spawn "<message>" --harness <harness> [--model <model>]
+orx agent spawn "<message>" --harness <harness> [--model <model>] [--effort <level>]
 ```
 
 The project defaults to this OpenResearch chat's project; pass `--project` when
@@ -39,6 +39,18 @@ or edit a frozen experiment node.
 For ordinary `orx-lit-review`, keep the retrieval loop with the main agent.
 For the `orx-deep-research` report workflow, independent subtopics may be
 delegated under its bounded research and synthesis contract.
+
+## Sub-agent limits
+
+When the session playbook says sub-agent limits are on, the user has fixed
+which harnesses, models, and effort helper chats may use. Pick `--harness`,
+`--model`, and `--effort` from the playbook's list (also the `SUB-AGENTS`
+column of `orx agent harnesses`). OpenResearch refuses a harness that is off
+and replaces any other model or effort with the user's default, printing a
+`Sub-agent limits:` line for each change; the `Created chat … on …` line shows
+what the chat actually runs on. Do not retry with another disallowed choice,
+and record the harness and model from that line, not the ones you asked for.
+`orx agent route` already answers within the limits.
 
 ## Quota-aware delegation
 

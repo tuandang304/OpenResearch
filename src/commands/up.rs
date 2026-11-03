@@ -8062,6 +8062,10 @@ struct CreateChatSessionReq {
     plan_mode: bool,
     reasoning_level: Option<String>,
     autonomy: Option<Autonomy>,
+    /// An agent is creating this chat (`orx agent spawn`), so the user's
+    /// sub-agent limits apply to its harness, model and effort.
+    #[serde(default)]
+    delegated: bool,
 }
 
 fn new_chat_settings(
@@ -8157,6 +8161,7 @@ fn new_chat_settings(
         plan_mode: false,
         reasoning_level,
         autonomy: Some(preferences.preferred_autonomy.unwrap_or(Autonomy::Agentic)),
+        delegated: false,
     })
 }
 
@@ -8193,7 +8198,10 @@ async fn create_chat_session(
     store
         .get_local_project(&req.project_id)?
         .ok_or_else(|| not_found("project"))?;
-    if req.harness.is_none() {
+    let policy = crate::config::delegation_policy();
+    let limited = req.delegated && policy.enabled;
+    let mut policy_notes = Vec::new();
+    if req.harness.is_none() || limited {
         let preferences = store.ui_state()?;
         let catalog = harnesses_payload(
             &state,
@@ -8204,14 +8212,86 @@ async fn create_chat_session(
             },
         )
         .await;
-        req = new_chat_settings(req.project_id, preferences, &catalog).map_err(bad_request)?;
+        let explicit_harness = req.harness.is_some();
+        if !explicit_harness {
+            let delegated = req.delegated;
+            match new_chat_settings(req.project_id.clone(), preferences.clone(), &catalog) {
+                Ok(defaults) => {
+                    req = CreateChatSessionReq {
+                        delegated,
+                        ..defaults
+                    }
+                }
+                // The limits may still find an allowed harness that is ready.
+                Err(_) if limited => {
+                    req.harness = preferences
+                        .preferred_agent
+                        .as_ref()
+                        .map(|agent| agent.harness.clone());
+                }
+                Err(error) => return Err(bad_request(error)),
+            }
+        }
+        if limited {
+            (req, policy_notes) =
+                apply_delegation_policy(&policy, req, explicit_harness, &catalog, &preferences)?;
+        }
     }
     let session = build_chat_session(&state, req).await?;
     store.create_chat_session(&session)?;
     state.chat.emit_session(Some(session.clone())).await;
-    Ok(Json(
-        json!({ "session": local::chat::session_json(&session, false) }),
-    ))
+    Ok(Json(json!({
+        "session": local::chat::session_json(&session, false),
+        "policyNotes": policy_notes,
+    })))
+}
+
+/// Fit an agent-created chat to the user's sub-agent limits. A harness the
+/// limits switch to starts from its own defaults; only the autonomy carries
+/// over from New Chat, as with `orx agent spawn --harness`.
+fn apply_delegation_policy(
+    policy: &crate::local::delegation::DelegationPolicy,
+    mut req: CreateChatSessionReq,
+    explicit_harness: bool,
+    catalog: &Value,
+    preferences: &crate::store::StoredUiState,
+) -> std::result::Result<(CreateChatSessionReq, Vec<String>), ApiError> {
+    let entries = catalog
+        .get("harnesses")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut order: Vec<String> = preferences.harness_failover.order.clone();
+    for harness in local::harness::registry() {
+        if harness.supports_chat() && !order.iter().any(|id| id == harness.id()) {
+            order.push(harness.id().to_string());
+        }
+    }
+    let order: Vec<&str> = order.iter().map(String::as_str).collect();
+    let decision = policy
+        .resolve(
+            &crate::local::delegation::Requested {
+                harness: req.harness.as_deref(),
+                explicit_harness,
+                model: req.model.as_deref(),
+                effort: req.reasoning_level.as_deref(),
+            },
+            entries,
+            &order,
+        )
+        .map_err(bad_request)?;
+    if req.harness.as_deref() != Some(decision.harness.as_str()) {
+        req.service_tier = None;
+        req.permission_mode = None;
+        req.plan_mode = false;
+        req.autonomy = req.autonomy.or(Some(
+            preferences.preferred_autonomy.unwrap_or(Autonomy::Agentic),
+        ));
+    }
+    req.harness = Some(decision.harness);
+    req.model = decision.model;
+    req.reasoning_level = decision.effort;
+    Ok((req, decision.notes))
 }
 
 /// Validate a new chat's settings against its harness and resolve its model.
@@ -8451,6 +8531,7 @@ async fn handoff_chat_session(
             plan_mode: false,
             reasoning_level: req.reasoning_level,
             autonomy: parent.autonomy.as_deref().and_then(Autonomy::from_id),
+            delegated: false,
         },
     )
     .await?;

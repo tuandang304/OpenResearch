@@ -1,5 +1,5 @@
 //! Settings routes owned by the tuandang304 fork: research tools, harness
-//! accounts, the decision model, cross-harness review, compute routing and
+//! accounts, the decision model, cross-harness review, sub-agent limits, compute routing and
 //! auto-compact, plus the compute routes in `fork_compute`. `up.rs` mounts them all with one
 //! `.merge(fork_settings::routes())`. See `docs/fork-maintenance.md`.
 
@@ -23,6 +23,10 @@ pub(super) fn routes() -> Router<AppState> {
         .route(
             "/api/settings/cross-harness",
             get(cross_harness_settings).post(set_cross_harness_settings),
+        )
+        .route(
+            "/api/settings/delegation-policy",
+            get(delegation_policy_settings).post(set_delegation_policy_settings),
         )
         .route(
             "/api/settings/compute-routing",
@@ -159,6 +163,31 @@ async fn set_cross_harness_settings(Json(req): Json<SetCrossHarnessReq>) -> ApiR
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("cross-harness task failed: {e}")))?
+}
+
+async fn delegation_policy_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(json!(crate::config::delegation_policy()))))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("sub-agent limits task failed: {e}")))?
+}
+
+/// Replaces the whole policy. Read fresh on every `orx agent spawn`; the
+/// playbook and Claude Code's subagent model follow at each session's next
+/// playbook rewrite or CLI restart.
+async fn set_delegation_policy_settings(
+    Json(policy): Json<crate::local::delegation::DelegationPolicy>,
+) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let policy = policy
+            .normalized(|id| crate::local::harness::chat_harness(id).is_some())
+            .map_err(|error| ApiError::from(anyhow!(error)))?;
+        crate::config::set_delegation_policy(policy).map_err(|error| {
+            ApiError::from(anyhow!("could not save the sub-agent limits: {error}"))
+        })?;
+        Ok(Json(json!(crate::config::delegation_policy())))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("sub-agent limits task failed: {e}")))?
 }
 
 async fn auto_compact_settings() -> ApiResult {

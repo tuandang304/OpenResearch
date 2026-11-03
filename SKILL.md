@@ -99,7 +99,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx exp move/archive/unarchive/delete <localExpId>` | Re-parent, hide, restore, or permanently delete experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
 | `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
-| `orx agent harnesses [--json]` | List the harnesses a helper can run on, with each one's model vendor. |
+| `orx agent harnesses [--json]` | List the harnesses a helper can run on, with each one's model vendor and the user's sub-agent limits. |
 | `orx sleep start --budget <usd> [--for 8h] [--metric <m> --target <pct>]` / `status` / `assess` / `stop` | Run this chat unattended (the user is away) under a hard GPU budget and stop condition; start it only when the user asks. Its rules arrive with every turn. |
 | `orx strategy show` / `stats --runs` / `log` / `diff` / `propose --rationale "…" --file -` / `keep --reason "…"` | Your versioned sleep-mode strategy. In a retrospective, propose a revision backed by run evidence; orx trials it against the version in force and keeps it only if its runs win more often. Budget, deadline and permissions are not part of it. |
 

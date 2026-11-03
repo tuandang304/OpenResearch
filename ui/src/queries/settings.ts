@@ -113,6 +113,12 @@ export const getCrossHarnessSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getDelegationPolicyQuery = () => queryOptions({
+  queryKey: workspaceKey("getDelegationPolicy"),
+  queryFn: ({ signal }) => api.getDelegationPolicy(signal),
+  staleTime: 300_000,
+});
+
 export const getOpenResearchSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getOpenResearchSettings"),
   queryFn: ({ signal }) => api.getOpenResearchSettings(signal),

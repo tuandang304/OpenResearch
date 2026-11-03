@@ -285,6 +285,19 @@ fn cross_harness_bullet(session_harness: Option<&str>) -> String {
     )
 }
 
+/// The sub-agent limits bullet, present only while the user has them on.
+fn delegation_bullet() -> String {
+    let harnesses: Vec<_> = super::harness::registry()
+        .into_iter()
+        .filter(|harness| harness.supports_chat())
+        .collect();
+    let names: Vec<(&str, &str)> = harnesses
+        .iter()
+        .map(|harness| (harness.id(), harness.name()))
+        .collect();
+    crate::config::delegation_policy().playbook_bullet(&names)
+}
+
 /// The compute-routing bullet, present only while the user has it turned on.
 fn compute_routing_bullet() -> String {
     if !crate::config::compute_routing() {
@@ -358,9 +371,10 @@ fn playbook_md_for_session(
         .map_or(String::new(), |flavor| format!(" (`--flavor {flavor}`)"));
     let compute_bullet = format!(
         "- Compute: default target **{compute_backend}**{flavor_part} — \
-         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching{}{}",
+         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching{}{}{}",
         compute_routing_bullet(),
-        cross_harness_bullet(session_harness)
+        cross_harness_bullet(session_harness),
+        delegation_bullet()
     );
     let project_state = project_state_md(project, state);
     let template = SYSTEM_PROMPT

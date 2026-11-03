@@ -352,6 +352,17 @@ pub fn set_compute_routing_excluded(mut excluded: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// The user's limits on the helper chats agents create (Settings → Harnesses
+/// → Sub-agent limits). Read fresh on every spawn and playbook rewrite.
+pub fn delegation_policy() -> crate::local::delegation::DelegationPolicy {
+    crate::telemetry::delegation_policy()
+}
+
+pub fn set_delegation_policy(policy: crate::local::delegation::DelegationPolicy) -> Result<()> {
+    crate::telemetry::set_delegation_policy(policy)?;
+    Ok(())
+}
+
 /// Whether cross-harness review may use this harness.
 pub fn cross_harness_allows(harness: &str) -> bool {
     !cross_harness_excluded().iter().any(|id| id == harness)
