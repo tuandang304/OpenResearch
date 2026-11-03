@@ -101,10 +101,8 @@ pub async fn submit_local_gcp_with_source(
         job_id: Some(name.clone()),
         flavor: Some(flavor),
         image: None,
-        url: Some(format!(
-            "https://console.cloud.google.com/compute/instancesDetail/zones/{zone}/instances/{name}?project={project}"
-        )),
-        context: Some(zone.clone()),
+        url: None,
+        context: None,
         manifest: None,
         resources: None,
         ssh_host: None,
@@ -118,18 +116,25 @@ pub async fn submit_local_gcp_with_source(
         source_size: None,
     };
     source.apply_to_descriptor(&mut descriptor);
-    // Record the handle first so an interrupted submit can still find the VM.
-    crate::compute::record_submission_handle(&run_id, &descriptor)?;
-    gcp::create(&gcp::CreateSpec {
-        project: &project,
-        zone: &zone,
-        name: &name,
-        run_id: &run_id,
-        shape: &shape,
-        settings: &settings,
-        ssh_public_key: &public_key,
-        timeout_secs,
-    })
+    // Create in a zone that actually offers the GPU, moving on when one is out
+    // of stock. Before each attempt, record the handle with that zone so an
+    // interrupted submit can still find the VM.
+    let zone = gcp::create_in_gpu_zone(
+        &gcp::CreateSpec {
+            project: &project,
+            zone: &zone,
+            name: &name,
+            run_id: &run_id,
+            shape: &shape,
+            settings: &settings,
+            ssh_public_key: &public_key,
+            timeout_secs,
+        },
+        |zone| {
+            set_zone(&mut descriptor, &project, &name, zone);
+            crate::compute::record_submission_handle(&run_id, &descriptor)
+        },
+    )
     .await?;
 
     let run = StoredRun {
@@ -167,4 +172,12 @@ pub async fn submit_local_gcp_with_source(
         return Err(err);
     }
     Ok(run)
+}
+
+/// Point the run's handle at the VM in this zone.
+fn set_zone(descriptor: &mut BackendDescriptor, project: &str, name: &str, zone: &str) {
+    descriptor.context = Some(zone.to_string());
+    descriptor.url = Some(format!(
+        "https://console.cloud.google.com/compute/instancesDetail/zones/{zone}/instances/{name}?project={project}"
+    ));
 }

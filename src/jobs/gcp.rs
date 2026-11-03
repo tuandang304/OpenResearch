@@ -111,9 +111,25 @@ pub fn find_cli() -> Option<PathBuf> {
     })
 }
 
-/// Run gcloud non-interactively and return its stdout.
-pub(super) async fn gcloud(args: &[String]) -> Result<String> {
-    let cli = find_cli().ok_or_else(|| anyhow!("{INSTALL_HINT}"))?;
+/// Why a gcloud call failed: it could not run at all, or it ran and failed
+/// with this stderr.
+enum GcloudFailure {
+    Setup(crate::error::Error),
+    Failed(String),
+}
+
+impl GcloudFailure {
+    fn into_error(self) -> crate::error::Error {
+        match self {
+            Self::Setup(error) => error,
+            Self::Failed(stderr) => anyhow!("{}", gcloud_error(&stderr)),
+        }
+    }
+}
+
+/// Run gcloud non-interactively and return its stdout, or its raw stderr.
+async fn run_gcloud(args: &[String]) -> std::result::Result<String, GcloudFailure> {
+    let cli = find_cli().ok_or_else(|| GcloudFailure::Setup(anyhow!("{INSTALL_HINT}")))?;
     let mut command = Command::new(cli);
     command
         .args(args)
@@ -126,29 +142,31 @@ pub(super) async fn gcloud(args: &[String]) -> Result<String> {
     let output = tokio::time::timeout(GCLOUD_TIMEOUT, command.output())
         .await
         .map_err(|_| {
-            anyhow!(
+            GcloudFailure::Setup(anyhow!(
                 "gcloud did not finish within {}s.",
                 GCLOUD_TIMEOUT.as_secs()
-            )
+            ))
         })?
-        .map_err(|e| anyhow!("Could not run gcloud: {e}"))?;
+        .map_err(|e| GcloudFailure::Setup(anyhow!("Could not run gcloud: {e}")))?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "{}",
-            gcloud_error(&String::from_utf8_lossy(&output.stderr))
+        return Err(GcloudFailure::Failed(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Run gcloud non-interactively and return its stdout.
+pub(super) async fn gcloud(args: &[String]) -> Result<String> {
+    run_gcloud(args).await.map_err(GcloudFailure::into_error)
+}
+
 /// The useful line of a gcloud failure, reworded where the fix is known.
 fn gcloud_error(stderr: &str) -> String {
     let text = stderr.trim();
-    if text.contains("ZONE_RESOURCE_POOL_EXHAUSTED")
-        || text.contains("does not have enough resources")
-    {
-        return "This zone has no free capacity for that GPU right now. Try another zone, a \
-                different GPU, or another provider."
+    if is_capacity_error(text) {
+        return "This zone has no free capacity for that GPU right now. orx tries other zones \
+                that have it; otherwise try later, a different GPU, or another provider."
             .into();
     }
     if text.contains("Quota") && text.contains("exceeded") {
@@ -246,6 +264,9 @@ pub struct GpuKind {
     accelerator: Option<&'static str>,
     /// Machine-type prefix for built-in families, completed by the count.
     family: Option<&'static str>,
+    /// Compute Engine's accelerator type for this GPU, whichever way the VM
+    /// gets it; `gcloud compute accelerator-types list` says which zones have it.
+    pub accelerator_type: &'static str,
     counts: &'static [u32],
     /// On-demand USD per hour for one GPU with its smallest machine in
     /// us-central1 (published list prices; other regions differ).
@@ -259,6 +280,7 @@ pub const GPUS: &[GpuKind] = &[
         vram_gb: 16.0,
         accelerator: Some("nvidia-tesla-t4"),
         family: None,
+        accelerator_type: "nvidia-tesla-t4",
         counts: &[1, 2, 4],
         usd_per_hour: 0.73,
     },
@@ -268,6 +290,7 @@ pub const GPUS: &[GpuKind] = &[
         vram_gb: 8.0,
         accelerator: Some("nvidia-tesla-p4"),
         family: None,
+        accelerator_type: "nvidia-tesla-p4",
         counts: &[1, 2, 4],
         usd_per_hour: 0.98,
     },
@@ -277,6 +300,7 @@ pub const GPUS: &[GpuKind] = &[
         vram_gb: 24.0,
         accelerator: None,
         family: Some("g2-standard"),
+        accelerator_type: "nvidia-l4",
         counts: &[1, 2, 4, 8],
         usd_per_hour: 0.85,
     },
@@ -286,6 +310,7 @@ pub const GPUS: &[GpuKind] = &[
         vram_gb: 16.0,
         accelerator: Some("nvidia-tesla-p100"),
         family: None,
+        accelerator_type: "nvidia-tesla-p100",
         counts: &[1, 2, 4],
         usd_per_hour: 1.84,
     },
@@ -295,6 +320,7 @@ pub const GPUS: &[GpuKind] = &[
         vram_gb: 16.0,
         accelerator: Some("nvidia-tesla-v100"),
         family: None,
+        accelerator_type: "nvidia-tesla-v100",
         counts: &[1, 2, 4, 8],
         usd_per_hour: 2.86,
     },
@@ -304,6 +330,7 @@ pub const GPUS: &[GpuKind] = &[
         vram_gb: 40.0,
         accelerator: None,
         family: Some("a2-highgpu"),
+        accelerator_type: "nvidia-tesla-a100",
         counts: &[1, 2, 4, 8],
         usd_per_hour: 3.67,
     },
@@ -313,6 +340,7 @@ pub const GPUS: &[GpuKind] = &[
         vram_gb: 80.0,
         accelerator: None,
         family: Some("a2-ultragpu"),
+        accelerator_type: "nvidia-a100-80gb",
         counts: &[1, 2, 4, 8],
         usd_per_hour: 5.07,
     },
@@ -322,6 +350,7 @@ pub const GPUS: &[GpuKind] = &[
         vram_gb: 80.0,
         accelerator: None,
         family: Some("a3-highgpu"),
+        accelerator_type: "nvidia-h100-80gb",
         counts: &[1, 2, 4, 8],
         usd_per_hour: 11.06,
     },
@@ -455,6 +484,7 @@ fn label_value(run_id: &str) -> String {
         .collect()
 }
 
+#[derive(Clone, Copy)]
 pub struct CreateSpec<'a> {
     pub project: &'a str,
     pub zone: &'a str,
@@ -531,8 +561,266 @@ fn metadata_key(public_key: &str) -> String {
     }
 }
 
-pub async fn create(spec: &CreateSpec<'_>) -> Result<()> {
-    gcloud(&create_args(spec)).await.map(|_| ())
+// --- GPU zones -------------------------------------------------------------------
+
+/// How many zones a launch tries before it gives up; each failed create costs
+/// gcloud a round trip, so a stock-out everywhere still fails within minutes.
+const MAX_ZONE_ATTEMPTS: usize = 8;
+
+/// One accelerator type in one zone, from `gcloud compute accelerator-types list`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceleratorZone {
+    pub name: String,
+    pub zone: String,
+    pub description: String,
+    pub max_per_vm: Option<u32>,
+}
+
+/// The gcloud `--filter` for a GPU query: a full accelerator type such as
+/// `nvidia-tesla-t4` matches exactly; anything else matches by substring, so
+/// `a100` finds both A100s and `t4` finds `nvidia-tesla-t4` and its `-vws`
+/// workstation variant.
+pub fn accelerator_filter(query: &str) -> Option<String> {
+    let query: String = query
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    let query = match query.as_str() {
+        "" => return None,
+        "a100-40gb" => "tesla-a100".to_string(),
+        _ => query,
+    };
+    let exact =
+        query.starts_with("nvidia-") || GPUS.iter().any(|gpu| gpu.accelerator_type == query);
+    Some(if exact {
+        format!("name={query}")
+    } else {
+        format!("name ~ {query}")
+    })
+}
+
+fn parse_accelerator_zones(out: &str) -> Vec<AcceleratorZone> {
+    let mut zones: Vec<AcceleratorZone> = serde_json::from_str::<Value>(out)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| {
+            Some(AcceleratorZone {
+                name: value["name"].as_str()?.to_string(),
+                zone: Some(last_segment(&value["zone"])).filter(|zone| !zone.is_empty())?,
+                description: value["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                max_per_vm: value["maximumCardsPerInstance"]
+                    .as_u64()
+                    .map(|count| count as u32),
+            })
+        })
+        .collect();
+    zones.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.zone.cmp(&b.zone)));
+    zones.dedup_by(|a, b| a.name == b.name && a.zone == b.zone);
+    zones
+}
+
+/// Which zones of the project offer which GPUs, optionally narrowed by
+/// [`accelerator_filter`].
+pub async fn list_accelerator_zones(
+    project: &str,
+    filter: Option<&str>,
+) -> Result<Vec<AcceleratorZone>> {
+    let mut args: Vec<String> = vec![
+        "compute".into(),
+        "accelerator-types".into(),
+        "list".into(),
+        format!("--project={project}"),
+        "--format=json".into(),
+    ];
+    if let Some(filter) = filter {
+        args.push(format!("--filter={filter}"));
+    }
+    Ok(parse_accelerator_zones(&gcloud(&args).await?))
+}
+
+/// Zones that offer this accelerator type.
+pub async fn zones_with_gpu(project: &str, accelerator_type: &str) -> Result<Vec<String>> {
+    Ok(
+        list_accelerator_zones(project, Some(&format!("name={accelerator_type}")))
+            .await?
+            .into_iter()
+            .filter(|offer| offer.name == accelerator_type)
+            .map(|offer| offer.zone)
+            .collect(),
+    )
+}
+
+/// `us-central1` for `us-central1-a`.
+fn zone_region(zone: &str) -> &str {
+    zone.rsplit_once('-').map_or(zone, |(region, _)| region)
+}
+
+/// The order to try zones in: the preferred zone, then its region, then its
+/// geography (`us`, `europe`, `asia`, ...), then the rest. Data and latency stay
+/// close to where the user chose.
+pub fn order_zones(preferred: &str, zones: &[String]) -> Vec<String> {
+    let region = zone_region(preferred);
+    let geography = preferred.split('-').next().unwrap_or(preferred);
+    let rank = |zone: &str| -> u8 {
+        if zone == preferred {
+            0
+        } else if zone_region(zone) == region {
+            1
+        } else if zone.split('-').next() == Some(geography) {
+            2
+        } else {
+            3
+        }
+    };
+    let mut ordered: Vec<String> = zones.to_vec();
+    ordered.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    ordered.dedup();
+    ordered
+}
+
+fn is_capacity_error(text: &str) -> bool {
+    text.contains("ZONE_RESOURCE_POOL_EXHAUSTED")
+        || text.contains("does not have enough resources")
+        || text.contains("STOCKOUT")
+        || text.contains("resource pool exhausted")
+}
+
+/// What a failed create means for the next zone.
+#[derive(Debug, PartialEq)]
+enum ZoneFailure {
+    /// This zone has no free GPU or does not offer it: another zone may.
+    TryNextZone,
+    /// The region's GPU quota is spent: skip the region's other zones.
+    SkipRegion,
+    /// Nothing another zone changes (auth, project-wide quota, bad image...).
+    Fatal,
+}
+
+fn classify_create_failure(stderr: &str) -> ZoneFailure {
+    let lower = stderr.to_ascii_lowercase();
+    if is_capacity_error(stderr) {
+        return ZoneFailure::TryNextZone;
+    }
+    let unavailable_here = (lower.contains("acceleratortype") || lower.contains("machinetype"))
+        && (lower.contains("not found")
+            || lower.contains("does not exist")
+            || lower.contains("invalid value")
+            || lower.contains("not available"));
+    if unavailable_here
+        || lower.contains("not supported in zone")
+        || lower.contains("not available in zone")
+        || lower.contains("unsupported_operation")
+    {
+        return ZoneFailure::TryNextZone;
+    }
+    if stderr.contains("Quota")
+        && stderr.contains("exceeded")
+        && lower.contains("in region")
+        && !stderr.contains("ALL_REGIONS")
+    {
+        return ZoneFailure::SkipRegion;
+    }
+    ZoneFailure::Fatal
+}
+
+/// Create the VM in a zone that has its GPU. The preferred zone goes first when
+/// it offers the GPU; a zone that is out of stock or lacks the GPU is followed
+/// by the next closest one. `before_attempt` runs before each create with the
+/// zone about to be tried, so the caller can record where the VM may appear.
+/// Returns the zone the VM was created in.
+pub async fn create_in_gpu_zone(
+    spec: &CreateSpec<'_>,
+    mut before_attempt: impl FnMut(&str) -> Result<()>,
+) -> Result<String> {
+    let preferred = spec.zone.to_string();
+    let accelerator_type = spec
+        .shape
+        .gpu
+        .and_then(|id| GPUS.iter().find(|gpu| gpu.id == id))
+        .map(|gpu| (gpu.label, gpu.accelerator_type));
+    let candidates = match accelerator_type {
+        None => vec![preferred.clone()],
+        Some((label, accelerator_type)) => {
+            match zones_with_gpu(spec.project, accelerator_type).await {
+                Ok(zones) if zones.is_empty() => {
+                    return Err(anyhow!(
+                        "No zone of project {} offers {label} ({accelerator_type}). Pick                          another GPU (`orx compute gpu-zones` lists what each zone has).",
+                        spec.project
+                    ))
+                }
+                Ok(zones) => {
+                    if !zones.contains(&preferred) {
+                        eprintln!(
+                            "gcp: zone {preferred} has no {label}; trying zones that do"
+                        );
+                    }
+                    order_zones(&preferred, &zones)
+                }
+                Err(error) => {
+                    // The lookup is a convenience: without it, try the zone the
+                    // user chose, as before.
+                    eprintln!("gcp: could not list zones with {label} ({error}); using {preferred}");
+                    vec![preferred.clone()]
+                }
+            }
+        }
+    };
+
+    let mut tried: Vec<String> = Vec::new();
+    let mut skipped_regions: Vec<String> = Vec::new();
+    let mut last_error: Option<String> = None;
+    for zone in candidates {
+        if tried.len() >= MAX_ZONE_ATTEMPTS {
+            break;
+        }
+        if skipped_regions
+            .iter()
+            .any(|region| region == zone_region(&zone))
+        {
+            continue;
+        }
+        before_attempt(&zone)?;
+        let attempt = CreateSpec {
+            zone: &zone,
+            ..*spec
+        };
+        match run_gcloud(&create_args(&attempt)).await {
+            Ok(_) => {
+                if zone != preferred {
+                    eprintln!("gcp: created the VM in {zone}");
+                }
+                return Ok(zone);
+            }
+            Err(GcloudFailure::Setup(error)) => return Err(error),
+            Err(GcloudFailure::Failed(stderr)) => {
+                let failure = classify_create_failure(&stderr);
+                let message = gcloud_error(&stderr);
+                if failure == ZoneFailure::Fatal || accelerator_type.is_none() {
+                    return Err(anyhow!("{message}"));
+                }
+                eprintln!("gcp: {zone}: {message}");
+                if failure == ZoneFailure::SkipRegion {
+                    skipped_regions.push(zone_region(&zone).to_string());
+                }
+                tried.push(zone);
+                last_error = Some(message);
+            }
+        }
+    }
+    let label = accelerator_type.map_or("that machine", |(label, _)| label);
+    Err(anyhow!(
+        "No zone had a free {label} (tried {}). Last error: {} Try again later, a          different GPU, Spot off/on, or another provider.",
+        tried.join(", "),
+        last_error.unwrap_or_default()
+    ))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1007,5 +1295,112 @@ mod tests {
         assert!(is_not_found(
             "The resource 'projects/p/zones/z/instances/n' was not found"
         ));
+    }
+
+    #[test]
+    fn gpu_queries_become_accelerator_filters() {
+        assert_eq!(
+            accelerator_filter("nvidia-tesla-t4").as_deref(),
+            Some("name=nvidia-tesla-t4")
+        );
+        assert_eq!(accelerator_filter("A100").as_deref(), Some("name ~ a100"));
+        assert_eq!(
+            accelerator_filter("a100-40gb").as_deref(),
+            Some("name ~ tesla-a100")
+        );
+        assert_eq!(accelerator_filter("t4; rm").as_deref(), Some("name ~ t4rm"));
+        assert_eq!(accelerator_filter(" "), None);
+        // Every GPU orx offers can be looked up by zone.
+        assert!(GPUS
+            .iter()
+            .all(|gpu| gpu.accelerator_type.starts_with("nvidia-")));
+    }
+
+    #[test]
+    fn accelerator_zones_parse_from_gcloud_json() {
+        let out = json!([
+            {"name": "nvidia-tesla-t4", "zone": "https://www.googleapis.com/compute/v1/projects/p/zones/us-west1-b", "description": "NVIDIA T4", "maximumCardsPerInstance": 4},
+            {"name": "nvidia-tesla-t4", "zone": "us-central1-a", "description": "NVIDIA T4"},
+            {"name": "nvidia-l4", "zone": "zones/asia-east1-a", "description": "NVIDIA L4"},
+            {"name": "broken"}
+        ])
+        .to_string();
+        let zones = parse_accelerator_zones(&out);
+        assert_eq!(
+            zones
+                .iter()
+                .map(|z| (z.name.as_str(), z.zone.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("nvidia-l4", "asia-east1-a"),
+                ("nvidia-tesla-t4", "us-central1-a"),
+                ("nvidia-tesla-t4", "us-west1-b"),
+            ]
+        );
+        assert_eq!(zones[2].max_per_vm, Some(4));
+        assert!(parse_accelerator_zones("not json").is_empty());
+    }
+
+    #[test]
+    fn zones_are_tried_nearest_first() {
+        let zones: Vec<String> = [
+            "europe-west4-a",
+            "us-west1-b",
+            "us-central1-c",
+            "asia-east1-a",
+            "us-central1-a",
+            "us-central1-b",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            order_zones("us-central1-a", &zones),
+            [
+                "us-central1-a",
+                "us-central1-b",
+                "us-central1-c",
+                "us-west1-b",
+                "asia-east1-a",
+                "europe-west4-a"
+            ]
+        );
+        // A preferred zone without the GPU still steers toward its region.
+        assert_eq!(order_zones("us-central1-f", &zones)[0], "us-central1-a");
+        assert_eq!(order_zones("europe-west1-b", &zones)[0], "europe-west4-a");
+    }
+
+    #[test]
+    fn create_failures_decide_whether_to_try_another_zone() {
+        assert_eq!(
+            classify_create_failure("ERROR: (gcloud.compute.instances.create) Could not fetch resource:\n - The zone 'projects/p/zones/us-central1-a' does not have enough resources available to fulfill the request.  '(resource type:compute)'."),
+            ZoneFailure::TryNextZone
+        );
+        assert_eq!(
+            classify_create_failure("code: ZONE_RESOURCE_POOL_EXHAUSTED"),
+            ZoneFailure::TryNextZone
+        );
+        assert_eq!(
+            classify_create_failure("ERROR: Could not fetch resource:\n - Invalid value for field 'resource.guestAccelerators[0].acceleratorType': 'projects/p/zones/us-central1-f/acceleratorTypes/nvidia-tesla-t4'. Accelerator type 'nvidia-tesla-t4' does not exist in zone us-central1-f."),
+            ZoneFailure::TryNextZone
+        );
+        assert_eq!(
+            classify_create_failure("ERROR: Could not fetch resource:\n - Invalid value for field 'resource.machineType': 'zones/us-west1-c/machineTypes/a3-highgpu-1g'. Machine type with name 'a3-highgpu-1g' does not exist in zone 'us-west1-c'."),
+            ZoneFailure::TryNextZone
+        );
+        assert_eq!(
+            classify_create_failure(
+                "ERROR: Quota 'NVIDIA_T4_GPUS' exceeded.  Limit: 0.0 in region us-central1."
+            ),
+            ZoneFailure::SkipRegion
+        );
+        assert_eq!(
+            classify_create_failure("ERROR: Quota 'GPUS_ALL_REGIONS' exceeded.  Limit: 0.0 globally in region us-central1."),
+            ZoneFailure::Fatal
+        );
+        assert_eq!(
+            classify_create_failure("ERROR: You do not currently have an active account selected."),
+            ZoneFailure::Fatal
+        );
+        assert_eq!(zone_region("us-central1-a"), "us-central1");
     }
 }
