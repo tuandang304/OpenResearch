@@ -42,7 +42,7 @@ orx exp run <expId> --backend gcp --flavor n2-standard-16   # CPU only
 - A GPU run starts in the configured zone when it offers that GPU; otherwise
   orx looks up the zones that do (`gcloud compute accelerator-types list`)
   and creates the VM in the nearest one, moving on to the next nearest when a
-  zone is out of stock. `orx compute gpu-zones [--gpu <type or text>]` shows
+  zone is out of stock. `orx compute gpu-zones --gpu <type or text>` shows
   the same lookup; `--gpu a100` matches every A100.
 - "No zone had a free ..." means every nearby zone was out of stock: try again
   later, a different GPU, or another provider. "Quota exceeded" means the
