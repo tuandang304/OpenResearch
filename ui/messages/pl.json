@@ -775,6 +775,7 @@
   "model_picker_more": "Jeszcze {count} — użyj wyszukiwarki",
   "model_picker_use_id": "Użyj „{id}” jako identyfikatora modelu",
   "model_picker_unverified": "Niezweryfikowany",
+  "model_picker_wrong_harness": "Model {family} · działa w {harness}",
   "skills_overview_description": "Dostosuj umiejętności i szablony LaTeX dostępne we wszystkich projektach. Prześlij je tutaj lub poproś agenta OpenResearch o ich utworzenie i dodanie.",
   "new_project_run_before_create": "Przed utworzeniem projektu uruchom {command}.",
   "settings_login_help": "Aby się zalogować, uruchom {command} w terminalu.",

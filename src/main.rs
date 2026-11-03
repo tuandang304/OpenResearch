@@ -117,6 +117,9 @@ enum Command {
     /// Print CLI usage for agents, or fetch a skill doc.
     Skill(SkillArgs),
 
+    /// Resolve a model alias or id to its canonical id and the harness that serves it.
+    Model(ModelArgs),
+
     /// Add reusable skills to the local OpenResearch library.
     Skills(LibraryArgs),
 
@@ -806,6 +809,19 @@ pub struct SkillArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct ModelArgs {
+    /// Model alias or id, e.g. `opus`, `gpt-5.5`, `gemini-3.1-pro-high`.
+    pub name: String,
+    /// Also check that this harness id (e.g. `claude-code`, `codex`) can run
+    /// the model; exits non-zero when it cannot.
+    #[arg(long)]
+    pub harness: Option<String>,
+    /// Emit the resolution as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
 pub struct LibraryArgs {
     #[command(subcommand)]
     pub command: LibraryCommand,
@@ -1389,6 +1405,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::SshKey(_) => "ssh-key",
         Command::Exp(_) => "exp",
         Command::Skill(_) => "skill",
+        Command::Model(_) => "model",
         Command::Skills(_) => "skills",
         Command::Templates(_) => "templates",
         Command::InstallSkills(_) => "install-skills",
@@ -1446,6 +1463,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         },
         Command::Exp(args) => commands::exp::run(args).await,
         Command::Skill(args) => commands::skill::run(args).await,
+        Command::Model(args) => commands::model::run(args).await,
         Command::Skills(args) => commands::library::skills(args),
         Command::Templates(args) => commands::library::templates(args),
         Command::InstallSkills(args) => commands::install_skills::run(args).await,
@@ -1483,6 +1501,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Discover(_)
             | Command::Paper(_)
             | Command::Version(_)
+            | Command::Model(_)
             | Command::Delete(_)
             | Command::Telemetry(_)
             | Command::Feedback(_)

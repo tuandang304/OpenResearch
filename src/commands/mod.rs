@@ -35,6 +35,7 @@ pub mod logout;
 pub mod logs;
 pub mod mcp_gate;
 pub mod metrics;
+pub mod model;
 pub mod orgs;
 pub mod paper;
 pub mod plan_gate;

@@ -5466,6 +5466,12 @@ impl ChatHost {
         let mut session = store
             .get_chat_session(session_id)?
             .ok_or_else(|| anyhow!("chat session not found"))?;
+        // Refuse a model meant for another harness before anything is queued
+        // or persisted as the session's sticky model.
+        if let Some(model) = overrides.model.as_deref().filter(|m| !m.trim().is_empty()) {
+            crate::local::harness::check_model_for_harness(&session.harness, model)
+                .map_err(|mismatch| anyhow!("{mismatch}"))?;
+        }
         if let Some(existing) = store.get_chat_turn_by_client_id(session_id, &client_turn_id)? {
             return if existing.request_hash == request_hash {
                 Ok(TurnSubmission::Existing(existing.id))
@@ -7987,7 +7993,23 @@ const FAILOVER_DETECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn run_harness_turn(ctx: &mut TurnCtx) -> crate::local::harness::TurnResult {
     match crate::local::harness::session_harness(&ctx.harness, &ctx.session_id) {
-        Some(harness) => harness.run_turn(ctx).await,
+        Some(harness) => {
+            // Last line of defence for paths that skip `send_message_showing`
+            // (recovery, queued and stored turns): never pass a model to a
+            // harness that cannot serve it.
+            if let Some(model) = ctx.model.as_deref() {
+                if let Err(mismatch) =
+                    crate::local::harness::check_model_for_harness(&ctx.harness, model)
+                {
+                    return Err(crate::local::harness::TurnFailure {
+                        kind: "model_harness_mismatch",
+                        message: mismatch.to_string(),
+                        delivery: DeliveryState::Rejected,
+                    });
+                }
+            }
+            harness.run_turn(ctx).await
+        }
         None => Err(crate::local::harness::TurnFailure {
             kind: "unknown_harness",
             message: format!("unknown harness: {}", ctx.harness),

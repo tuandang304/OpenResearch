@@ -73,3 +73,57 @@ export function groupModels<T extends { id: string; displayName?: string }>(harn
   }
   return { current, legacy };
 }
+
+// Model → harness routing. Mirrors `src/local/harness/model_route.rs`: the
+// backend refuses a mismatched model, and the picker uses the same rules so it
+// never offers one in the first place.
+
+export type ModelFamily = "Claude" | "OpenAI" | "Gemini" | "Grok" | "DeepSeek" | "Cursor";
+
+const VENDOR_PREFIX = /^(anthropic|openai|google|xai|deepseek|cursor)\//;
+const CLAUDE_ALIASES = new Set(["opus", "sonnet", "haiku", "fable", "opusplan"]);
+const DEFAULT_IDS = new Set(["", "default", "auto"]);
+
+export const MODEL_FAMILY_HOME: Record<ModelFamily, string> = {
+  Claude: "claude-code",
+  OpenAI: "codex",
+  Gemini: "antigravity",
+  Grok: "cursor",
+  Cursor: "cursor",
+  DeepSeek: "opencode",
+};
+
+/** The vendor family of `model`, or null for defaults and ids we don't recognize. */
+export function modelFamily(model: string | null | undefined): ModelFamily | null {
+  const id = (model ?? "").trim().split(/\s+/).join("-").toLowerCase().replace(VENDOR_PREFIX, "");
+  if (DEFAULT_IDS.has(id)) return null;
+  if (id.startsWith("claude") || CLAUDE_ALIASES.has(id.split("[")[0])) return "Claude";
+  if (id.startsWith("gpt") || id.startsWith("codex") || /^o\d(?:$|[-\d])/.test(id)) return "OpenAI";
+  if (id.startsWith("gemini")) return "Gemini";
+  if (id.startsWith("grok")) return "Grok";
+  if (id.startsWith("deepseek")) return "DeepSeek";
+  if (id.startsWith("composer")) return "Cursor";
+  return null;
+}
+
+/** Whether `harness` can run models of `family`. Multi-provider harnesses take all. */
+export function harnessServesFamily(harness: string, family: ModelFamily): boolean {
+  if (harness === "claude-code") return family === "Claude";
+  if (harness === "codex") return family === "OpenAI";
+  if (harness === "antigravity") return family === "Gemini" || family === "Claude" || family === "OpenAI";
+  return true;
+}
+
+/**
+ * When `model` belongs to a vendor `harness` cannot run, the family and the
+ * harness that does run it; null when the pair is fine (or the model unknown).
+ */
+export function modelHarnessMismatch(
+  harness: string | null | undefined,
+  model: string | null | undefined,
+): { family: ModelFamily; home: string } | null {
+  if (!harness) return null;
+  const family = modelFamily(model);
+  if (!family || harnessServesFamily(harness, family)) return null;
+  return { family, home: MODEL_FAMILY_HOME[family] };
+}

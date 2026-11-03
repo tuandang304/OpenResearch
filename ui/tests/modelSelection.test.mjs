@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
-import { formatCodexModel, groupModels, resolveHarnessDefaultModel } from "../src/modelSelection.ts";
+import { formatCodexModel, groupModels, modelFamily, modelHarnessMismatch, resolveHarnessDefaultModel } from "../src/modelSelection.ts";
 
 const file = ts.createSourceFile(
   "ChatPanel.tsx",
@@ -130,4 +130,30 @@ test("Claude defaults to the latest available Opus", () => {
   assert.equal(resolveHarnessDefaultModel(catalog), "opus");
   assert.equal(derive({ ...selection(null), harness: "claude-code" }, catalog).model, "opus");
   assert.equal(resolveHarnessDefaultModel({ ...catalog, agentReady: false }), null);
+});
+
+test("model ids resolve to the vendor family the backend routes on", () => {
+  assert.equal(modelFamily("opus[1m]"), "Claude");
+  assert.equal(modelFamily("Claude Haiku 4.5"), "Claude");
+  assert.equal(modelFamily("anthropic/claude-sonnet-4-6"), "Claude");
+  assert.equal(modelFamily("gpt-5.6-sol"), "OpenAI");
+  assert.equal(modelFamily("o3-mini"), "OpenAI");
+  assert.equal(modelFamily("gemini-3.1-pro-high"), "Gemini");
+  assert.equal(modelFamily("grok-4.6"), "Grok");
+  assert.equal(modelFamily("default"), null);
+  assert.equal(modelFamily("opera"), null);
+  assert.equal(modelFamily("my-local-llama"), null);
+});
+
+test("the picker flags a model its harness cannot run, and names the one that can", () => {
+  assert.deepEqual(modelHarnessMismatch("claude-code", "gpt-5.5"), { family: "OpenAI", home: "codex" });
+  assert.deepEqual(modelHarnessMismatch("codex", "opus"), { family: "Claude", home: "claude-code" });
+  assert.deepEqual(modelHarnessMismatch("antigravity", "grok-4.6"), { family: "Grok", home: "cursor" });
+  assert.equal(modelHarnessMismatch("claude-code", "claude-haiku-4-5"), null);
+  assert.equal(modelHarnessMismatch("antigravity", "claude-sonnet-4-6"), null);
+  assert.equal(modelHarnessMismatch("opencode", "openai/gpt-5.5"), null);
+  assert.equal(modelHarnessMismatch("cursor", "claude-opus-4-8[effort=high]"), null);
+  assert.equal(modelHarnessMismatch("acp:zcode", "gpt-5.5"), null);
+  assert.equal(modelHarnessMismatch("claude-code", "glm-4.6"), null);
+  assert.equal(modelHarnessMismatch(null, "gpt-5.5"), null);
 });

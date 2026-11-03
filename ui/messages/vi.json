@@ -775,6 +775,7 @@
   "model_picker_more": "Còn {count} mô hình — hãy tìm để thấy",
   "model_picker_use_id": "Dùng “{id}” làm ID mô hình",
   "model_picker_unverified": "Chưa xác minh",
+  "model_picker_wrong_harness": "Mô hình {family} · chạy trên {harness}",
   "skills_overview_description": "Tùy chỉnh các skill và template LaTeX dùng chung cho mọi dự án. Hãy tải lên ở đây, hoặc nhờ agent OpenResearch tạo và thêm cho bạn.",
   "new_project_run_before_create": "Chạy {command} trước khi tạo dự án.",
   "settings_login_help": "Chạy {command} trong terminal để đăng nhập.",
