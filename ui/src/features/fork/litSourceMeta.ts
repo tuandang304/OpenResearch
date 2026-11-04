@@ -13,7 +13,9 @@ export const FORK_LIT_SOURCE_NAME: Record<ForkLitSource, string> = {
   semanticscholar: "Semantic Scholar",
 };
 
-export const FORK_LIT_SOURCE_SVG: Record<ForkLitSource, string> = {
-  arxiv: arxivSvg,
-  semanticscholar: semanticScholarSvg,
+// Stable HTML objects for LitSourceLogo, which keeps a pressed SVG target
+// through a re-render by reusing the same object.
+export const FORK_LIT_SOURCE_HTML: Record<ForkLitSource, { __html: string }> = {
+  arxiv: { __html: arxivSvg },
+  semanticscholar: { __html: semanticScholarSvg },
 };

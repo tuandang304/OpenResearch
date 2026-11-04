@@ -9,6 +9,7 @@
 //! error's `Display` to stderr and exits 1 — matching the TS
 //! `main().catch(err => { console.error(err.message); process.exit(1) })`.
 
+mod alphaxiv;
 mod browser;
 mod editors;
 // DTOs faithfully mirror every API wire field; not all are read by the CLI yet.
@@ -66,6 +67,9 @@ enum Command {
 
     /// Remove the stored token.
     Logout,
+
+    /// Read your alphaXiv library.
+    Alphaxiv(AlphaXivArgs),
 
     /// List projects registered in the local orx store.
     Projects(ProjectsArgs),
@@ -187,6 +191,9 @@ enum Command {
     #[command(name = "mcp-gate", hide = true)]
     McpGate,
 
+    #[command(name = "alphaxiv-mcp", hide = true)]
+    AlphaxivMcp,
+
     #[command(name = "antigravity-gate", hide = true)]
     AntigravityGate,
 
@@ -212,6 +219,27 @@ pub struct LoginArgs {
     /// Override the API base URL (or set OPENRESEARCH_API_URL).
     #[arg(long = "api-url")]
     pub api_url: Option<String>,
+    /// The app's sign-in: skips the agent-skills offer.
+    #[arg(long, hide = true)]
+    pub non_interactive: bool,
+    /// Connect alphaXiv to an existing OpenResearch sign-in.
+    #[arg(long)]
+    pub alphaxiv: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AlphaXivArgs {
+    #[command(subcommand)]
+    command: AlphaXivCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum AlphaXivCommand {
+    /// List folders and papers.
+    Library {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -593,7 +621,8 @@ pub struct ExpRunArgs {
     /// account, billed per second), `k8s` (a Job on your own Kubernetes
     /// cluster), `ssh` (a detached process on one of your own boxes), `slurm`
     /// (a batch job on your Slurm cluster, submitted via its login node),
-    /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
+    /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `vercel` (a
+    /// CPU-only Vercel Sandbox microVM on your own Vercel project), `openresearch`
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
     /// `orx login`), `tinker` (a local controller using remote Tinker model
     /// compute), `colab` (a Google Colab GPU/TPU runtime through the `colab`
@@ -611,7 +640,9 @@ pub struct ExpRunArgs {
     /// `--backend slurm`: a GPU request as a GRES spec (h100:2 → --gres=gpu:h100:2;
     /// plain `gpu` → one GPU; omit for CPU-only). With `--backend ray`: optional
     /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
-    /// nothing). With `--backend openresearch`: a GPU id from `orx compute`
+    /// nothing). With `--backend vercel`: optional vCPUs (cpu = 2, cpu-<n> or
+    /// <n>: 1 or an even number up to 32; 2 GB memory each; plans cap this at
+    /// 4 on Hobby, 8 on Pro, and 32 on Enterprise). With `--backend openresearch`: a GPU id from `orx compute`
     /// (h100_sxm, or h100_sxm:2 for two) or a CPU flavor (cpu5c/cpu5g/cpu5m, or
     /// cpu5c:32 for the vCPU tier). With `--backend colab`: t4 (default), l4,
     /// a100, h100, g4, v5e1, v6e1, or cpu; append `:highmem` for a high-RAM
@@ -647,11 +678,15 @@ pub struct ExpRunArgs {
     pub manifest: Option<String>,
     /// Docker image for the job (with `--backend hf/modal`). Defaults to
     /// python:3.12 on CPU flavors, a CUDA pytorch image otherwise. With
+    /// `--backend vercel`, a Vercel Container Registry image (default
+    /// vercel/sandbox/python:3.14). With
     /// `--backend k8s`, set the image in the manifest instead.
     #[arg(long)]
     pub image: Option<String>,
-    /// Job timeout (with `--backend hf/modal/colab/kaggle/k8s/slurm/openresearch`): 90s,
-    /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes). With
+    /// Job timeout (with `--backend hf/modal/colab/kaggle/vercel/k8s/slurm/openresearch`): 90s,
+    /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes; Vercel
+    /// defaults to 40m on Hobby so a 45-minute session still includes 5 minutes
+    /// to read logs and the exit status, and caps a session at 24h otherwise). With
     /// `--backend k8s` it becomes activeDeadlineSeconds unless the manifest
     /// sets its own. With `--backend slurm` it becomes `#SBATCH --time=` and
     /// has no 4h default — unset falls back to the slurm settings, then the
@@ -1192,6 +1227,13 @@ async fn main() {
         }
         return;
     }
+    if matches!(command, Command::AlphaxivMcp) {
+        if let Err(error) = commands::alphaxiv_mcp::run().await {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if matches!(command, Command::McpGate) {
         if let Err(err) = commands::mcp_gate::run().await {
             // stderr only; a failed bridge degrades plan mode, never the CLI.
@@ -1251,7 +1293,13 @@ async fn main() {
         // Match the TS: print only the message, exit 1.
         eprintln!("{}", err);
         show_error_dialog(&err.to_string());
-        std::process::exit(1);
+        // sysexits' EX_TEMPFAIL: the app's sign-in dialog says to try again in a moment.
+        let code = if err.is::<client::AlphaXivUnavailable>() {
+            75
+        } else {
+            1
+        };
+        std::process::exit(code);
     }
 }
 
@@ -1392,6 +1440,7 @@ fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Login(_) => "login",
         Command::Logout => "logout",
+        Command::Alphaxiv(_) => "alphaxiv",
         Command::Projects(_) => "projects",
         Command::Orgs(_) => "orgs",
         Command::Project(_) => "project",
@@ -1427,6 +1476,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::PlanGate => "plan-gate",
         Command::InvocationGate => "invocation-gate",
         Command::McpGate => "mcp-gate",
+        Command::AlphaxivMcp => "alphaxiv-mcp",
         Command::AntigravityGate => "antigravity-gate",
         Command::PublishBranch(_) => "publish-branch",
         Command::RemoteHost(_) => "remote-host",
@@ -1447,6 +1497,9 @@ async fn dispatch(command: Command) -> error::Result<()> {
     match command {
         Command::Login(args) => commands::login::run(args).await,
         Command::Logout => commands::logout::run().await,
+        Command::Alphaxiv(args) => match args.command {
+            AlphaXivCommand::Library { json } => alphaxiv::print_library(json).await,
+        },
         Command::Projects(args) => commands::projects::run(args).await,
         Command::Orgs(args) => commands::orgs::run(args).await,
         Command::Project(args) => commands::project::run(args).await,
@@ -1490,6 +1543,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::InvocationGate => commands::invocation_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
         Command::AntigravityGate => commands::mcp_gate::run_antigravity().await,
+        Command::AlphaxivMcp => unreachable!("handled before dispatch"),
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
         Command::RemoteHost(_) => unreachable!("handled before dispatch"),
     }
@@ -1500,6 +1554,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
         command,
         Command::Login(_)
             | Command::Logout
+            | Command::Alphaxiv(_)
             | Command::InstallSkills(_)
             | Command::Discover(_)
             | Command::Paper(_)
@@ -1510,6 +1565,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Feedback(_)
             | Command::PlanGate
             | Command::InvocationGate
+            | Command::AlphaxivMcp
             | Command::McpGate
             | Command::AntigravityGate
             | Command::PublishBranch(_)

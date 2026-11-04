@@ -567,6 +567,27 @@ backend_adapter!(
 );
 
 backend_adapter!(
+    VercelCompute,
+    "vercel",
+    "Vercel Sandbox",
+    true,
+    true,
+    false,
+    "sandbox filesystem",
+    false,
+    preflight | args | {
+        if let Err(error) = crate::jobs::vercel::resolve_flavor(args.flavor.as_deref()) {
+            return Ok(not_ready(error.to_string()));
+        }
+        crate::jobs::vercel::preflight().await?;
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::vercel::submit_local_vercel_with_source(args, source, run_id).await
+);
+
+backend_adapter!(
     KubernetesCompute,
     "k8s",
     "Kubernetes",
@@ -772,6 +793,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "ssh" => Ok(Box::new(SshCompute::default())),
         "slurm" => Ok(Box::new(SlurmCompute)),
         "ray" => Ok(Box::new(RayCompute)),
+        "vercel" => Ok(Box::new(VercelCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
         "gcp" => Ok(Box::new(GcpCompute)),
         "kaggle" => Ok(Box::new(KaggleCompute)),
@@ -861,6 +883,7 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
                 "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                  slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
+                 vercel (Vercel Sandbox microVMs), \
                  openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
                  colab (a Google Colab GPU runtime), gcp (a Google Cloud GPU VM), kaggle (a Kaggle kernel), local (this machine).",
                 backend

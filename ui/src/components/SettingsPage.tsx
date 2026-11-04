@@ -1,9 +1,13 @@
+import { openSignIn } from "./AccountChip";
+import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
 import { cn } from "./ui/cn";
 import { showConfirmDialog, showCustomDialog, type DialogContentProps } from "../dialog";
 import { DialogContent, DialogTitle } from "./ui";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
+import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
+import { OpenResearchSshKey } from "./OpenResearchSshKey";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { SETTINGS_SECTIONS, harnessSetupPath } from "./settingsNav";
 export { SETTINGS_NAV, harnessSetupPath } from "./settingsNav";
@@ -24,6 +28,7 @@ import {
   refreshHarnesses,
   getK8sSettingsQuery,
   getModalSettingsQuery,
+  getVercelSettingsQuery,
   getSshMasterStatusQuery,
   getSshSettingsQuery,
   getSlurmSettingsQuery,
@@ -31,6 +36,9 @@ import {
   getKaggleLiveKernelsQuery,
   getComputePricesQuery,
   getOpenResearchSettingsQuery,
+  useOpenResearchAccount,
+  useAlphaXivFolders,
+  useSignOutOpenResearch,
   getLocalMachineQuery,
   getComputeSettingsQuery,
   getTinkerSettingsQuery,
@@ -84,6 +92,8 @@ import {
   saveTinkerKey,
   saveModalToken,
   saveModalCredit,
+  saveVercelSetup,
+  getVercelScopes,
   saveK8sSettings,
   saveRaySettings,
   saveSlurmSettings,
@@ -113,6 +123,7 @@ import {
   type LocalMachine,
   type KaggleLiveKernel,
   type ModalSettings,
+  type VercelPlan,
   type RayPreflight,
   type TrackioPreflight,
   type RaySettings,
@@ -128,6 +139,7 @@ import {
   setReleaseChannel,
   type InstallChannel,
   type InstalledCli,
+  AlphaXivNotConnectedError,
 } from "../api";
 import { onDataDirMove } from "../events";
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
@@ -145,12 +157,13 @@ import { claudeProviderLabel } from "./claudeProvider";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
+import { useDebouncedValue } from "./NewProjectForm";
 import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { HarnessLogo } from "./HarnessLogo";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
-import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
+import { SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
 import { showSshConfigDialog } from "./SshConfigDialog";
 import {
@@ -925,6 +938,175 @@ function ModalSection() {
   );
 }
 
+// --- compute (vercel) ------------------------------------------------------------
+
+/** Offered when the team has no project by this name; orx creates it on save. */
+const VERCEL_NEW_PROJECT = "openresearch";
+
+const VERCEL_PLAN_LIMITS: Record<VercelPlan, () => string> = {
+  hobby: m.settings_vercel_plan_hobby,
+  pro: m.settings_vercel_plan_pro,
+  enterprise: m.settings_vercel_plan_enterprise,
+};
+
+function VercelSection() {
+  const saveMutation = useMutation({ mutationFn: saveVercelSetup });
+  const sOptions = getVercelSettingsQuery();
+  const sQuery = useQuery(sOptions);
+  const s = sQuery.data ?? null;
+  const [token, setToken] = useState("");
+  const [pickedTeam, setPickedTeam] = useState<string | null>(null);
+  const [pickedProject, setPickedProject] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const typedToken = useDebouncedValue(token.trim(), 400);
+
+  const savedScopes = s?.scopes ?? null;
+  const lookup = typedToken || (pickedTeam && pickedTeam !== savedScopes?.teamId)
+    ? { token: typedToken || null, teamId: pickedTeam }
+    : null;
+  const lookupQuery = useQuery({
+    queryKey: ["vercelScopes", lookup?.token, lookup?.teamId],
+    queryFn: () => getVercelScopes(lookup!.token, lookup!.teamId),
+    enabled: lookup !== null,
+    retry: false,
+    gcTime: 0,
+  });
+  const scopes = lookup ? lookupQuery.data ?? null : savedScopes;
+  const lookupError = lookup ? lookupQuery.error?.message ?? null : s?.error ?? null;
+  const finding = lookup !== null && lookupQuery.isFetching;
+
+  const teamId = pickedTeam ?? scopes?.teamId ?? null;
+  const team = scopes?.teams.find((item) => item.id === teamId) ?? null;
+  const projects = scopes?.teamId === teamId ? scopes.projects : [];
+  const hasDefaultProject = projects.some((project) => project.name === VERCEL_NEW_PROJECT);
+  const savedProject = teamId === savedScopes?.teamId && projects.some((project) => project.id === s?.projectId)
+    ? s?.projectId ?? null
+    : null;
+  const projectId = pickedProject
+    ?? savedProject
+    ?? projects.find((project) => project.name === VERCEL_NEW_PROJECT)?.id
+    ?? "new";
+  const projectChoices = [
+    ...(hasDefaultProject ? [] : [{ id: "new", label: m.settings_vercel_new_project({ name: VERCEL_NEW_PROJECT }) }]),
+    ...projects.map((project) => ({ id: project.id, label: project.name })),
+  ];
+
+  const locked = !!s?.processEnv;
+  const changed = !!typedToken || teamId !== savedScopes?.teamId || projectId !== s?.projectId;
+  const canSave = !locked && !saving && !finding && changed && !!scopes && !!teamId && (!!typedToken || !!s?.maskedToken);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!canSave || !teamId) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const next = await saveMutation.mutateAsync({
+        token: typedToken || null,
+        teamId,
+        projectId: projectId === "new" ? null : projectId,
+        newProject: projectId === "new" ? VERCEL_NEW_PROJECT : null,
+      });
+      setScopedQueryData(sOptions.queryKey, next);
+      setToken("");
+      setPickedTeam(null);
+      setPickedProject(null);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!s) {
+    return sQuery.error
+      ? <div className="error">{sQuery.error.message}</div>
+      : <LoadingRow><Spinner /> {m.settings_page_checking_vercel()}</LoadingRow>;
+  }
+
+  return (
+    <>
+      <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+        <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+        <dd className="m-0">
+          {!s.configured ? (
+            <Badge variant="warning">{m.settings_page_not_configured()}</Badge>
+          ) : s.error ? (
+            <Badge variant="error">{m.settings_vercel_cant_connect()}</Badge>
+          ) : (
+            <Badge variant="success">{m.settings_page_ready()}</Badge>
+          )}
+        </dd>
+      </dl>
+      {locked && <p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_vercel_env_override()}</p>}
+      {!locked && s.oidc && <p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_vercel_replaces_oidc()}</p>}
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {s.maskedToken ? m.settings_replace_token() : m.settings_vercel_access_token()}
+          <Input
+            type="password"
+            value={token}
+            onChange={(event) => {
+              setToken(event.target.value);
+              setPickedTeam(null);
+              setPickedProject(null);
+            }}
+            placeholder={s.maskedToken ?? undefined}
+            autoComplete="new-password"
+            disabled={locked}
+          />
+        </label>
+        <a className="self-start text-sm text-subtext underline" href="https://vercel.com/account/settings/tokens" target="_blank" rel="noreferrer">
+          {m.settings_vercel_create_token()}
+        </a>
+        {finding && !scopes ? (
+          <LoadingRow><Spinner /> {m.settings_vercel_finding_teams()}</LoadingRow>
+        ) : lookupError ? (
+          <p className="m-0 text-sm text-accent-red break-words">{lookupError}</p>
+        ) : scopes && (
+          <>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_vercel_team()}
+              <OptionPicker
+                choices={scopes.teams.map((item) => ({ id: item.id, label: item.name }))}
+                value={teamId}
+                variant="field"
+                floating
+                dropDown
+                disabled={locked || saving}
+                onSelect={(id) => {
+                  setPickedTeam(id);
+                  setPickedProject(null);
+                }}
+              />
+              {team?.plan && <span className="font-normal">{VERCEL_PLAN_LIMITS[team.plan]()}</span>}
+            </label>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_vercel_project()}
+              <OptionPicker
+                choices={projectChoices}
+                value={projectId}
+                variant="field"
+                floating
+                dropDown
+                disabled={locked || saving || finding}
+                onSelect={setPickedProject}
+              />
+            </label>
+          </>
+        )}
+        {saveError && <p className="m-0 text-sm text-accent-red break-words">{saveError}</p>}
+        <div className="flex justify-end gap-2">
+          <Button variant="primary" type="submit" disabled={!canSave}>
+            {saving ? m.common_saving() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+    </>
+  );
+}
+
 // --- compute (ssh) ---------------------------------------------------------------
 
 const CONNECTION_BADGE_IDLE_CLASS = "rounded-sm border-border-strong bg-surface text-subtext";
@@ -1597,13 +1779,21 @@ function localMachineSummary(hw: LocalMachine) {
 
 function OpenResearchSection({ remote }: { remote: boolean }) {
   const settingsQuery = useQuery(getOpenResearchSettingsQuery());
+  const accountQuery = useOpenResearchAccount();
+  // A remote workspace's settings come from the remote host but its account from this machine; don't pair them.
+  const account = remote ? undefined : accountQuery.data;
+  const accountFailed = !remote && accountQuery.isError;
+  const folders = useAlphaXivFolders();
+  const alphaXivStatus = folders.isSuccess ? m.library_connected() : folders.error instanceof AlphaXivNotConnectedError ? m.library_not_connected() : null;
+  const [editProfileBefore, editProfileAfter] = m.settings_openresearch_edit_profile({ settings: "\0" }).split("\0");
+  const accountError = remote ? null : accountErrorMessage(accountQuery.error);
   const s = settingsQuery.data;
+  const signedOut = account && !account.loggedIn;
+  const expired = signedOut && s?.loggedIn;
   const loadError = settingsQuery.error?.message;
   const busy = settingsQuery.isFetching;
-  const [loginAttempt, setLoginAttempt] = useState(0);
-  const [terminalLogin, setTerminalLogin] = useState(true);
-  const [signingIn, setSigningIn] = useState(false);
-  const refresh = () => settingsQuery.refetch();
+  const refresh = () => { void accountQuery.refetch(); return settingsQuery.refetch(); };
+  const logout = useSignOutOpenResearch();
 
   return (
     <>
@@ -1614,9 +1804,11 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">{m.settings_page_status()}</span>
             <span className="v">
-              {(!s && busy) || signingIn ? (
-                <Badge className="gap-1.5" role="status"><Spinner />{signingIn ? m.settings_openresearch_setting_up() : m.common_checking()}</Badge>
-              ) : loadError ? (
+              {!s && busy ? (
+                <Badge className="gap-1.5" role="status"><Spinner />{m.common_checking()}</Badge>
+              ) : signedOut ? (
+                <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
+              ) : loadError || s?.error || accountFailed ? (
                 <Badge variant="warning">{m.settings_page_unable_to_verify()}</Badge>
               ) : !s ? null : !s.loggedIn ? (
                 <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
@@ -1628,11 +1820,27 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
                 <Badge variant="warning">{m.settings_page_not_configured()}</Badge>
               )}
             </span>
-            <span className="k">{m.settings_page_orgs()}</span>
-            <span className="v">{s?.loggedIn && s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
+            {s?.loggedIn && !signedOut && <>
+              {!remote && !accountFailed && <>
+              <span className="k self-start">{account?.user?.alphaxivUrl ? m.settings_openresearch_alphaxiv_account() : m.settings_page_account()}</span>
+              <span className="v">
+                {accountQuery.isLoading ? m.common_checking() : <><OpenResearchAccount user={account?.user ?? null} />{alphaXivStatus && <span className="basis-full text-sm text-subtext">{alphaXivStatus}</span>}{account?.user?.alphaxivUrl && <span className="basis-full text-sm text-subtext">{editProfileBefore}<a className="text-text underline" href={new URL("/settings", account.user.alphaxivUrl).href} target="_blank" rel="noreferrer">{m.settings_openresearch_alphaxiv_settings()}</a>{editProfileAfter}</span>}</>}
+              </span>
+              </>}
+              <span className="k self-start">{m.settings_openresearch_organizations()}</span>
+              <div className="v">
+                {s.organizations == null ? "—" : s.organizations.length === 0 ? m.settings_openresearch_no_orgs() : <ul className="m-0 list-none p-0 space-y-2">
+                  {s.organizations.map((org) => <li key={org.id} className="min-w-0">
+                    <div dir="auto">{org.name}{account?.user?.id === org.createdBy && <span className="text-sm text-subtext"> · {m.settings_openresearch_owner()}</span>}</div>
+                    {s.organizations && s.organizations.length > 1 && <code className="text-sm text-subtext break-all">{org.id}</code>}
+                  </li>)}
+                </ul>}
+                {s.organizations && s.organizations.length > 0 && <p className="basis-full m-0 text-sm text-subtext">{s.organizations.length === 1 ? m.settings_openresearch_one_org() : m.settings_openresearch_choose_org()}</p>}
+              </div>
+            </>}
             <span className="k">{m.settings_page_ssh_key()}</span>
             <span className="v">
-              {!s?.loggedIn ? "—" : s.sshKeyStatus === "matched" ? (
+              {!s?.loggedIn || signedOut ? "—" : s.sshKeyStatus === "matched" ? (
                 <Badge variant="success">{m.settings_page_on_this_computer()}</Badge>
               ) : s.sshKeyStatus === "no_local_match" ? (
                 <Badge variant="warning">{m.settings_page_not_on_this_computer()}</Badge>
@@ -1648,21 +1856,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
               {m.settings_login_help({ command: ltr("orx login") })}
             </p>
           )}
-          {!remote && loginAttempt > 0 && (
-            <OpenResearchSetupTerminal
-              key={loginAttempt}
-              login={terminalLogin}
-              onComplete={() => {
-                setSigningIn(false);
-                setLoginAttempt(0);
-                void refresh();
-              }}
-              onError={(error) => {
-                setSigningIn(false);
-                showAlert(error, "error");
-              }}
-            />
-          )}
+          {!remote && !signedOut && s?.sshKeyToAdd && <OpenResearchSshKey sshKey={s.sshKeyToAdd} />}
           {remote && s?.loggedIn && s.sshKeyStatus === "none_registered" &&
             (s.sshKeyPath ? (
               <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
@@ -1687,20 +1881,18 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
                 <code>ssh-keygen -t ed25519</code>.
               </p>
             ))}
-          {!busy && (loadError || s?.error) && <p dir="auto" className="mt-4 mb-0 text-sm text-accent-red whitespace-pre-wrap break-words">{loadError || s?.error}</p>}
+          {!busy && (expired || accountError || loadError || s?.error) && <p role="status" dir="auto" className="mt-4 mb-0 text-sm text-accent-red whitespace-pre-wrap break-words">{expired ? m.account_sign_in_expired() : accountError || loadError || s?.error}</p>}
         </>
       )}
-      <div className="mt-4 flex justify-end gap-2">
-        <Button onClick={() => void refresh()} disabled={busy || signingIn}>
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        {(account?.apiUrl || s?.apiUrl) && <ButtonLink href={`${(account?.apiUrl || s?.apiUrl || "").replace(/\/$/, "")}/auth/login`} target="_blank" rel="noreferrer">{m.settings_openresearch_dashboard()} <ExternalLink size={14} /></ButtonLink>}
+        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || logout.isPending} onClick={() => confirmOpenResearchSignOut(logout.mutateAsync)}>{m.settings_openresearch_sign_out()}</Button>}
+        <Button onClick={() => void refresh()} disabled={busy}>
           <RefreshCw size={14} /> {busy ? m.common_checking() : m.settings_check_again()}
         </Button>
-        {!remote && s && (!s.loggedIn || s.sshKeyStatus !== "matched") && (
-          <Button variant="primary" disabled={busy || signingIn} onClick={() => {
-            setTerminalLogin(!s.loggedIn);
-            setSigningIn(true);
-            setLoginAttempt((attempt) => attempt + 1);
-          }}>
-            {signingIn ? <Spinner /> : <SquareTerminal size={14} />} {s.loggedIn ? m.settings_setup_ssh_key() : m.settings_sign_in()}
+        {!remote && s && signedOut && (
+          <Button variant="primary" disabled={busy} onClick={(event) => openSignIn(false, event.currentTarget)}>
+            {m.account_sign_in_alphaxiv()}
           </Button>
         )}
       </div>
@@ -1720,6 +1912,7 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   k8s: m.compute_description_k8s,
   slurm: m.compute_description_slurm,
   ray: m.compute_description_ray,
+  vercel: m.compute_description_vercel,
   openresearch: m.compute_description_openresearch,
   gcp: m.compute_description_gcp,
   kaggle: m.compute_description_kaggle,
@@ -1736,13 +1929,14 @@ export const TARGET_KIND: Record<ComputeTargetId, string> = {
   ssh: "ssh_job",
   slurm: "slurm_job",
   ray: "ray_job",
+  vercel: "vercel_job",
   openresearch: "openresearch_job",
   gcp: "gcp_job",
   kaggle: "kaggle_job",
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "colab", "slurm", "ray", "openresearch", "gcp", "kaggle"];
+const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "colab", "slurm", "ray", "vercel", "openresearch", "gcp", "kaggle"];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
@@ -1752,12 +1946,13 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   colab: ["t4", "l4", "a100", "h100", "g4", "a100:highmem", "cpu", "v5e1", "v6e1"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
+  vercel: ["cpu", "cpu-1", "cpu-4", "cpu-8", "cpu-16", "cpu-32"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
   gcp: ["t4", "l4", "v100", "a100", "a100-80gb", "h100", "a100:2", "cpu"],
   kaggle: ["t4", "t4@auto", "p100", "p100@auto", "tpu", "tpu@auto", "cpu"],
 };
 
-const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "colab", "kaggle", "gcp", "hf", "modal", "ray", "k8s"];
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "colab", "kaggle", "gcp", "hf", "modal", "ray", "k8s", "vercel"];
 
 const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
   tinker: m.compute_usage_tinker,
@@ -1979,7 +2174,7 @@ function TargetTile({
   const summaryId = `compute-${target.id}-summary`;
   const setupLabel = target.unverified
     ? m.settings_check_setup()
-    : target.id === "openresearch"
+    : target.id === "openresearch" && !target.signedIn
       ? m.settings_sign_in()
       : target.id === "ray"
         ? m.settings_connect()
@@ -2120,6 +2315,7 @@ function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onE
       {targetId === "modal" && <ModalSection />}
       {targetId === "ray" && <RaySection />}
       {targetId === "k8s" && <K8sSection onEditState={updateEditState} />}
+      {targetId === "vercel" && <VercelSection />}
     </DialogContent>;
 }
 
@@ -2834,6 +3030,7 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "ja", label: "日本語" },
   { id: "pl", label: "Polski" },
   { id: "vi", label: "Tiếng Việt" },
+  { id: "ru", label: "Русский" },
 ];
 
 function AppearanceTab() {
@@ -4190,6 +4387,13 @@ export function SettingsView({
           onOpenEnvironment={() => onSelectTab("environment")}
           remote={remote}
         />
+      )}
+      {tab === "openresearch" && (
+        <>
+          <button type="button" className="settings-back mb-6 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text" onClick={() => onSelectTab("compute")}><ArrowLeft size={16} /> {m.settings_page_back_to_compute()}</button>
+          <h1>OpenResearch</h1>
+          <div className="mt-6 font-sans text-base text-text"><OpenResearchSection remote={remote} /></div>
+        </>
       )}
       {tab === "instances" && (
         <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />

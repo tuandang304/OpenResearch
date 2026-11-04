@@ -59,6 +59,7 @@ pub mod strategy;
 pub mod trackio;
 pub mod turn_context;
 pub mod user_skills;
+pub mod vercel;
 
 use crate::error::{anyhow, Result};
 use crate::store::{now_ms, Store, StoredRun};
@@ -108,14 +109,15 @@ pub const BACKENDS: &[&str] = &[
     "ssh",
     "slurm",
     "ray",
+    "vercel",
     "openresearch",
     "gcp",
     "kaggle",
 ];
 
 /// Backends whose launches take a `--flavor` (hf/modal/openresearch require
-/// one; colab's and kaggle's default to a T4; slurm's is an optional GRES spec; ray's is
-/// optional resource hints).
+/// one; colab's and kaggle's default to a T4; vercel's is an optional vCPU count;
+/// slurm's is an optional GRES spec; ray's is optional resource hints).
 /// k8s (manifest), ssh (host), and local (this machine's hardware) have no
 /// flavor axis.
 pub const FLAVORED_BACKENDS: &[&str] = &[
@@ -124,6 +126,7 @@ pub const FLAVORED_BACKENDS: &[&str] = &[
     "colab",
     "slurm",
     "ray",
+    "vercel",
     "openresearch",
     "gcp",
     "kaggle",

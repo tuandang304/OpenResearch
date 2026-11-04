@@ -21,7 +21,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     id: "compute",
     label: m.settings_page_compute,
     icon: <Cpu size={16} />,
-    activeTabs: ["compute", "instances"],
+    activeTabs: ["compute", "openresearch", "instances"],
   },
   { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={16} />, activeTabs: ["environment"] },
   {
