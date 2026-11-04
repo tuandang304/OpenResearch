@@ -1113,6 +1113,34 @@ export const saveModalToken = (tokenId: string, tokenSecret: string) =>
 export const saveModalCredit = (update: { creditUsd?: number; clearCredit?: boolean }) =>
   post<ModalSettings>("/api/settings/modal", update);
 
+// --- settings: vercel ---------------------------------------------------------
+
+export type VercelPlan = "hobby" | "pro" | "enterprise";
+
+export interface VercelScopes {
+  teams: { id: string; name: string; plan: VercelPlan | null }[];
+  teamId: string;
+  projects: { id: string; name: string }[];
+}
+
+export interface VercelSettings {
+  configured: boolean;
+  /** Credentials in orx's own process environment override anything saved here. */
+  processEnv: boolean;
+  oidc: boolean;
+  maskedToken: string | null;
+  projectId: string | null;
+  scopes: VercelScopes | null;
+  error: string | null;
+}
+
+export const getVercelSettings = (signal?: AbortSignal) => get<VercelSettings>("/api/settings/vercel", signal);
+/** Lists what a token can reach; `token` omitted uses the saved one. */
+export const getVercelScopes = (token: string | null, teamId: string | null) =>
+  post<VercelScopes>("/api/settings/vercel/scopes", { token, teamId });
+export const saveVercelSetup = (setup: { token: string | null; teamId: string; projectId: string | null; newProject: string | null }) =>
+  post<VercelSettings>("/api/settings/vercel", setup);
+
 // --- settings: env vars / git / harnesses ------------------------------------
 
 export interface EnvVar {
@@ -1235,9 +1263,12 @@ export interface RemoteSessionInfo {
   canStartNewHost: boolean;
 }
 
+/** `production` only for an official release built by the project's CI. */
+export type BuildChannel = "production" | "development";
+
 export type RuntimeInfo =
-  | { kind: "local"; version: string }
-  | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
+  | { kind: "local"; version: string; buildChannel: BuildChannel }
+  | { kind: "ssh"; version: string; buildChannel: BuildChannel; dashboardProtocol: number; session: RemoteSessionInfo };
 
 export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
 
@@ -1411,6 +1442,7 @@ export type ComputeTargetId =
   | "ssh"
   | "slurm"
   | "ray"
+  | "vercel"
   | "openresearch"
   | "gcp"
   | "kaggle";
@@ -1427,6 +1459,8 @@ export interface ComputeTargetSummary {
    * state is decidable locally.
    */
   unverified?: boolean;
+  /** OpenResearch only: the machine serving this workspace is signed in. */
+  signedIn?: boolean;
   summary: string;
   enabled: boolean;
   disabledReason?: string | null;
@@ -1484,11 +1518,44 @@ export const getLocalMachine = (signal?: AbortSignal) => get<LocalMachine>("/api
 
 // Fork-owned compute settings (Colab, GCP, Kaggle).
 export * from "./features/fork/computeApi";
+export interface OpenResearchAccount {
+  loggedIn: boolean;
+  apiUrl: string | null;
+  user: { id: string; email: string; firstName: string | null; lastName: string | null; alphaxivUrl: string | null } | null;
+}
+
+export class OpenResearchAccountError extends Error {
+  constructor(public kind: "offline" | "server", public apiUrl: string, public status: number | null) { super(kind); }
+}
+
+export const getOpenResearchAccount = async (signal?: AbortSignal) => {
+  const result = await get<OpenResearchAccount | { failure: { kind: "offline" | "server"; apiUrl: string; status: number | null } }>("/api/account/openresearch", signal);
+  if ("failure" in result) throw new OpenResearchAccountError(result.failure.kind, result.failure.apiUrl, result.failure.status);
+  return result;
+};
+
+export class AlphaXivNotConnectedError extends Error {}
+export interface AlphaXivFolder { id: string; name: string; parentId: string | null; paperCount: number }
+export interface AlphaXivPaper { paperGroupId: string; title: string; authors: string[]; authorCount: number; url: string; versionId: string; coverBlobId: string | null }
+export interface AlphaXivPage { papers: AlphaXivPaper[]; nextCursor: string | null }
+async function alphaXivGet<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(url, { signal });
+  if (response.status === 401) throw new AlphaXivNotConnectedError();
+  return json<T>(response);
+}
+export const getAlphaXivFolders = (signal?: AbortSignal) => alphaXivGet<AlphaXivFolder[]>("/api/alphaxiv/folders", signal);
+export const getAlphaXivPapers = (folder: string | null, cursor: string | null, search?: string, signal?: AbortSignal) => {
+  const params = new URLSearchParams();
+  if (folder) params.set("folder", folder);
+  if (cursor) params.set("cursor", cursor);
+  if (search) params.set("search", search);
+  return alphaXivGet<AlphaXivPage>(`/api/alphaxiv/papers?${params}`, signal);
+};
 
 export interface OpenResearchSettings {
   loggedIn: boolean;
   apiUrl: string | null;
-  orgs: string[];
+  organizations?: { id: string; name: string; createdBy: string }[] | null;
   /**
    * Whether a registered key's private half is on THIS machine — `matched` is
    * the only state that can actually reach a box. Optional: an older `orx`
@@ -1497,11 +1564,15 @@ export interface OpenResearchSettings {
   sshKeyStatus?: "matched" | "no_local_match" | "none_registered" | "unknown";
   /** The `.pub` on this machine worth registering; null if there isn't one. */
   sshKeyPath?: string | null;
+  /** What "Add SSH key" would upload while no usable key is registered; a null fingerprint means it creates the key. */
+  sshKeyToAdd?: { path: string; fingerprint: string | null } | null;
   error: string | null;
 }
 
 export const getOpenResearchSettings = (signal?: AbortSignal) =>
   get<OpenResearchSettings>("/api/settings/openresearch", signal);
+export const logoutOpenResearch = () => post<{ ok: boolean }>("/api/settings/openresearch/logout");
+export const addOpenResearchSshKey = () => post<{ ok: boolean }>("/api/settings/openresearch/ssh-key");
 
 /** One node of the artifacts tree: a file, or a directory with children. */
 export interface ArtifactEntry {
@@ -1536,6 +1607,11 @@ export const deleteArtifact = (projectId: string, path: string) =>
 
 export const manageArtifactFile = (projectId: string, path: string, action: FileAction) =>
   patch<FileActionResult>(`/api/projects/${projectId}/files`, { path, ...action });
+
+/** Reveal an artifact file or folder in the OS file manager on the machine
+ * running `orx up`. */
+export const revealArtifactInManager = (projectId: string, path: string) =>
+  post<{ ok: boolean }>(`/api/projects/${projectId}/files/reveal`, { path });
 
 /** Raw artifact bytes served by the compatibility `/files` API. */
 export const artifactUrl = (projectId: string, path: string) =>
@@ -2135,7 +2211,7 @@ export const deleteLatexTemplate = (name: string) =>
 export interface UserSkill {
   name: string;
   /** The coding agent or plugin it comes from; absent when uploaded here, which
-   * is also the only case the user can delete. */
+   * is also the only case the user can edit or delete. */
   origin?: string | null;
   bytes: number;
   updatedAt: number;
@@ -2162,6 +2238,18 @@ export const deleteUserSkill = (name: string) =>
   writeResponse(`/api/user-skills?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r),
   );
+
+/** The full `SKILL.md`, frontmatter included, of an uploaded skill. */
+export const getUserSkillContent = (name: string) =>
+  get<{ name: string; content: string }>(
+    `/api/user-skills/${encodeURIComponent(name)}`,
+  ).then((r) => r.content);
+
+export const updateUserSkill = (name: string, content: string) =>
+  put<{ skill: UserSkill }>(
+    `/api/user-skills/${encodeURIComponent(name)}`,
+    { content },
+  ).then((r) => r.skill);
 
 /** "openai/gpt-5.5" → "GPT 5.5", "anthropic/claude-opus-4-8" → "Opus 4.8". */
 export function modelLabel(id: string): string {

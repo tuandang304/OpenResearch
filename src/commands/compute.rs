@@ -164,6 +164,7 @@ pub enum Backend {
     Tinker,
     Colab,
     K8s,
+    Vercel,
     Openresearch,
     Gcp,
     Kaggle,
@@ -180,6 +181,7 @@ impl Backend {
             Self::Tinker => "tinker",
             Self::Colab => "colab",
             Self::K8s => "k8s",
+            Self::Vercel => "vercel",
             Self::Openresearch => "openresearch",
             Self::Gcp => "gcp",
             Self::Kaggle => "kaggle",
@@ -824,7 +826,12 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
             .await?;
         }
         Backend::Openresearch => {
-            super::login::run(crate::LoginArgs { api_url: None }).await?;
+            super::login::run(crate::LoginArgs {
+                alphaxiv: false,
+                api_url: None,
+                non_interactive: false,
+            })
+            .await?;
             super::ssh_key::add(None).await?;
         }
         Backend::Colab => {
@@ -865,6 +872,13 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
             if crate::jobs::gcp::account().await.is_none() {
                 interactive_command("gcloud", &["auth".into(), "login".into()]).await?;
             }
+        }
+        Backend::Vercel => {
+            eprintln!(
+                "Vercel Sandbox reads VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID (or a \
+                 VERCEL_OIDC_TOKEN from `vercel env pull`) from the environment or Settings → \
+                 Environment. Check them with `orx compute test vercel`."
+            );
         }
         Backend::Local | Backend::Ray | Backend::K8s => {}
     }

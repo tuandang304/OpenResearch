@@ -140,8 +140,17 @@ pub fn presets() -> Vec<Preset> {
             &["agent", "stdio"][..],
             "https://github.com/xai-org/grok-build",
         ),
+        (
+            "c33b22bc-6d2e-44c6-a5d6-117dd6722f7f",
+            "fx",
+            "fx",
+            &["acp"][..],
+            "https://fx.sh/docs/using-fx/acp",
+        ),
     ]
     .into_iter()
+    // fx ships for macOS and Linux only, so Windows has no installer to offer.
+    .filter(|(_, _, executable, _, _)| !(cfg!(windows) && *executable == "fx"))
     .map(|(id, name, executable, arguments, setup_url)| Preset {
         needs_connection_adapter: matches!(executable, "pi-acp" | "zcode-acp-server"),
         launch: Definition {
@@ -337,6 +346,15 @@ pub async fn discover_models(definition: &Definition) -> Result<serde_json::Valu
     response.map_err(|_| crate::error::anyhow!("Loading the agent's models timed out"))?
 }
 
+pub(crate) fn alphaxiv_mcp_servers(
+) -> crate::error::Result<Vec<agent_client_protocol::schema::v1::McpServer>> {
+    use agent_client_protocol::schema::v1::{McpServer, McpServerStdio};
+    Ok(vec![McpServer::Stdio(
+        McpServerStdio::new("alphaxiv", crate::paths::spawnable_exe()?)
+            .args(vec!["alphaxiv-mcp".to_owned()]),
+    )])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,19 +418,20 @@ for line in sys.stdin:
                 )
             })
             .collect();
-        assert_eq!(
-            commands,
-            [
-                ("DeepSeek Harness", "dsh", vec!["--profile", "acp"]),
-                ("Kimi Code", "kimi", vec!["acp"]),
-                ("MiniMax Code", "mcode", vec!["acp"]),
-                ("ZCode", "zcode-acp-server", vec![]),
-                ("Pi", "pi-acp", vec![]),
-                ("oh-my-pi", "omp", vec!["acp"]),
-                ("Devin CLI", "devin", vec!["acp"]),
-                ("Grok Build", "grok", vec!["agent", "stdio"]),
-            ]
-        );
+        let mut expected = vec![
+            ("DeepSeek Harness", "dsh", vec!["--profile", "acp"]),
+            ("Kimi Code", "kimi", vec!["acp"]),
+            ("MiniMax Code", "mcode", vec!["acp"]),
+            ("ZCode", "zcode-acp-server", vec![]),
+            ("Pi", "pi-acp", vec![]),
+            ("oh-my-pi", "omp", vec!["acp"]),
+            ("Devin CLI", "devin", vec!["acp"]),
+            ("Grok Build", "grok", vec!["agent", "stdio"]),
+        ];
+        if !cfg!(windows) {
+            expected.push(("fx", "fx", vec!["acp"]));
+        }
+        assert_eq!(commands, expected);
         let file = std::env::current_exe().unwrap();
         assert_eq!(executable_path(file.to_str().unwrap()), Some(file));
         assert!(executable_path("missing-popular-agent-28e8c11").is_none());

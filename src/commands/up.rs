@@ -638,6 +638,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .delete(delete_artifact),
         )
         .route("/api/projects/{id}/files/file", get(serve_artifact))
+        .route(
+            "/api/projects/{id}/files/reveal",
+            post(reveal_artifact_file),
+        )
         .route("/api/projects/{id}/terminal", get(project_terminal))
         .route("/api/events", get(events))
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
@@ -653,6 +657,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/modal",
             get(modal_settings).post(set_modal_settings),
         )
+        .route(
+            "/api/settings/vercel",
+            get(vercel_settings).post(set_vercel),
+        )
+        .route("/api/settings/vercel/scopes", post(vercel_scopes_route))
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
             "/api/settings/env/{key}",
@@ -732,11 +741,19 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/local", get(local_machine_settings))
         .merge(fork_settings::routes())
         .route("/api/settings/openresearch", get(openresearch_settings))
+        .route("/api/account/openresearch", get(openresearch_account))
+        .route(
+            "/api/settings/openresearch/logout",
+            post(openresearch_logout),
+        )
         .route("/api/settings/openresearch/login", get(openresearch_login))
+        .route("/api/settings/alphaxiv/login", get(alphaxiv_login))
+        .route("/api/alphaxiv/folders", get(alphaxiv_folders))
+        .route("/api/alphaxiv/papers", get(alphaxiv_papers))
         .route("/api/settings/commands/run", get(run_settings_command))
         .route(
             "/api/settings/openresearch/ssh-key",
-            get(openresearch_ssh_key),
+            post(add_openresearch_ssh_key),
         )
         .route(
             "/api/settings/lit-sources",
@@ -776,6 +793,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(list_user_skills)
                 .post(upload_user_skill)
                 .delete(delete_user_skill),
+        )
+        .route(
+            "/api/user-skills/{name}",
+            get(get_user_skill).put(update_user_skill),
         )
         .route(
             "/api/latex-templates",
@@ -912,12 +933,18 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/data-dir/move"
             | "/api/settings/openresearch/ssh-key"
             | "/api/settings/openresearch/login"
+            | "/api/settings/openresearch/logout"
+            | "/api/settings/alphaxiv/login"
+            | "/api/alphaxiv/folders"
+            | "/api/alphaxiv/papers"
             | "/api/settings/commands/run"
             | "/api/harnesses/setup"
             | "/api/harnesses/accounts/login"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/")
-            && (path.ends_with("/file/open") || path.ends_with("/file/reveal")))
+            && (path.ends_with("/file/open")
+                || path.ends_with("/file/reveal")
+                || path.ends_with("/files/reveal")))
 }
 
 fn is_remote_callback_route(method: &Method, path: &str) -> bool {
@@ -941,7 +968,8 @@ fn is_remote_callback_route(method: &Method, path: &str) -> bool {
 // --- error plumbing -------------------------------------------------------
 
 /// JSON error responses: `{"error": "..."}` with an explicit status.
-struct ApiError(StatusCode, String);
+#[derive(Debug)]
+pub(crate) struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -1304,6 +1332,32 @@ async fn delete_user_skill(Query(q): Query<DeleteByNameQ>) -> ApiResult {
         .map_err(|e| ApiError::from(anyhow!(e)))?
         .map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+async fn get_user_skill(Path(name): Path<String>) -> ApiResult {
+    let lookup = name.clone();
+    let content =
+        tokio::task::spawn_blocking(move || crate::local::user_skills::read_markdown(&lookup))
+            .await
+            .map_err(|e| ApiError::from(anyhow!(e)))?
+            .map_err(bad_request)?
+            .ok_or_else(|| not_found("skill"))?;
+    Ok(Json(json!({ "name": name, "content": content })))
+}
+
+#[derive(Deserialize)]
+struct UpdateSkillReq {
+    content: String,
+}
+
+async fn update_user_skill(Path(name): Path<String>, Json(req): Json<UpdateSkillReq>) -> ApiResult {
+    let saved = tokio::task::spawn_blocking(move || {
+        crate::local::user_skills::update_markdown(&name, &req.content)
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!(e)))?
+    .map_err(bad_request)?;
+    Ok(Json(json!({ "skill": user_skill_json(&saved) })))
 }
 
 fn latex_template_json(t: &crate::local::latex_templates::LatexTemplate) -> Value {
@@ -4554,6 +4608,37 @@ struct ArtifactPathQuery {
     path: String,
 }
 
+#[derive(Deserialize)]
+struct ArtifactRevealReq {
+    path: String,
+}
+
+/// Reveal an artifact file or folder in the OS file manager. Unlike checkout
+/// reveals, this resolves inside the project's artifacts directory.
+async fn reveal_artifact_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ArtifactRevealReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let full = local::files::file_path(&project, &req.path)
+            .map_err(|e| ApiError::from(anyhow!("could not resolve artifact: {e}")))?;
+        crate::editors::reveal_in_file_manager(&full)
+            .map_err(|e| ApiError::from(anyhow!("could not reveal file: {e}")))?;
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
+}
+
 /// Delete a file or folder in the artifacts dir, by relative path.
 async fn delete_artifact(
     State(state): State<AppState>,
@@ -6794,12 +6879,53 @@ fn session_checkout_root(
     }
 }
 
-async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    openresearch_terminal(headers, ws, vec!["login".into()]).await
+pub(crate) async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    openresearch_terminal(
+        headers,
+        ws,
+        vec!["login".into(), "--non-interactive".into()],
+    )
+    .await
 }
 
-async fn openresearch_ssh_key(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    openresearch_terminal(headers, ws, vec!["ssh-key".into(), "add".into()]).await
+pub(crate) async fn alphaxiv_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    openresearch_terminal(headers, ws, vec!["login".into(), "--alphaxiv".into()]).await
+}
+
+fn alphaxiv_error(error: crate::error::Error) -> ApiError {
+    let status = if error.is::<crate::alphaxiv::NotConnected>() {
+        StatusCode::UNAUTHORIZED
+    } else if let Some(failure) = error.downcast_ref::<crate::alphaxiv::HttpFailure>() {
+        failure.status
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    ApiError(status, error.to_string())
+}
+
+pub(crate) async fn alphaxiv_folders() -> ApiResult {
+    crate::alphaxiv::folders()
+        .await
+        .map(Json)
+        .map_err(alphaxiv_error)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AlphaXivPapersQuery {
+    folder: Option<String>,
+    cursor: Option<String>,
+    search: Option<String>,
+}
+
+pub(crate) async fn alphaxiv_papers(Query(query): Query<AlphaXivPapersQuery>) -> ApiResult {
+    crate::alphaxiv::papers(
+        query.folder.as_deref(),
+        query.cursor.as_deref(),
+        query.search.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(alphaxiv_error)
 }
 
 async fn openresearch_terminal(
@@ -6827,6 +6953,7 @@ const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
     ),
     ("devin auth login", &["devin", "auth", "login"]),
     ("grok login", &["grok", "login"]),
+    ("fx login", &["fx", "login"]),
     ("pi-acp --terminal-login", &["pi-acp", "--terminal-login"]),
     ("zcode login zai", &["zcode", "login", "zai"]),
     ("zcode login bigmodel", &["zcode", "login", "bigmodel"]),
@@ -6976,19 +7103,14 @@ async fn command_terminal(
         let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
             return;
         };
-        let result = async {
-            let status = status.map_err(|error| anyhow!(error))?;
-            anyhow::ensure!(
-                status.success(),
-                "Command exited with code {}",
-                status.exit_code()
-            );
-            Ok::<_, anyhow::Error>(())
-        }
-        .await;
-        let message = match result {
-            Ok(()) => json!({ "type": "complete" }),
-            Err(error) => json!({ "type": "error", "error": error.to_string() }),
+        let message = match status {
+            Ok(status) if status.success() => json!({ "type": "complete" }),
+            Ok(status) => json!({
+                "type": "error",
+                "error": format!("Command exited with code {}", status.exit_code()),
+                "exitCode": status.exit_code(),
+            }),
+            Err(error) => json!({ "type": "error", "error": error }),
         };
         if socket
             .send(Message::Text(message.to_string().into()))
@@ -7121,7 +7243,11 @@ async fn disconnect_remote_session(
 }
 
 async fn local_runtime() -> Json<Value> {
-    Json(json!({ "kind": "local", "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({
+        "kind": "local",
+        "version": env!("CARGO_PKG_VERSION"),
+        "buildChannel": crate::telemetry::build_channel(),
+    }))
 }
 
 async fn list_local_models() -> ApiResult {
@@ -9879,11 +10005,13 @@ mod tests {
             "/api/settings/data-dir",
             "/api/settings/data-dir/move",
             "/api/settings/openresearch/login",
+            "/api/settings/openresearch/logout",
             "/api/settings/openresearch/ssh-key",
             "/api/settings/commands/run",
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
             "/api/projects/p1/file/reveal",
+            "/api/projects/p1/files/reveal",
         ] {
             assert!(remote_route_forbidden(path), "{path}");
         }
@@ -10231,7 +10359,7 @@ mod tests {
 
     #[test]
     fn compute_settings_registers_tinker_without_exposing_its_key() {
-        let settings = compute_settings_json(SshReadiness::NoUsableKey { pub_path: None });
+        let settings = compute_settings_json(SshReadiness::NoUsableKey);
         let tinker = settings["targets"]
             .as_array()
             .unwrap()
@@ -10241,6 +10369,15 @@ mod tests {
         assert!(tinker["configured"].is_boolean());
         assert!(tinker.get("key").is_none());
         assert!(tinker.get("apiKey").is_none());
+        let ids: Vec<_> = settings["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|target| target["id"].as_str().unwrap())
+            .collect();
+        let vercel = ids.iter().position(|id| *id == "vercel").unwrap();
+        assert_eq!(ids[vercel + 1], "openresearch");
+        assert!(ids.iter().position(|id| *id == "ray").unwrap() < vercel);
     }
 
     #[test]
@@ -10639,32 +10776,10 @@ mod tests {
         assert!(abs_path("~otheruser/x").is_err());
     }
 
-    fn no_key(path: Option<&str>) -> SshReadiness {
-        SshReadiness::NoUsableKey {
-            pub_path: path.map(str::to_string),
-        }
-    }
-
-    /// The row used to hardcode `~/.ssh/id_ed25519.pub`, which is wrong on any
-    /// machine whose key is named something else.
-    #[test]
-    fn names_the_key_file_we_actually_found() {
-        let s = openresearch_summary(true, &no_key(Some("~/.ssh/work_ed25519.pub")));
-        assert!(s.contains("orx ssh-key add ~/.ssh/work_ed25519.pub"));
-        assert!(!s.contains("id_ed25519"), "no guessed default");
-    }
-
-    /// Nothing on disk to register, so `ssh-key add` alone would fail.
-    #[test]
-    fn tells_you_to_generate_one_when_there_is_no_key() {
-        let s = openresearch_summary(true, &no_key(None));
-        assert!(s.contains("ssh-keygen"));
-    }
-
     #[test]
     fn signed_out_beats_every_key_state() {
         assert!(openresearch_summary(false, &SshReadiness::Ready).contains("orx login"));
-        assert!(openresearch_summary(false, &no_key(None)).contains("orx login"));
+        assert!(openresearch_summary(false, &SshReadiness::NoUsableKey).contains("orx login"));
     }
 
     #[test]
