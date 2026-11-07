@@ -266,11 +266,16 @@ impl BackendDescriptor {
     }
 
     /// The VM's SSH target once the supervisor has recorded its IP (gcp_job only).
+    /// Like [`Self::openresearch_ssh_target`], the VM is machine-provisioned, so the
+    /// target is managed (keyed by the VM name): the shared SSH service connects
+    /// directly instead of through a pinned user-authenticated master socket.
     pub fn gcp_ssh_target(&self) -> Option<ssh::SshTarget> {
         if self.kind != "gcp_job" {
             return None;
         }
-        gcp::ssh_target(self.ssh_host.as_deref()?).ok()
+        let mut target = gcp::ssh_target(self.ssh_host.as_deref()?).ok()?;
+        target.managed_generation = Some(self.job_id.clone()?);
+        Some(target)
     }
 
     /// The box's SSH endpoint as a ready-to-use target, once the supervisor
@@ -468,6 +473,23 @@ mod tests {
         let opts = target.extra_opts.join(" ");
         assert!(opts.contains("-p 22022"), "{opts}");
         assert!(opts.contains("StrictHostKeyChecking=no"), "{opts}");
+    }
+
+    /// GCP VMs are managed targets: without a generation the shared SSH service
+    /// would demand a pinned master socket and fail before opening TCP.
+    #[test]
+    fn gcp_ssh_target_is_managed_by_vm_name() {
+        let mut d = openresearch_descriptor();
+        d.kind = "gcp_job".to_string();
+        d.namespace = Some("proj".to_string());
+        d.context = Some("us-central1-a".to_string());
+        d.job_id = Some("orx-vm-1".to_string());
+        assert!(d.gcp_ssh_target().is_none());
+        d.ssh_host = Some("203.0.113.9".to_string());
+        let target = d.gcp_ssh_target().unwrap();
+        assert_eq!(target.managed_generation.as_deref(), Some("orx-vm-1"));
+        assert!(target.dest.ends_with("@203.0.113.9"), "{}", target.dest);
+        assert!(d.openresearch_ssh_target().is_none());
     }
 
     #[test]

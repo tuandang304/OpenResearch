@@ -53,6 +53,7 @@ pub(super) async fn run_gcp(
                 .ok_or_else(|| anyhow!("VM {name} started without a reachable SSH target"))?
         }
     };
+    let target = target.for_run(&run_id);
 
     let already_launched = openresearch::launched(&target, &run_id)
         .await
