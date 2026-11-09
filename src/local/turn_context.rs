@@ -182,6 +182,7 @@ mod tests {
             parent_id: parent.map(Into::into),
             base_native_session_id: None,
             result_native_session_id: (role == "assistant").then(|| native.into()),
+            native_harness: None,
         }
     }
 

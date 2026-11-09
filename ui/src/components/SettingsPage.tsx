@@ -1,7 +1,19 @@
-import { openSignIn } from "./AccountChip";
+import { useMachines } from "../machineSelection";
+import { useSignIn } from "./AccountChip";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
+import {
+  useContext,
+  useId,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { cn } from "./ui/cn";
-import { showConfirmDialog, showCustomDialog, type DialogContentProps } from "../dialog";
+import { type DialogContentProps } from "../dialog";
 import { DialogContent, DialogTitle } from "./ui";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
@@ -13,45 +25,12 @@ import { SETTINGS_SECTIONS, harnessSetupPath } from "./settingsNav";
 export { SETTINGS_NAV, harnessSetupPath } from "./settingsNav";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarnessDialog";
-import {
-  setScopedQueryData,
-  workspaceScope,
-  workspaceKey,
-  isCurrentScope,
-  queryClient,
-} from "../queries/client";
+
 import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
 
-import {
-  getHarnessesQuery,
-  getHarnessSetupCommandsQuery,
-  refreshHarnesses,
-  getK8sSettingsQuery,
-  getModalSettingsQuery,
-  getVercelSettingsQuery,
-  getSshMasterStatusQuery,
-  getSshSettingsQuery,
-  getSlurmSettingsQuery,
-  getRaySettingsQuery,
-  getKaggleLiveKernelsQuery,
-  getComputePricesQuery,
-  getOpenResearchSettingsQuery,
-  useOpenResearchAccount,
-  useAlphaXivFolders,
-  useSignOutOpenResearch,
-  getLocalMachineQuery,
-  getComputeSettingsQuery,
-  getTinkerSettingsQuery,
-  getHfSettingsQuery,
-  getEnvVarsQuery,
-  getTelemetryQuery,
-  getProjectDefaultsQuery,
-  getProjectGitStatusQuery,
-  getDataDirQuery,
-} from "../queries/settings";
+import { worstPerAlias } from "../engineHosts";
+import { runActive, runDisplay } from "../runDisplay";
 
-import { getOverleafSettingsQuery } from "../queries/files";
-import { githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRunsQuery, repoAccessQuery } from "../queries/projects";
 import {
   ArrowLeft,
   ArrowRight,
@@ -68,44 +47,16 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+
 import {
-  deleteEnvVar,
-  listAcpHarnesses,
-  listAcpPresets,
-  removeAcpHarness,
   type AcpDefinition,
-  deleteOverleafSession,
-  deleteOverleafToken,
   fmtBytes,
   fmtDuration,
   fmtNumber,
-  setComputeDefault,
-  setProjectDefaults,
-  setTelemetry,
-  saveOverleafSession,
-  saveOverleafToken,
-  disableProjectGithub,
-  enableProjectGithub,
-  initializeProjectGit,
-  saveHfToken,
-  saveTinkerKey,
-  saveModalToken,
-  saveModalCredit,
-  saveVercelSetup,
-  getVercelScopes,
-  saveK8sSettings,
-  saveRaySettings,
-  saveSlurmSettings,
-  setEnvVar,
-  validateDataDir,
-  moveDataDir,
   type DataDirSettings,
   type DataDirValidation,
-  rayPreflight,
-  trackioPreflight,
-  runDisplayStatus,
   timeAgo,
+  type EngineHost,
   type ComputeSettings,
   type ComputeTargetId,
   type ComputeTargetSummary,
@@ -132,23 +83,18 @@ import {
   type SlurmSettings,
   type SshPreflight,
   type SshExecutionPreflight,
-  testSshExecution,
-  applyUpdate,
-  installCli,
-  setAutoUpdate as setAutoUpdateApi,
-  setReleaseChannel,
   type InstallChannel,
   type InstalledCli,
   AlphaXivNotConnectedError,
 } from "../api";
-import { onDataDirMove } from "../events";
+
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
 import { ComputeDoctor } from "../features/research/ComputeDoctor";
 import { ColabSection, KaggleSection } from "../features/fork/ComputeSections";
 import { ACCOUNT_HARNESSES, HarnessAccountsCard, CrossHarnessCard, DelegationPolicyCard, AutoCompactCard, ComputeRoutingCard, fmtUsd, ProviderPricesCard, GcpSection, DecisionModelCard, HarnessFailoverCard } from "../features/fork/SettingsCards";
-import { ltr } from "../i18n";
+import { fmtClock, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
@@ -400,6 +346,14 @@ function AuthLabel({ h }: { h: Harness }) {
 }
 
 function HarnessesTab({ remote }: { remote: boolean }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog } = useWorkspace().dialogs;
+
+  const { getHarnessesQuery, getHarnessSetupCommandsQuery, refreshHarnesses } = useWorkspace().queries;
+  const { workspaceKey, queryClient } = useWorkspace();
+  const { listAcpHarnesses, listAcpPresets, removeAcpHarness } = useWorkspace().api;
+
   const harnessesOptions = getHarnessesQuery();
   const { data: harnesses = null, isError: harnessesError } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId | null>(null);
@@ -510,7 +464,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 type="button"
                 onClick={() => setActive(expanded ? null : h.id)}
                 aria-expanded={expanded}
-                aria-controls={`harness-details-${h.id}`}
+                aria-controls={elementId(`harness-details-${h.id}`)}
                 className="flex min-h-14 w-full items-center gap-3 rounded-lg px-4.5 py-2 text-start text-text hover:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-[-2px]"
               >
                 <HarnessLogo harness={h.id} logo={h.logo} size={22} />
@@ -527,7 +481,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 </Button>
               )}
             </div>
-            <div id={`harness-details-${h.id}`} hidden={!expanded} className="px-4.5 pb-4 pt-2">
+            <div id={elementId(`harness-details-${h.id}`)} hidden={!expanded} className="px-4.5 pb-4 pt-2">
               {expanded && (
                 <>
                   <div className="settings-card-head flex items-center gap-2.5 mb-3">
@@ -617,7 +571,37 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       <DecisionModelCard />
       <CrossHarnessCard harnesses={harnesses} />
       <DelegationPolicyCard harnesses={harnesses} />
+      <NestedDelegationRow />
     </>
+  );
+}
+
+function NestedDelegationRow() {
+  const { updateUiState } = useWorkspace().api;
+  const { getUiStateQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+  const uiStateOptions = getUiStateQuery();
+  const { data: uiState } = useQuery(uiStateOptions);
+  const save = useMutation({
+    mutationFn: (nestedDelegation: boolean) => updateUiState({ nestedDelegation }),
+    onSuccess: (saved) => setScopedQueryData(uiStateOptions.queryKey, saved),
+    onError: (error) => showAlert(error instanceof Error ? error.message : String(error), "error"),
+  });
+  if (!uiState) return null;
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+      <div>
+        <div className="project-default-title text-base font-medium">{m.settings_nested_subagents()}</div>
+        <p>{m.settings_nested_subagents_description()}</p>
+      </div>
+      <Switch
+        type="button"
+        checked={uiState.nestedDelegation}
+        aria-label={m.settings_nested_subagents()}
+        disabled={save.isPending}
+        onClick={() => save.mutate(!uiState.nestedDelegation)}
+      />
+    </div>
   );
 }
 
@@ -636,6 +620,10 @@ function K8sSection({
 }: {
   onEditState?: (state: { dirty: boolean; saving: boolean }) => void;
 }) {
+  const { saveK8sSettings } = useWorkspace().api;
+  const { getK8sSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveK8sSettingsMutation = useMutation({ mutationFn: saveK8sSettings });
 
   const settingsOptions = getK8sSettingsQuery();
@@ -782,6 +770,10 @@ function K8sSection({
 // --- compute (modal) ------------------------------------------------------------
 
 function ModalSection() {
+  const { saveModalToken, saveModalCredit } = useWorkspace().api;
+  const { getModalSettingsQuery, getComputePricesQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveModalTokenMutation = useMutation({ mutationFn: (args: Parameters<typeof saveModalToken>) => saveModalToken(...args) });
 
   const sOptions = getModalSettingsQuery();
@@ -950,6 +942,10 @@ const VERCEL_PLAN_LIMITS: Record<VercelPlan, () => string> = {
 };
 
 function VercelSection() {
+  const { saveVercelSetup, getVercelScopes } = useWorkspace().api;
+  const { getVercelSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const saveMutation = useMutation({ mutationFn: saveVercelSetup });
   const sOptions = getVercelSettingsQuery();
   const sQuery = useQuery(sOptions);
@@ -1114,6 +1110,9 @@ const CONNECTION_BADGE_CONNECTING_CLASS = "rounded-sm border-accent-blue bg-acce
 const SSH_MASTER_POLL_MS = 5_000;
 
 function useSshMasterStatuses(hosts: string[]) {
+  const { workspaceScope, isCurrentScope, setScopedQueryData } = useWorkspace();
+  const { getSshMasterStatusQuery } = useWorkspace().queries;
+
   const scope = workspaceScope();
   const options = hosts.map((host) => getSshMasterStatusQuery(host));
   const queries = useQueries({ queries: options.map((query) => ({ ...query, refetchInterval: SSH_MASTER_POLL_MS })) });
@@ -1123,6 +1122,31 @@ function useSshMasterStatuses(hosts: string[]) {
   };
   return [statuses, markRunning] as const;
 }
+
+/** The run engine's view of a host, when it has one worth showing over the last manual check. */
+function EngineHostCell({ host }: { host: EngineHost }) {
+  let badge = <Badge className="rounded-sm" variant="success">{m.settings_host_connected()}</Badge>;
+  let note: string | null = null;
+
+  if (host.status === "needs_auth") {
+    badge = <Badge className="rounded-sm" variant="warning">{m.status_needs_auth()}</Badge>;
+  } else if (host.status === "backoff") {
+    badge = <Badge className="rounded-sm" variant="warning">{m.status_unreachable()}</Badge>;
+    const since = fmtClock(host.sinceMs);
+    note = host.nextRetryMs === null
+      ? m.settings_host_since({ time: since })
+      : m.settings_host_since_next_try({ time: since, next: fmtClock(host.nextRetryMs) });
+  }
+
+  return (
+    <div className="flex flex-col items-start gap-1" role="status">
+      {badge}
+      {note && <span className="text-xs text-subtext">{note}</span>}
+    </div>
+  );
+}
+
+const ENGINE_HOST_SHOWN: ReadonlySet<EngineHost["status"]> = new Set(["live", "backoff", "needs_auth"]);
 
 function HostTestCell({ test, connecting, masterRunning, containerFailed = false }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | null | undefined; containerFailed?: boolean }) {
   if (connecting)
@@ -1156,6 +1180,14 @@ function HostTestCell({ test, connecting, masterRunning, containerFailed = false
 }
 
 function SshSection() {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+  const { useEngineHosts, setEngineHost } = useWorkspace().queries;
+  const { takeHostConnect, onHostConnectRequest } = useWorkspace().events;
+  const { retryEngineHost } = useWorkspace().api;
+  const { dialogs } = useWorkspace();
+  const { getSshSettingsQuery } = useWorkspace().queries;
+  const { testSshExecution } = useWorkspace().api;
+
   const hostsOptions = getSshSettingsQuery();
   const hostsQuery = useQuery(hostsOptions);
   const hosts = hostsQuery.data?.hosts ?? (hostsQuery.isError ? [] : null);
@@ -1174,6 +1206,10 @@ function SshSection() {
     })
     .map((host) => host.host) ?? [];
   const [masterRunning, markMasterRunning] = useSshMasterStatuses(checkedHosts);
+  const engineHosts = useEngineHosts();
+  const engineByAlias = worstPerAlias(engineHosts ?? []);
+  const [busyHost, setBusyHost] = useState<string | null>(null);
+  const [hostError, setHostError] = useState<{ host: string; message: string } | null>(null);
 
   function connect(host: string) {
     activeAttempt.current += 1;
@@ -1183,6 +1219,38 @@ function SshSection() {
     setConnectingHost(host);
     setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
   }
+
+  // A run's Connect lands here: start that host's flow and bring its row into view.
+  useEffect(() => {
+    const take = () => {
+      const host = takeHostConnect();
+      if (!host) return;
+      connect(host);
+      requestAnimationFrame(() => document.getElementById(elementId(`ssh-host-${host}`))?.scrollIntoView({ block: "center" }));
+    };
+    take();
+    return onHostConnectRequest(take);
+  }, []);
+
+  /** Retry and Test on key hosts: one request, its error shown under the host's row. */
+  async function hostAction(host: string, action: () => Promise<void>) {
+    setBusyHost(host);
+    setHostError(null);
+    try {
+      await action();
+    } catch (error) {
+      setHostError({ host, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusyHost(null);
+    }
+  }
+
+  const retry = (host: string) => hostAction(host, async () => setEngineHost(await retryEngineHost(host)));
+
+  const test = (host: string, reference: string | null) => hostAction(host, async () => {
+    const result = await testSshExecution(host, reference?.trim() || null);
+    setTests((tests) => ({ ...tests, [host]: result }));
+  });
 
   function cancelConnect() {
     activeAttempt.current += 1;
@@ -1200,7 +1268,7 @@ function SshSection() {
       {hostsQuery.error && <p className="text-sm text-accent-red">{hostsQuery.error.message}</p>}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         {hostsQuery.data && <SshDefaultHost settings={hostsQuery.data} />}
-        <Button variant="ghost" className="ms-auto" onClick={() => showSshConfigDialog()}>
+        <Button variant="ghost" className="ms-auto" onClick={() => showSshConfigDialog(dialogs)}>
           <Settings size={14} /> {m.ssh_configure_hosts()}
         </Button>
       </div>
@@ -1224,12 +1292,19 @@ function SshSection() {
             const containerFailed = containerTest?.container?.ready === false;
             const connectionError = hostTest?.error || containerError;
             const connecting = connectingHost === h.host;
+            const engine = engineByAlias.get(h.host);
+            // A Test run this session speaks for a connected host; trouble on the host outranks it.
+            const engineShown = !connecting && engine !== undefined && ENGINE_HOST_SHOWN.has(engine.status)
+              && !(engine.status === "live" && executionTest) ? engine : null;
+            const keyHost = engine?.class === "key" && !engine.connectRequired;
+            // Key hosts need no Connect: Retry while backing off, otherwise Test.
+            const keyAction = !keyHost || engineShown?.status === "needs_auth" ? null : engineShown?.status === "backoff" ? "retry" : "test";
             const open = expandedHosts[h.host] ?? false;
             const hasTerminal = connecting || Boolean(connectionError);
             const address =
               `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
             return (
-              <div key={h.host}>
+              <div key={h.host} id={elementId(`ssh-host-${h.host}`)} data-ssh-host={h.host}>
                 <div
                   className="flex items-center gap-3 py-3"
                 >
@@ -1241,7 +1316,9 @@ function SshSection() {
                   </div>
                   <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
                     <div className="flex items-center gap-2 text-start">
-                      <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={masterRunning[h.host]} containerFailed={containerFailed} />
+                      {engineShown
+                        ? <EngineHostCell host={engineShown} />
+                        : <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={keyHost ? undefined : masterRunning[h.host]} containerFailed={containerFailed} />}
                       {hasTerminal && (
                         <button
                           type="button"
@@ -1260,28 +1337,38 @@ function SshSection() {
                         </button>
                       )}
                     </div>
-                    <Button size="small"
-                      type="button"
-                      className="justify-self-end"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (connecting && !connectionFailed) cancelConnect();
-                        else connect(h.host);
-                      }}
-                      disabled={!connecting && ((connectingHost !== null && !connectionFailed) || (reference !== null && !reference.trim()))}
-                    >
-                      {connecting
-                        ? connectionFailed
-                          ? m.app_retry()
-                          : m.settings_page_cancel()
-                        : hostTest?.reachable === false || containerFailed
-                          ? m.app_retry()
-                          : hostTest
-                            ? m.settings_reconnect()
-                            : m.settings_connect()}
-                    </Button>
+                    {keyAction ? (
+                      <Button size="small" type="button" className="justify-self-end" disabled={busyHost === h.host} onClick={() => void (keyAction === "retry" ? retry(h.host) : test(h.host, reference))}>
+                        {keyAction === "retry" ? m.app_retry() : m.settings_host_test()}
+                      </Button>
+                    ) : (
+                      <Button size="small"
+                        type="button"
+                        variant={engineShown?.status === "needs_auth" ? "primary" : "default"}
+                        className="justify-self-end"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (connecting && !connectionFailed) cancelConnect();
+                          else connect(h.host);
+                        }}
+                        disabled={!connecting && ((connectingHost !== null && !connectionFailed) || (reference !== null && !reference.trim()))}
+                      >
+                        {connecting
+                          ? connectionFailed
+                            ? m.app_retry()
+                            : m.settings_page_cancel()
+                          : engineShown?.status === "needs_auth"
+                            ? m.settings_connect()
+                            : hostTest?.reachable === false || containerFailed
+                              ? m.app_retry()
+                              : hostTest
+                                ? m.settings_reconnect()
+                                : m.settings_connect()}
+                      </Button>
+                    )}
                   </div>
                 </div>
+                {hostError?.host === h.host && <p role="alert" className="m-0 pb-3 text-sm text-accent-red">{hostError.message}</p>}
                 <SshExecutionSettings host={h} connecting={connecting && !connectionFailed} reference={reference}
                   onChange={(value) => {
                     if (connecting) cancelConnect();
@@ -1374,6 +1461,12 @@ function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPrefli
 }
 
 function SlurmSection() {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { saveSlurmSettings } = useWorkspace().api;
+  const { getSlurmSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const saveSlurmSettingsMutation = useMutation({ mutationFn: saveSlurmSettings });
 
   const settingsOptions = getSlurmSettingsQuery();
@@ -1516,7 +1609,7 @@ function SlurmSection() {
                   }
                 }}
                 disabled={!host}
-                aria-describedby={!host ? "slurm-login-node-hint" : undefined}
+                aria-describedby={!host ? elementId("slurm-login-node-hint") : undefined}
               >
                 {connecting
                   ? connectionFailed
@@ -1526,7 +1619,7 @@ function SlurmSection() {
                     ? m.settings_reconnect()
                     : m.settings_connect()}
               </Button>
-              {!host && <span id="slurm-login-node-hint" className="text-sm text-subtext">{m.settings_pick_login_node()}</span>}
+              {!host && <span id={elementId("slurm-login-node-hint")} className="text-sm text-subtext">{m.settings_pick_login_node()}</span>}
               <span role="status">
                 <SlurmTestBadge
                   test={test}
@@ -1541,14 +1634,14 @@ function SlurmSection() {
                   {m.settings_page_partition()}
                   <Input
                     type="text"
-                    list="slurm-partitions"
+                    list={elementId("slurm-partitions")}
                     value={partition}
                     onChange={(e) => setPartition(e.target.value)}
                     placeholder={m.settings_page_cluster_default()}
                     autoComplete="off"
                     spellCheck={false}
                   />
-                  <datalist id="slurm-partitions">
+                  <datalist id={elementId("slurm-partitions")}>
                     {test?.partitions.map((p) => <option key={p} value={p} />)}
                   </datalist>
                 </label>
@@ -1638,6 +1731,10 @@ function SlurmSection() {
 }
 
 function RaySection() {
+  const { saveRaySettings, rayPreflight } = useWorkspace().api;
+  const { getRaySettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const saveRaySettingsMutation = useMutation({ mutationFn: saveRaySettings });
 
   const settingsOptions = getRaySettingsQuery();
@@ -1778,7 +1875,11 @@ function localMachineSummary(hw: LocalMachine) {
 // --- compute (openresearch) ---------------------------------------------------------
 
 function OpenResearchSection({ remote }: { remote: boolean }) {
+  const { getOpenResearchSettingsQuery } = useWorkspace().queries;
+
   const settingsQuery = useQuery(getOpenResearchSettingsQuery());
+  const { useOpenResearchAccount, useAlphaXivFolders, useSignOutOpenResearch } = useMachines().owner.queries;
+  const openSignIn = useSignIn();
   const accountQuery = useOpenResearchAccount();
   // A remote workspace's settings come from the remote host but its account from this machine; don't pair them.
   const account = remote ? undefined : accountQuery.data;
@@ -1793,6 +1894,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
   const loadError = settingsQuery.error?.message;
   const busy = settingsQuery.isFetching;
   const refresh = () => { void accountQuery.refetch(); return settingsQuery.refetch(); };
+  const { dialogs } = useWorkspace();
   const logout = useSignOutOpenResearch();
 
   return (
@@ -1886,7 +1988,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
       )}
       <div className="mt-4 flex flex-wrap justify-end gap-2">
         {(account?.apiUrl || s?.apiUrl) && <ButtonLink href={`${(account?.apiUrl || s?.apiUrl || "").replace(/\/$/, "")}/auth/login`} target="_blank" rel="noreferrer">{m.settings_openresearch_dashboard()} <ExternalLink size={14} /></ButtonLink>}
-        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || logout.isPending} onClick={() => confirmOpenResearchSignOut(logout.mutateAsync)}>{m.settings_openresearch_sign_out()}</Button>}
+        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || logout.isPending} onClick={() => confirmOpenResearchSignOut(dialogs, logout.mutateAsync)}>{m.settings_openresearch_sign_out()}</Button>}
         <Button onClick={() => void refresh()} disabled={busy}>
           <RefreshCw size={14} /> {busy ? m.common_checking() : m.settings_check_again()}
         </Button>
@@ -1979,6 +2081,8 @@ function DefaultDestinationEditor({
   projectId?: string;
   onSaved: (settings: ComputeSettings) => void;
 }) {
+  const { setComputeDefault } = useWorkspace().api;
+
   const setComputeDefaultMutation = useMutation({ mutationFn: setComputeDefault });
 
   const savedBackend = settings.configuredDefaultBackend ?? settings.defaultBackend ?? "local";
@@ -2162,16 +2266,21 @@ function TargetTile({
   target,
   isDefault,
   summary,
+  attention,
   onOpen,
   onOpenEnvironment,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
   summary?: string;
+  /** A problem on this target that needs the user, such as a host waiting for Connect. */
+  attention?: string;
   onOpen?: () => void;
   onOpenEnvironment: () => void;
 }) {
-  const summaryId = `compute-${target.id}-summary`;
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const summaryId = elementId(`compute-${target.id}-summary`);
   const setupLabel = target.unverified
     ? m.settings_check_setup()
     : target.id === "openresearch" && !target.signedIn
@@ -2216,6 +2325,7 @@ function TargetTile({
           </>
         ) : summary ?? target.summary}
       </span>
+      {attention && <span className="mt-1 text-xs font-medium text-accent-amber">{attention}</span>}
       <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-sm">
         <span className={isDefault ? "font-medium text-text" : "text-subtext"}>
           {isDefault
@@ -2284,6 +2394,8 @@ function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onE
   remote: boolean;
   onEditState: (state: { dirty: boolean; saving: boolean }) => void;
 }) {
+  const { getComputeSettingsQuery } = useWorkspace().queries;
+
   const { data: settings } = useQuery(getComputeSettingsQuery(projectId));
   const target = settings?.targets.find((item) => item.id === targetId);
   const [editState, setEditState] = useState({ dirty: false, saving: false });
@@ -2319,6 +2431,40 @@ function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onE
     </DialogContent>;
 }
 
+function RunEngineSetting() {
+  const { getRunEngineQuery } = useWorkspace().queries;
+  const { setRunEngine } = useWorkspace().api;
+
+  const id = useId();
+  const engineQuery = useQuery(getRunEngineQuery());
+  const engineMutation = useMutation({ mutationFn: setRunEngine });
+
+  return (
+    <div className={SETTINGS_CARD_CLASS_NAME}>
+      <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div>
+          <div id={`run-engine-label-${id}`} className="project-default-title text-base font-medium">{m.settings_run_engine_label()}</div>
+          <div id={`run-engine-description-${id}`}>
+            <p>{m.settings_run_engine_description()}</p>
+            <p>{m.settings_run_engine_note()}</p>
+            {engineQuery.data?.forcedBy === "canary" && <p>{m.settings_run_engine_canary()}</p>}
+            {engineQuery.data?.forcedBy === "environment" && <p>{m.settings_run_engine_override()}</p>}
+          </div>
+        </div>
+        <Switch
+          type="button"
+          checked={engineQuery.data?.enabled ?? false}
+          disabled={!engineQuery.data || engineQuery.data.forcedBy !== null || engineMutation.isPending}
+          aria-labelledby={`run-engine-label-${id}`}
+          aria-describedby={`run-engine-description-${id}`}
+          onClick={() => engineMutation.mutate(!engineQuery.data?.enabled)}
+        />
+      </div>
+      {(engineQuery.error || engineMutation.error) && <div role="alert" className="error">{(engineMutation.error ?? engineQuery.error)?.message}</div>}
+    </div>
+  );
+}
+
 function ComputeTab({
   project,
   onViewHistory,
@@ -2330,6 +2476,13 @@ function ComputeTab({
   onOpenEnvironment: () => void;
   remote: boolean;
 }) {
+  const { useEngineHosts } = useWorkspace().queries;
+  const { pendingHostConnect, onHostConnectRequest } = useWorkspace().events;
+  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+
+  const { getComputeSettingsQuery, getLocalMachineQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const settingsOptions = getComputeSettingsQuery(project?.id);
   const settingsQuery = useQuery(settingsOptions);
   const settings = settingsQuery.data ?? null;
@@ -2344,6 +2497,12 @@ function ComputeTab({
   const localMachine = localMachineQuery.data ?? null;
   const localMachineError = localMachineQuery.error?.message ?? null;
   useEffect(() => { setSelectedTarget(null); setError(null); }, [project?.id]);
+  useEffect(() => {
+    const open = () => { if (pendingHostConnect()) setSelectedTarget("ssh"); };
+    open();
+    return onHostConnectRequest(open);
+  }, []);
+  const needsConnect = [...worstPerAlias(useEngineHosts() ?? []).values()].filter((host) => host.status === "needs_auth");
 
   const apply = (s: ComputeSettings) => {
     setSettings(s);
@@ -2366,6 +2525,11 @@ function ComputeTab({
       target={target}
       isDefault={defaultBackend === target.id}
       summary={target.id === "local" ? localMachine ? localMachineSummary(localMachine) : localMachineError ?? m.settings_page_detecting_hardware() : undefined}
+      attention={target.id !== "ssh" || needsConnect.length === 0
+        ? undefined
+        : needsConnect.length === 1
+          ? m.settings_ssh_host_needs_connect({ host: ltr(needsConnect[0].alias) })
+          : m.settings_ssh_hosts_need_connect({ count: fmtNumber(needsConnect.length) })}
       onOpen={target.id === "local" ? undefined : () => {
         if (!QUICK_SETUP_TARGETS.includes(target.id)) {
           setSelectedTarget(target.id);
@@ -2418,6 +2582,7 @@ function ComputeTab({
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
+      <RunEngineSetting />
       <ComputeActivity projectId={project?.id} onViewHistory={onViewHistory} />
       <ComputeDoctor />
       {loadError ? (
@@ -2459,6 +2624,10 @@ function ComputeTab({
 // --- compute (tinker) ----------------------------------------------------------
 
 function TinkerSection({ target }: { target: ComputeTargetSummary }) {
+  const { saveTinkerKey } = useWorkspace().api;
+  const { getTinkerSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveTinkerKeyMutation = useMutation({ mutationFn: saveTinkerKey });
 
   const [apiKey, setApiKey] = useState("");
@@ -2567,6 +2736,10 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
 }
 
 function HfSection({ remote }: { remote: boolean }) {
+  const { saveHfToken } = useWorkspace().api;
+  const { getHfSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const saveHfTokenMutation = useMutation({ mutationFn: saveHfToken });
 
   const settingsOptions = getHfSettingsQuery();
@@ -2720,6 +2893,8 @@ function EnvRow({
   entry: EnvVar | undefined;
   onVars: (vars: EnvVar[]) => void;
 }) {
+  const { setEnvVar, deleteEnvVar } = useWorkspace().api;
+
   const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
   const deleteEnvVarMutation = useMutation({ mutationFn: deleteEnvVar });
 
@@ -2727,7 +2902,12 @@ function EnvRow({
   const stored = entry?.value ?? "";
   const [value, setValue] = useState(stored);
   const [saving, setSaving] = useState(false);
-  useEffect(() => setValue(stored), [stored]);
+  // Reset during render: an effect would also rerun when a hidden machine is shown and erase the edit.
+  const [shownStored, setShownStored] = useState(stored);
+  if (shownStored !== stored) {
+    setShownStored(stored);
+    setValue(stored);
+  }
   const dirty = value.trim() !== stored;
 
   async function save() {
@@ -2824,6 +3004,8 @@ function AddVarRow({
   onVars: (vars: EnvVar[]) => void;
   onDone: () => void;
 }) {
+  const { setEnvVar } = useWorkspace().api;
+
   const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
 
   const [key, setKey] = useState("");
@@ -2909,6 +3091,9 @@ function AddVarRow({
 }
 
 function EnvVarsSection() {
+  const { getEnvVarsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const varsOptions = getEnvVarsQuery();
   const varsQuery = useQuery(varsOptions);
   const vars = varsQuery.data ?? null;
@@ -2973,6 +3158,8 @@ function EnvVarsSection() {
 }
 
 function TrackioCheck({ space }: { space: boolean }) {
+  const { trackioPreflight } = useWorkspace().api;
+
   const [test, setTest] = useState<"testing" | TrackioPreflight | null>(null);
 
   async function runPreflight() {
@@ -3031,6 +3218,7 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "pl", label: "Polski" },
   { id: "vi", label: "Tiếng Việt" },
   { id: "ru", label: "Русский" },
+  { id: "tr", label: "Türkçe" },
 ];
 
 function AppearanceTab() {
@@ -3140,6 +3328,10 @@ const MANUAL_UPDATE_HINT: Partial<Record<InstallChannel, () => string>> = {
 };
 
 function UpdatesTab() {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { setAutoUpdate: setAutoUpdateApi, setReleaseChannel, applyUpdate } = useWorkspace().api;
+
   const setAutoUpdateApiMutation = useMutation({ mutationFn: (args: Parameters<typeof setAutoUpdateApi>) => setAutoUpdateApi(...args) });
 
   const { status, error: loadError, apply } = useUpdateStatus();
@@ -3355,6 +3547,10 @@ function UpdatesTab() {
 }
 
 function TelemetryTab() {
+  const { setTelemetry } = useWorkspace().api;
+  const { getTelemetryQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const setTelemetryMutation = useMutation({ mutationFn: setTelemetry });
 
   const settingsOptions = getTelemetryQuery();
@@ -3425,6 +3621,8 @@ function InstallCliRow({
   disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {
+  const { installCli } = useWorkspace().api;
+
   const installCliMutation = useMutation({ mutationFn: installCli });
 
   const [result, setResult] = useState<InstalledCli | null>(null);
@@ -3484,6 +3682,16 @@ function GithubSettings({ remote, onProjectUpdate }: {
   remote: boolean;
   onProjectUpdate: (project: Project) => void;
 }) {
+  const {
+    listProjectsQuery,
+    getProjectDefaultsQuery,
+    githubAccountQuery,
+    githubOrganizationsQuery,
+    getProjectGitStatusQuery,
+  } = useWorkspace().queries;
+  const { setProjectDefaults } = useWorkspace().api;
+  const { setScopedQueryData, queryClient } = useWorkspace();
+
   const projectsQuery = useQuery(listProjectsQuery());
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const selectedProject = projectsQuery.data?.find((project) => project.id === selectedProjectId);
@@ -3643,6 +3851,15 @@ function GitHubCliHelp({
 }
 
 function OverleafCard() {
+  const {
+    deleteOverleafToken,
+    deleteOverleafSession,
+    saveOverleafToken,
+    saveOverleafSession,
+  } = useWorkspace().api;
+  const { getOverleafSettingsQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const deleteToken = useMutation({ mutationFn: deleteOverleafToken });
   const deleteSession = useMutation({ mutationFn: deleteOverleafSession });
   const tokenOptions = getOverleafSettingsQuery();
@@ -3745,6 +3962,17 @@ export function GitTab({
   project: Project | null;
   onProjectUpdate: (project: Project) => void;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const {
+    getProjectGitStatusQuery,
+    repoAccessQuery,
+    githubAccountQuery,
+    githubOrganizationsQuery,
+  } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+  const { enableProjectGithub, initializeProjectGit, disableProjectGithub } = useWorkspace().api;
+
   const statusOptions = { ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) };
   const statusQuery = useQuery(statusOptions);
   const status = statusQuery.data ?? null;
@@ -3837,7 +4065,7 @@ export function GitTab({
                       ) : (
                         <Popover.Trigger render={<Button variant="primary" />} disabled={saving || checkingAccess || Boolean(accessQuery.error)}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()} {!checkingAccess && <ChevronDown size={14} />}</Popover.Trigger>
                       )}
-                      <Popover.Portal>
+                      <Popover.Portal container={portalContainer}>
                         <Popover.Positioner positionMethod="fixed" side="bottom" align="start" sideOffset={8} collisionPadding={16} className="z-50">
                           <Popover.Popup aria-label={m.settings_github_new_repository_destination()} className="outline-none w-72 max-w-[calc(100vw-2rem)] max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-2 shadow-modal">
                             <div className="px-2 py-1 text-sm font-medium text-subtext">{m.settings_github_enable_under()}</div>
@@ -3914,6 +4142,12 @@ type MoveState =
   | { kind: "error"; message: string };
 
 function StorageTab() {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { getDataDirQuery } = useWorkspace().queries;
+  const { onDataDirMove } = useWorkspace().events;
+  const { validateDataDir, moveDataDir } = useWorkspace().api;
+
   const settingsOptions = getDataDirQuery();
   const settingsQuery = useQuery(settingsOptions);
   const settings = settingsQuery.data ?? null;
@@ -4104,13 +4338,12 @@ function StorageTab() {
 
 // --- instances ---------------------------------------------------------------
 
-const isLive = (status: string) => status === "running" || status === "starting";
 
 /** Runtime: live instances show elapsed-so-far, finished ones total duration.
  *  Both start at submission time, so provisioning/queue time is included —
  *  that's the span the provider bills for. */
 function runtimeLabel(inst: Run): string {
-  if (isLive(inst.status)) return fmtDuration(Date.now() - inst.createdAt);
+  if (runActive(inst.status)) return fmtDuration(Date.now() - inst.createdAt);
   if (inst.endedAt) return fmtDuration(inst.endedAt - inst.createdAt);
   return "—";
 }
@@ -4165,7 +4398,7 @@ function InstancesTable({ instances, kernels = [], emptyLabel }: { instances: Ru
                   </span>
                 </td>
                 <td>
-                  <StatusBadge status={runDisplayStatus(inst)} className="flex" />
+                  <StatusBadge {...runDisplay(inst)} className="flex" />
                 </td>
                 <td>{timeAgo(inst.createdAt)}</td>
                 <td>{runtimeLabel(inst)}</td>
@@ -4211,6 +4444,8 @@ function InstancesTable({ instances, kernels = [], emptyLabel }: { instances: Ru
 }
 
 function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onViewHistory: () => void }) {
+  const { listRunsQuery, getKaggleLiveKernelsQuery } = useWorkspace().queries;
+
   const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
   const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
   const error = query.error?.message;
@@ -4231,8 +4466,8 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
   };
 
   const byRecent = (a: Run, b: Run) => b.createdAt - a.createdAt;
-  const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
-  const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
+  const running = instances?.filter((i) => runActive(i.status)).sort(byRecent);
+  const past = instances?.filter((i) => !runActive(i.status)).sort(byRecent);
   const followed = new Set(running?.map((i) => i.backend?.url).filter((url): url is string => typeof url === "string"));
   const kernels = (kaggleQuery.data ?? []).filter((kernel) => !followed.has(kernel.url));
   const liveCount = (running?.length ?? 0) + kernels.length;
@@ -4266,6 +4501,8 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
 }
 
 function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: () => void }) {
+  const { listRunsQuery } = useWorkspace().queries;
+
   const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
   const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
   const error = query.error?.message;
@@ -4346,6 +4583,9 @@ export function SettingsView({
         <>
           <h1 tabIndex={-1}>{m.settings_page_settings()}</h1>
           <div className="settings-stack mt-4.5">
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <RunEngineSetting />
+            </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
             </section>

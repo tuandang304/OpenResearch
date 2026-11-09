@@ -1,4 +1,4 @@
-import type { Harness } from "./api";
+import { reconcileReasoning, reconcileServiceTier, type AgentSelection, type Harness } from "./api";
 
 export function resolveHarnessDefaultModel(harness: Harness | undefined): string | null {
   if (!harness || harness.catalogPending || harness.models.length === 0) return null;
@@ -126,4 +126,28 @@ export function modelHarnessMismatch(
   const family = modelFamily(model);
   if (!family || harnessServesFamily(harness, family)) return null;
   return { family, home: MODEL_FAMILY_HOME[family] };
+}
+
+/** Reconcile the settings attached to a selected model without treating the
+ * catalog as an allowlist. The picker deliberately accepts free-form ids, so
+ * replacing an unlisted id with the catalog's first entry changes both what
+ * the composer displays and what the next request sends. Invalid ids should
+ * reach the CLI and surface its real error instead. */
+export function deriveComposerSelection(
+  rawSelection: AgentSelection | null,
+  activeHarness: Harness | undefined,
+): AgentSelection | null {
+  if (!rawSelection) return null;
+  const model = (rawSelection.harness === "codex" || rawSelection.harness === "claude-code") && (rawSelection.model == null || rawSelection.model === "default")
+    ? resolveHarnessDefaultModel(activeHarness) ?? rawSelection.model ?? null
+    : rawSelection.model ?? null;
+  const readyHarness = activeHarness?.catalogPending || (activeHarness?.id === "codex" && !activeHarness.models.length)
+    ? undefined
+    : activeHarness;
+  return {
+    ...rawSelection,
+    model,
+    serviceTier: reconcileServiceTier(readyHarness, model, rawSelection.serviceTier),
+    reasoningLevel: reconcileReasoning(readyHarness, model, rawSelection.reasoningLevel),
+  };
 }

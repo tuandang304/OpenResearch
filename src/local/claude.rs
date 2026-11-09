@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::error::{anyhow, Result};
@@ -127,7 +127,7 @@ impl TurnSlot {
 }
 
 /// What the resident child was spawned with. Any field that can only be applied
-/// at launch (permission mode, effort, the mcp-gate bridge) forces a respawn
+/// at launch (permission mode, effort, the `orx mcp` bridge) forces a respawn
 /// when it changes; `model` is the exception — it retunes live via `set_model`,
 /// so it is updated in place on a successful control request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,7 +213,7 @@ pub fn classify_line(line: &str) -> ClaudeLine {
             ClaudeLine::ControlResponse { request_id, result }
         }
         // A control_request FROM the child (e.g. a permission prompt) rides the
-        // mcp-gate bridge over HTTP, not this stream — we never answer it here.
+        // `orx mcp` bridge over HTTP, not this stream — we never answer it here.
         Some("control_request") | None => ClaudeLine::Junk,
         // Everything else is a stream-json output object: assistant/user/system/
         // result. The turn loop discriminates on `type`.
@@ -613,7 +613,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     let bin = find_claude().ok_or_else(|| {
         anyhow!("claude not found on PATH — install Claude Code and run `claude` once to sign in")
     })?;
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
         "--print",
         "--input-format",
@@ -674,10 +674,8 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     };
     // Record successful bridge setup so reconciliation retries failures next turn.
     config.bridge_active = false;
-    let gate_config = gate
-        .as_ref()
-        .map(|(port, token)| (*port, spec.session_id.as_str(), token.as_str()));
-    match write_mcp_config(&spec.repo, gate_config) {
+    let gate_config = gate.as_ref().map(|(port, token)| (*port, token.as_str()));
+    match write_mcp_config(&spec.repo, &spec.session_id, gate_config) {
         Ok(path) => {
             cmd.arg("--mcp-config").arg(path);
             config.bridge_active = gate.is_some();
@@ -697,9 +695,22 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     );
     if config.bridge_active {
         cmd.args(["--permission-prompt-tool", "mcp__orx__approve"]);
+        // Sub-agents go through orx's `delegate`, which can reach any model
+        // and wakes this chat with the answer.
+        cmd.args(["--disallowedTools", "Agent,Task,Workflow"]);
+        cmd.args(["--allowedTools", "mcp__orx"]);
     }
     crate::local::chat::prepare_env(&mut cmd);
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
+    let delegated = crate::store::Store::open()
+        .and_then(|store| store.delegation(&spec.session_id))
+        .is_ok_and(|delegation| delegation.parent.is_some());
+    if let Some(ttl) = delegated
+        .then(crate::local::chat::delegation::delegate_prompt_cache_ttl)
+        .flatten()
+    {
+        cmd.env("CLAUDE_CODE_PROMPT_CACHE_TTL", ttl);
+    }
     let native_store = spec.config.native_store;
     let account = spec.config.account.clone();
     let account_env = tokio::task::spawn_blocking(move || match account {
@@ -1387,7 +1398,7 @@ mod tests {
         idle_since: Instant,
         shell: &str,
     ) -> Arc<ClaudeClient> {
-        let mut command = Command::new("sh");
+        let mut command = crate::process::tokio_command("sh");
         command
             .args(["-c", shell])
             .stdin(Stdio::piped())

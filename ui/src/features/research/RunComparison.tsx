@@ -1,20 +1,22 @@
+import { useWorkspace } from "../../workspace";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChartSpline, ChevronRight, GitCommitHorizontal, RefreshCw, Upload } from "lucide-react";
 import type { Experiment, Run } from "../../api";
-import { fmtDuration, fmtNumber, runDisplayStatus } from "../../api";
+import { fmtDuration, fmtNumber } from "../../api";
+import { runDisplay } from "../../runDisplay";
 import { BackendBadge } from "../../components/BackendLogos";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Badge, Button, Spinner, Switch } from "../../components/ui";
 import { m } from "../../paraglide/messages.js";
-import { workspaceKey } from "../../queries/client";
-import { getProjectMetrics, importRunMetrics } from "./api";
 import { changedParameters, comparisonRows, metricDelta } from "./comparison";
 
 const number = (value: number) => value.toLocaleString(undefined, { maximumSignificantDigits: 6 });
 const example = JSON.stringify({ version: 1, dataset: "dataset-v1", split: "test", metrics: { f1: 0.82, loss: 0.31 }, parameters: { learning_rate: 0.001, batch_size: 32 }, seed: 42 }, null, 2);
 
 export function RunComparison({ runs, experiments }: { runs: Run[]; experiments: Experiment[] }) {
+  const { workspaceKey } = useWorkspace();
+  const { getProjectMetrics, importRunMetrics } = useWorkspace().api;
   const projectId = experiments[0]?.projectId ?? "";
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -156,7 +158,7 @@ export function RunComparison({ runs, experiments }: { runs: Run[]; experiments:
                     }}
                   />
                   <span className="min-w-0 flex-1 truncate font-medium text-text">{label(run)}</span>
-                  <StatusBadge status={runDisplayStatus(run)} />
+                  <StatusBadge {...runDisplay(run)} />
                   <BackendBadge backend={run.backend} />
                   <Badge size="small" variant={hasMetrics ? "success" : "default"}>
                     {hasMetrics ? m.research_metrics_available() : m.research_metrics_missing()}
@@ -226,7 +228,7 @@ export function RunComparison({ runs, experiments }: { runs: Run[]; experiments:
                               )}
                             </div>
                             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-subtext">
-                              <StatusBadge status={runDisplayStatus(run)} />
+                              <StatusBadge {...runDisplay(run)} />
                               {run.commitSha && (
                                 <span className="inline-flex items-center gap-1 font-mono">
                                   <GitCommitHorizontal size={12} aria-hidden="true" />

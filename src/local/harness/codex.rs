@@ -58,7 +58,7 @@ use crate::local::chat::{
 use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
-use crate::local::shell_env::find_on_path;
+use crate::local::shell_env::installs;
 use crate::store::{Store, StoredChatMessage};
 
 fn codex_native_usage(usage: &Value) -> crate::store::TokenUsage {
@@ -357,7 +357,7 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
     // the child's execution budget.
     let permit = super::detect::detect_spawn_permit().await;
     let fut = async move {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -457,10 +457,11 @@ fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<Mode
             let default = configured_effort
                 .filter(|e| efforts.contains(e))
                 .or(catalog_default);
-            let info = ModelInfo::new(id).with_label(
+            let mut info = ModelInfo::new(id).with_label(
                 m.get("displayName").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
             );
+            info.context_window = m.get("contextWindow").and_then(Value::as_u64);
             let info = info.with_service_tiers(
                 m.get("serviceTiers")
                     .and_then(Value::as_array)
@@ -556,35 +557,27 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     })
 }
 
-/// `codex` on PATH then in installer locations, in preference order, symlinks
-/// resolved — codex needs to find its `codex-code-mode-host` helper next to the
-/// real binary.
+/// Every `codex` install, in preference order, symlinks resolved — codex needs
+/// to find its `codex-code-mode-host` helper next to the real binary.
 fn codex_candidates() -> Vec<PathBuf> {
-    let drops = codex_install_dirs(dirs::home_dir().as_deref())
+    installs("codex", codex_install_dirs(dirs::home_dir().as_deref()))
         .into_iter()
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
-    find_on_path("codex")
-        .into_iter()
-        .chain(drops)
         .map(resolve_symlinks)
         .collect()
 }
 
-/// Installer locations off PATH. ChatGPT.app bundles the Codex CLI without
+/// Codex's own installer locations. ChatGPT.app bundles the Codex CLI without
 /// putting it on PATH, sometimes as the only install.
 fn codex_install_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     let chatgpt_apps = [
         Some(PathBuf::from("/Applications")),
         home.map(|home| home.join("Applications")),
     ];
-    home.map(|home| home.join(".local").join("bin"))
+    cfg!(windows)
+        .then(dirs::data_local_dir)
+        .flatten()
+        .map(|dir| dir.join("Programs/OpenAI/Codex/bin"))
         .into_iter()
-        .chain(
-            cfg!(windows)
-                .then(dirs::data_local_dir)
-                .flatten()
-                .map(|dir| dir.join("Programs/OpenAI/Codex/bin")),
-        )
         .chain(
             chatgpt_apps
                 .into_iter()
@@ -633,7 +626,7 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     };
     let message = format!("{}\n\n{}", request.system, request.prompt);
     let fut = async {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::tokio_command(bin);
         cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
             .args(["-c", "sandbox_mode=\"read-only\""])
             .args(["-c", "approval_policy=\"never\""])
@@ -968,7 +961,7 @@ impl Harness for Codex {
                 };
                 let auto_review_supported = config_supports_auto_review(&config)
                     && super::detect::api_key("OPENAI_BASE_URL").is_none();
-                let setup = codex_thread_setup(
+                let mut setup = codex_thread_setup(
                     &repo,
                     &playbook_md,
                     ctx.permission_mode,
@@ -977,6 +970,7 @@ impl Harness for Codex {
                     ctx.service_tier.as_deref(),
                     &config,
                 )?;
+                add_orx_server(&mut setup["config"], &ctx.session_id, ctx.host.up_port());
                 resume_for_compaction(&client, thread_id, &session.path, setup).await?;
                 client
             }
@@ -1191,7 +1185,7 @@ impl Harness for Codex {
                 if !answer.approve {
                     return Ok(ResumeAction::Handled { plan_mode: None });
                 }
-                let text = async_question_answer(prompt, answer)?;
+                let (text, shown) = answer.as_written(async_question_answer(prompt, answer)?);
                 ctx.host
                     .steer_message(
                         &ctx.session_id,
@@ -1200,6 +1194,7 @@ impl Harness for Codex {
                         Vec::new(),
                         Vec::new(),
                         None,
+                        shown,
                     )
                     .await?;
                 Ok(ResumeAction::Handled { plan_mode: None })
@@ -1307,7 +1302,7 @@ impl Harness for Codex {
                 .build()
                 .ok()?;
             runtime.block_on(async {
-                let mut cmd = Command::new(bin);
+                let mut cmd = crate::process::tokio_command(bin);
                 cmd.args(["plugin", "list", "--json"])
                     .env("CODEX_HOME", &worker_home)
                     .current_dir(std::env::temp_dir())
@@ -1782,6 +1777,7 @@ fn tool_part(
         prompt: None,
         phase: None,
         children: Vec::new(),
+        orx: None,
     }
 }
 
@@ -2749,15 +2745,16 @@ fn error_message(error: Option<&Value>) -> String {
         .unwrap_or_else(|| "codex reported an error".to_string())
 }
 
-fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) {
-    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") else {
-        return;
+fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) -> Result<()> {
+    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? else {
+        return Ok(());
     };
     let instructions = setup
         .get("developerInstructions")
         .and_then(Value::as_str)
         .unwrap_or_default();
     setup["developerInstructions"] = Value::String(format!("{instructions}\n\n{recovery}"));
+    Ok(())
 }
 
 async fn ensure_codex_pre_accept(
@@ -2819,6 +2816,29 @@ async fn codex_playbook(
     .map_err(|e| anyhow!("playbook task failed: {e}"))??;
     let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
     Ok((repo, playbook_md))
+}
+
+/// Add orx's MCP server to a thread's config. Native sub-agents are off while
+/// it is on: delegation goes through orx, which can reach any model.
+fn add_orx_server(config: &mut Value, session_id: &str, up_port: Option<u16>) {
+    let Some(server) =
+        up_port.and_then(|port| crate::local::chat::delegation::mcp_server(session_id, port).ok())
+    else {
+        return;
+    };
+    let env: serde_json::Map<String, Value> = server
+        .env
+        .iter()
+        .map(|(name, value)| (name.to_string(), Value::String(value.clone())))
+        .collect();
+    config["mcp_servers"]["orx"] = serde_json::json!({
+        "command": server.command,
+        "args": server.args,
+        "env": env,
+        "default_tools_approval_mode": "approve",
+        "tool_timeout_sec": crate::local::chat::delegation::TOOL_TIMEOUT_SECONDS as f64,
+    });
+    config["features"] = serde_json::json!({"multi_agent": false, "multi_agent_v2": false});
 }
 
 /// Both a normal turn and idle compaction restore the same thread settings.
@@ -2898,15 +2918,20 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         ctx.service_tier.as_deref(),
         &config,
     )?;
+    add_orx_server(
+        &mut thread_setup["config"],
+        &ctx.session_id,
+        ctx.host.up_port(),
+    );
     if ctx.reset_codex_model {
         // Codex keeps the old thread model when a turn omits its model override.
-        append_native_recovery_context(ctx, &mut thread_setup);
+        append_native_recovery_context(ctx, &mut thread_setup)?;
         ctx.native_session_id = None;
     }
     let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
         (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
         (Some(_), None) => {
-            append_native_recovery_context(ctx, &mut thread_setup);
+            append_native_recovery_context(ctx, &mut thread_setup)?;
             start_thread(ctx, &client, thread_setup).await?
         }
         (Some(id), Some(session)) => {
@@ -2936,7 +2961,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         ctx.host.codex.kill_session(&ctx.session_id).await;
                         client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
                     }
-                    append_native_recovery_context(ctx, &mut thread_setup);
+                    append_native_recovery_context(ctx, &mut thread_setup)?;
                     start_thread(ctx, &client, thread_setup).await?
                 }
             }
@@ -3078,6 +3103,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         // `steering` is borrowed out of `ctx` so the borrow ends with the
         // select — the steer arm's handler needs `&mut ctx`.
         let waited = {
+            let flush_due = ctx.flush_due();
             let steering = &mut ctx.steering;
             let event = async {
                 if open_requests.is_empty() {
@@ -3089,9 +3115,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             tokio::select! {
                 event = event => Waited::Event(event),
                 steer = super::next_steer(steering) => Waited::Steer(steer),
+                _ = flush_due => Waited::Flush,
             }
         };
         let event = match waited {
+            Waited::Flush => {
+                let _ = ctx.flush();
+                continue;
+            }
             Waited::Steer(steer) => {
                 steer_turn(ctx, &client, &thread_id, turn_id.as_deref(), steer).await;
                 continue;
@@ -3974,7 +4005,7 @@ fn codex_sandbox(mode: Option<PermissionMode>) -> Option<&'static str> {
 }
 
 fn codex_exec_command(bin: &Path, roots: &[PathBuf], native_id: Option<&str>) -> Command {
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     cmd.arg("exec");
     for root in roots {
         cmd.arg("--add-dir").arg(root);
@@ -4139,7 +4170,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     cmd.args(["-c", &format!("mcp_servers={servers}")]);
     let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
     if ctx.native_session_id.is_some() && native_session.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? {
             turn_text = format!("{recovery}\n\n{turn_text}");
         }
     }
@@ -4193,7 +4224,17 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     let mut open_text: Option<String> = None;
     let mut open_reasoning: Option<String> = None;
 
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line?,
+            _ = ctx.flush_due() => {
+                let _ = ctx.flush();
+                continue;
+            }
+        };
+        let Some(line) = line else {
+            break;
+        };
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -4264,6 +4305,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
                     prompt: None,
                     phase: None,
                     children: Vec::new(),
+                    orx: None,
                 });
             }
             "exec_command_end" => {
@@ -4391,6 +4433,7 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
                 prompt: None,
                 phase: None,
                 children: Vec::new(),
+                orx: None,
             });
         }
         _ => {}
@@ -6258,6 +6301,7 @@ requires_openai_auth = false
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
             annotations: Vec::new(),
+            from: None,
         }
     }
 

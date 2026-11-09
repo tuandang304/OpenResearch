@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::{anyhow, Result};
@@ -730,7 +730,7 @@ fn spawn_client(
     bin: PathBuf,
     codex_home: PathBuf,
 ) -> Result<Arc<CodexClient>> {
-    let mut cmd = Command::new(&bin);
+    let mut cmd = crate::process::tokio_command(&bin);
     cmd.arg("app-server");
     if account.is_some() {
         cmd.args(["-c", &native_store::codex_account_sqlite_override()]);
@@ -892,22 +892,22 @@ impl CodexHost {
         native_store: NativeStore,
         account: Option<&str>,
     ) -> Result<Arc<CodexClient>> {
+        let account_id = account.map(str::to_string);
+        let codex_home = tokio::task::spawn_blocking(move || match account_id {
+            Some(id) => crate::local::harness::accounts::launch_env("codex", &id)?
+                .into_iter()
+                .find(|(key, _)| *key == "CODEX_HOME")
+                .map(|(_, home)| std::path::PathBuf::from(home))
+                .ok_or_else(|| anyhow!("Codex account `{id}` has no home")),
+            None => native_store::prepare_codex(native_store),
+        })
+        .await
+        .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
         let host = self.clone();
         let session = session_id.to_string();
         let account = account.map(str::to_string);
         self.ensure_with_spawn(session_id, native_store, account.clone(), async move {
             let bin = find_codex_required()?;
-            let account_id = account.clone();
-            let codex_home = tokio::task::spawn_blocking(move || match account_id {
-                Some(id) => crate::local::harness::accounts::launch_env("codex", &id)?
-                    .into_iter()
-                    .find(|(key, _)| *key == "CODEX_HOME")
-                    .map(|(_, home)| std::path::PathBuf::from(home))
-                    .ok_or_else(|| anyhow!("Codex account `{id}` has no home")),
-                None => native_store::prepare_codex(native_store),
-            })
-            .await
-            .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
             Ok(move || {
                 spawn_client(
                     &session,
@@ -1340,7 +1340,7 @@ mod windows_job {
     /// caller still reaps the wrapper.
     pub(super) fn kill_tree(pid: u32) {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("taskkill")
+        let _ = crate::process::command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .creation_flags(CREATE_NO_WINDOW)
             .stdout(std::process::Stdio::null())
@@ -1417,7 +1417,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     fn test_client(shell: &str, last_active: Instant, read_events: bool) -> Arc<CodexClient> {
-        let mut command = Command::new("sh");
+        let mut command = crate::process::tokio_command("sh");
         command
             .args(["-c", shell])
             .stdin(Stdio::piped())
@@ -1700,7 +1700,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn terminate_kills_the_native_child_behind_a_wrapper() {
         // The npm `codex.js` shape: a wrapper whose child outlives its SIGKILL.
-        let mut command = Command::new("sh");
+        let mut command = crate::process::tokio_command("sh");
         command
             .args(["-c", "sleep 30 & echo $!; wait"])
             .stdin(Stdio::piped())
@@ -1753,15 +1753,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// The npm `codex.cmd` shape (OR-409): a `cmd.exe` wrapper whose native
-    /// child (`timeout.exe`) survives a wrapper-only kill while holding the
-    /// thread's writer lock. The Job Object must empty the whole tree.
+    /// The npm wrapper's child can outlive a wrapper-only kill (OR-409).
     #[cfg(windows)]
     #[tokio::test]
     async fn terminate_kills_the_native_child_behind_a_wrapper() {
-        let mut command = Command::new("cmd");
+        let mut command = crate::process::tokio_command("cmd");
         command
-            .args(["/c", "timeout /t 600 > nul"])
+            .args(["/c", "ping.exe -n 600 127.0.0.1 > nul"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

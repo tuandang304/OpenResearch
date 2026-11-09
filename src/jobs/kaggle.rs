@@ -222,7 +222,7 @@ pub const CREDENTIAL_FILES: &[(&str, &str)] = &[
 async fn cli_version(path: &Path) -> Option<String> {
     let output = tokio::time::timeout(
         Duration::from_secs(20),
-        tokio::process::Command::new(path)
+        crate::process::tokio_command(path)
             .arg("--version")
             .stdin(std::process::Stdio::null())
             .output(),
@@ -362,7 +362,7 @@ fn pick_auto(statuses: &[AccountStatus], kind: &str) -> Option<String> {
 
 /// A `kaggle` command that sees only `username`'s credentials.
 pub fn command(cli: &Path, home: &Path) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(cli);
+    let mut command = crate::process::tokio_command(cli);
     for (key, value) in account_env(home) {
         command.env(key, value);
     }
@@ -1683,7 +1683,7 @@ exit 0
         spec.archive = &archive;
         write_run_files(&run_dir, &spec).unwrap();
         assert!(run_dir.join(DATASET_DIR).join(ARCHIVE_FILE).is_file());
-        let output = std::process::Command::new("bash")
+        let output = crate::process::command("bash")
             .arg(CONTROLLER_FILE)
             .current_dir(&run_dir)
             .env("FAKE_CALLS", &calls)

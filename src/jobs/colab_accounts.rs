@@ -431,7 +431,7 @@ pub fn account_env(home: &Path) -> Vec<(&'static str, String)> {
 }
 
 fn command(cli: &Path, home: &Path) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(cli);
+    let mut command = crate::process::tokio_command(cli);
     for (key, value) in account_env(home) {
         command.env(key, value);
     }

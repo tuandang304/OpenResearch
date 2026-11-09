@@ -1,29 +1,20 @@
+import { useWorkspace } from "../../workspace";
 // arXiv and Semantic Scholar toggles in the composer's Data sources picker,
 // owned by the tuandang304 fork. They use their own endpoint so upstream's
 // `/api/settings/lit-sources` shape stays unchanged; see docs/fork-maintenance.md.
 import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
-import { get, post } from "../../api";
-import { setScopedQueryData, workspaceKey } from "../../queries/client";
 import { LitSourceLogo, LIT_SOURCE_NAME } from "../../components/LitSourceLogo";
 import { MenuItem, SwitchIndicator } from "../../components/ui";
-import { FORK_LIT_SOURCES, type ForkLitSource } from "./litSourceMeta";
-
-export type ForkLitSourcesSettings = Record<ForkLitSource, boolean>;
-
-export const getForkLitSources = (signal?: AbortSignal) =>
-  get<ForkLitSourcesSettings>("/api/settings/fork-lit-sources", signal);
-
-export const setForkLitSources = (body: ForkLitSourcesSettings) =>
-  post<ForkLitSourcesSettings>("/api/settings/fork-lit-sources", body);
-
-export const getForkLitSourcesQuery = () => queryOptions({
-  queryKey: workspaceKey("getForkLitSources"),
-  queryFn: ({ signal }) => getForkLitSources(signal),
-  staleTime: 300_000,
-});
+import { FORK_LIT_SOURCES } from "./litSourceMeta";
 
 export function ForkLitSourcesList() {
-  const options = getForkLitSourcesQuery();
+  const { setScopedQueryData, workspaceKey } = useWorkspace();
+  const { getForkLitSources, setForkLitSources } = useWorkspace().api;
+  const options = queryOptions({
+    queryKey: workspaceKey("getForkLitSources"),
+    queryFn: ({ signal }) => getForkLitSources(signal),
+    staleTime: 300_000,
+  });
   const { data: settings } = useQuery(options);
   const mutation = useMutation({
     mutationFn: setForkLitSources,

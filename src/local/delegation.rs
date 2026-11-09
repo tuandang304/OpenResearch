@@ -1,6 +1,5 @@
 //! Sub-agent limits (Settings → Harnesses → Sub-agent limits): the harnesses,
-//! models and reasoning effort that helper chats an agent creates with
-//! `orx agent spawn` may use.
+//! models and reasoning effort that chats an agent delegates to may use.
 //!
 //! Without limits an agent picks whatever harness and model it likes for
 //! delegated work, sometimes one that is slow, out of quota, or not even served
@@ -368,10 +367,8 @@ impl DelegationPolicy {
             })
             .unwrap_or_default();
         format!(
-            "\n- Sub-agent limits: **on** — chats you create with `orx agent spawn` may run only \
-             on: {list}. Pass `--harness`, `--model` and `--effort` from this list; OpenResearch \
-             refuses other harnesses and replaces other models and efforts, which costs a \
-             round trip.{native}"
+            "\n- Sub-agent limits: **on** — chats you `delegate` to may run only on: {list}. \
+             Pick the model and `effort` from this list.{native}"
         )
     }
 }

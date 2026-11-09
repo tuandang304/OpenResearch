@@ -177,8 +177,8 @@ catches crashes and out-of-memory errors cheaply."
                 .into(),
             research: "\
 Run a research round before more compute: use your harness's native subagents on its cheapest, \
-fastest model (or `orx agent spawn --harness <h> --model <cheap model>` with an explicit ban on \
-compute launches; check `orx agent quota` first). Give each a distinct source: papers via \
+fastest model (or the orx MCP server's `delegate` on a cheap model from `models`, with an \
+explicit ban on compute launches). Give each a distinct source: papers via \
 `orx discover`/`orx paper` (alphaXiv, arXiv, Semantic Scholar, OpenAlex, bioRxiv, PubMed), code \
 and issues on GitHub, model and dataset cards on Hugging Face, benchmark leaderboards, and the \
 web. Ask each for concrete, citable techniques with expected gains; synthesize them into ranked \

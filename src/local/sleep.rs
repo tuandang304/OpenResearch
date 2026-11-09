@@ -1290,7 +1290,7 @@ pub mod keep_awake {
 
     fn spawn() -> Option<tokio::process::Child> {
         let mut command = if cfg!(target_os = "linux") {
-            let mut command = tokio::process::Command::new("systemd-inhibit");
+            let mut command = crate::process::tokio_command("systemd-inhibit");
             command.args([
                 "--what=sleep:idle",
                 "--who=OpenResearch",
@@ -1301,7 +1301,7 @@ pub mod keep_awake {
             ]);
             command
         } else if cfg!(target_os = "macos") {
-            let mut command = tokio::process::Command::new("caffeinate");
+            let mut command = crate::process::tokio_command("caffeinate");
             command.args(["-i", "-s"]);
             command
         } else {

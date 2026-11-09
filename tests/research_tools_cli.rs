@@ -1,3 +1,5 @@
+// Separate test crate; it runs the built orx binary directly.
+#![allow(clippy::disallowed_methods)]
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::{Command, Output};

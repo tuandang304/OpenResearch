@@ -117,10 +117,7 @@ fn parse_meminfo(raw: &str) -> Option<MemorySnapshot> {
 #[cfg(target_os = "macos")]
 fn platform_snapshot() -> Option<MemorySnapshot> {
     let run = |program: &str, args: &[&str]| -> Option<String> {
-        let output = std::process::Command::new(program)
-            .args(args)
-            .output()
-            .ok()?;
+        let output = crate::process::command(program).args(args).output().ok()?;
         output
             .status
             .success()

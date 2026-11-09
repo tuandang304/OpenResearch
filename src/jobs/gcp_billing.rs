@@ -8,7 +8,6 @@
 
 use serde::Serialize;
 use serde_json::Value;
-use tokio::process::Command;
 
 use super::gcp::{self, GcpSettings};
 use crate::error::{anyhow, Result};
@@ -141,7 +140,7 @@ async fn exported_cost(table: &str, project: &str, as_of: i64) -> Result<f64> {
     );
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        Command::new(bq)
+        crate::process::tokio_command(bq)
             .args([
                 "--format=json",
                 "--quiet",

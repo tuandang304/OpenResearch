@@ -1093,7 +1093,7 @@ async fn read_codex(account: &str) -> std::result::Result<Vec<QuotaSnapshot>, St
     .await
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
-    let mut command = tokio::process::Command::new(bin);
+    let mut command = crate::process::tokio_command(bin);
     command
         .arg("app-server")
         .stdin(std::process::Stdio::piped())

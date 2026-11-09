@@ -1,26 +1,12 @@
+import { useWorkspace } from "../../workspace";
 // Harness accounts, routing, Decision model, provider prices and GCP settings
 // cards, owned by the tuandang304 fork. Kept out of SettingsPage.tsx so upstream
 // edits there merge cleanly; see docs/fork-maintenance.md.
 import { cn } from "../../components/ui/cn";
 import { TARGET_LABELS } from "../../computeTargets";
-import {
-  setScopedQueryData,
-  queryClient,
-} from "../../queries/client";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
-import {
-  getHarnessAccountsQuery,
-  getGcpSettingsQuery,
-  getCrossHarnessSettingsQuery,
-  getDelegationPolicyQuery,
-  getComputeRoutingSettingsQuery,
-  getAutoCompactSettingsQuery,
-  getComputePricesQuery,
-  getDecisionModelSettingsQuery,
-} from "../../queries/settings";
 
-import { getUiStateQuery } from "../../queries/projects";
 import {
   ArrowDown,
   ArrowUp,
@@ -32,43 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import {
-  fmtNumber,
-  type ComputeTargetId,
-  type ComputeTargetSummary,
-  type Harness,
-  type HarnessFailover,
-  type HarnessAccount,
-  type HarnessAccounts,
-  type HarnessPoolLimit,
-  type HarnessPoolStatus,
-  getHarnessAccounts,
-  addHarnessAccount,
-  updateHarnessAccount,
-  removeHarnessAccount,
-  harnessAccountLoginPath,
-  type HarnessId,
-  type DecisionModelSettings,
-  saveDecisionModelSettings,
-  getGcpSettings,
-  saveGcpSettings,
-  stopGcpInstance,
-  type GcpSettings,
-  type GcpSettingsUpdate,
-  getComputePrices,
-  updateUiState,
-  setCrossHarnessSettings,
-  setDelegationPolicy,
-  type DelegationPolicy,
-  type DelegationRule,
-  type OptionChoice,
-  harnessModelLabel,
-  modelLabel,
-  reasoningFor,
-  setComputeRoutingSettings,
-  setAutoCompactSettings,
-  fmtTokens,
-} from "../../api";
+import { fmtNumber, type ComputeTargetId, type ComputeTargetSummary, type Harness, type HarnessFailover, type HarnessAccount, type HarnessAccounts, type HarnessPoolLimit, type HarnessPoolStatus, type HarnessId, type DecisionModelSettings, type GcpSettings, type GcpSettingsUpdate, type DelegationPolicy, type DelegationRule, type OptionChoice, harnessModelLabel, modelLabel, reasoningFor, fmtTokens } from "../../api";
 import { m } from "../../paraglide/messages.js";
 import { fmtUnits } from "../../features/fork/ComputeSections";
 import { ltr } from "../../i18n";
@@ -129,6 +79,9 @@ const QUOTA_DOT: Record<HarnessPoolStatus["state"], string> = {
 /** Several accounts for one harness: each one's quota per pool, sign-in,
  * pausing, limits set by hand, and adding or removing accounts. */
 export function HarnessAccountsCard({ harness, remote }: { harness: Harness; remote: boolean }) {
+  const { queryClient } = useWorkspace();
+  const { getHarnessAccountsQuery } = useWorkspace().queries;
+  const { addHarnessAccount, getHarnessAccounts, harnessAccountLoginPath, removeHarnessAccount, updateHarnessAccount } = useWorkspace().api;
   const options = getHarnessAccountsQuery();
   const query = useQuery(options);
   const group: HarnessAccounts | undefined = query.data?.find((entry) => entry.id === harness.id);
@@ -372,6 +325,9 @@ function harnessVendor(id: HarnessId): string | null {
 }
 
 export function CrossHarnessCard({ harnesses }: { harnesses: Harness[] | null }) {
+  const { setScopedQueryData } = useWorkspace();
+  const { getCrossHarnessSettingsQuery } = useWorkspace().queries;
+  const { setCrossHarnessSettings } = useWorkspace().api;
   const options = getCrossHarnessSettingsQuery();
   const query = useQuery(options);
   const mutation = useMutation({ mutationFn: setCrossHarnessSettings });
@@ -460,6 +416,9 @@ const DELEGATION_AUTO = "__auto";
  * with `orx agent spawn`, so delegated work does not stall on a harness or
  * model the user did not want. */
 export function DelegationPolicyCard({ harnesses }: { harnesses: Harness[] | null }) {
+  const { setScopedQueryData } = useWorkspace();
+  const { getDelegationPolicyQuery } = useWorkspace().queries;
+  const { setDelegationPolicy } = useWorkspace().api;
   const options = getDelegationPolicyQuery();
   const query = useQuery(options);
   const mutation = useMutation({ mutationFn: setDelegationPolicy });
@@ -680,6 +639,9 @@ function DelegationRuleRow({ harness, rule, enabled, disabled, onChange }: {
 
 /** Lets agents pick the backend per run among the providers left on. */
 export function ComputeRoutingCard({ targets }: { targets: ComputeTargetSummary[] }) {
+  const { setScopedQueryData } = useWorkspace();
+  const { getComputeRoutingSettingsQuery } = useWorkspace().queries;
+  const { setComputeRoutingSettings } = useWorkspace().api;
   const options = getComputeRoutingSettingsQuery();
   const query = useQuery(options);
   const mutation = useMutation({ mutationFn: setComputeRoutingSettings });
@@ -797,6 +759,9 @@ function NumberField({ id, value, min, max, placeholder, suggestions, disabled, 
 
 /** Compacts a chat on its own once a turn ends with the context this full. */
 export function AutoCompactCard() {
+  const { setScopedQueryData } = useWorkspace();
+  const { getAutoCompactSettingsQuery } = useWorkspace().queries;
+  const { setAutoCompactSettings } = useWorkspace().api;
   const options = getAutoCompactSettingsQuery();
   const query = useQuery(options);
   const mutation = useMutation({ mutationFn: setAutoCompactSettings });
@@ -901,6 +866,9 @@ const PRICE_ROWS = 8;
 /** Remaining credit and GPU prices on every connected provider: the same
  * numbers agents read with `orx compute prices` before choosing a backend. */
 export function ProviderPricesCard() {
+  const { queryClient } = useWorkspace();
+  const { getComputePricesQuery } = useWorkspace().queries;
+  const { getComputePrices } = useWorkspace().api;
   const options = getComputePricesQuery();
   const query = useQuery(options);
   const [refreshing, setRefreshing] = useState(false);
@@ -1072,6 +1040,9 @@ export function ProviderPricesCard() {
 /** Google Cloud: gcloud sign-in, project and zone, Spot VMs, the GPUs a run
  * can ask for, and the VMs orx created that still exist. */
 export function GcpSection() {
+  const { queryClient } = useWorkspace();
+  const { getGcpSettingsQuery } = useWorkspace().queries;
+  const { getGcpSettings, saveGcpSettings, stopGcpInstance } = useWorkspace().api;
   const options = getGcpSettingsQuery();
   const query = useQuery(options);
   const data: GcpSettings | null = query.data ?? null;
@@ -1355,6 +1326,9 @@ export function GcpSection() {
 /** An OpenAI model that picks the account, fallback harness, and compute
  * for work, so the harnesses' own quota lasts longer. */
 export function DecisionModelCard() {
+  const { queryClient } = useWorkspace();
+  const { getDecisionModelSettingsQuery } = useWorkspace().queries;
+  const { saveDecisionModelSettings } = useWorkspace().api;
   const options = getDecisionModelSettingsQuery();
   const query = useQuery(options);
   const settings = query.data ?? null;
@@ -1474,6 +1448,9 @@ function DecisionStatusBadge({ settings }: { settings: DecisionModelSettings }) 
 }
 
 export function HarnessFailoverCard({ harnesses }: { harnesses: Harness[] }) {
+  const { setScopedQueryData } = useWorkspace();
+  const { getUiStateQuery } = useWorkspace().queries;
+  const { updateUiState } = useWorkspace().api;
   const uiStateOptions = getUiStateQuery();
   const { data: uiState } = useQuery(uiStateOptions);
   const save = useMutation({

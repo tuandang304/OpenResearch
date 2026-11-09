@@ -38,6 +38,9 @@ pub struct Definition {
     pub executable: String,
     #[serde(default)]
     pub arguments: Vec<String>,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Definition {
@@ -161,6 +164,7 @@ pub fn presets() -> Vec<Preset> {
                 .iter()
                 .map(|argument| (*argument).into())
                 .collect(),
+            unknown: Default::default(),
         },
         setup_url,
     })
@@ -198,20 +202,18 @@ pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
     if path.is_absolute() {
         return path.is_file().then(|| path.to_path_buf());
     }
-    crate::local::shell_env::find_on_path(executable).or_else(|| {
-        let home = dirs::home_dir()?;
+    let own = dirs::home_dir().into_iter().flat_map(|home| {
         [
-            ".local/bin",
             ".grok/bin",
             ".devin/bin",
             ".minimax-code/bin",
             ".zcode/runtime/bin",
         ]
-        .iter()
-        .find_map(|directory| {
-            crate::local::shell_env::find_in_dir(&home.join(directory), executable)
-        })
-    })
+        .map(|directory| home.join(directory))
+    });
+    crate::local::shell_env::installs(executable, own)
+        .into_iter()
+        .next()
 }
 
 pub fn save(definition: Definition, create: bool) -> Result<()> {
@@ -231,7 +233,11 @@ pub fn save(definition: Definition, create: bool) -> Result<()> {
         {
             found = true;
             if !create {
-                *saved = definition.clone();
+                let unknown = std::mem::take(&mut saved.unknown);
+                *saved = Definition {
+                    unknown,
+                    ..definition.clone()
+                };
             }
         } else if create {
             settings.acp_harnesses.push(definition);
@@ -261,7 +267,7 @@ pub async fn test_connection(definition: &Definition) -> Result<serde_json::Valu
     definition.validate()?;
     let executable = executable_path(&definition.executable)
         .unwrap_or_else(|| std::path::PathBuf::from(&definition.executable));
-    let mut command = tokio::process::Command::new(executable);
+    let mut command = crate::process::tokio_command(executable);
     command
         .args(&definition.arguments)
         .stdin(std::process::Stdio::piped())
@@ -383,6 +389,7 @@ for line in sys.stdin:
             name: "Catalog peer".into(),
             executable: if cfg!(windows) { "python" } else { "python3" }.into(),
             arguments: vec!["-u".into(), "-c".into(), peer.into()],
+            unknown: Default::default(),
         };
         let configuration = discover_models(&definition).await.unwrap();
         assert_eq!(
@@ -506,6 +513,7 @@ for line in sys.stdin:
                 "\"quoted\"".into(),
                 "$(echo untouched)".into(),
             ],
+            unknown: Default::default(),
         };
         let result = test_connection(&definition).await.unwrap();
         assert_eq!(result["status"], "connected");
@@ -544,6 +552,7 @@ for line in sys.stdin:
                 "\"quoted\"".into(),
                 "$(echo untouched)".into(),
             ],
+            unknown: Default::default(),
         };
         definition.validate().unwrap();
         let saved = serde_json::to_string(&definition).unwrap();

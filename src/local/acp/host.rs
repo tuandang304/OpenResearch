@@ -217,7 +217,12 @@ impl Client {
         Ok(())
     }
 
-    pub async fn restore(&self, native_id: &str, cwd: &Path) -> Result<Value> {
+    pub async fn restore(
+        &self,
+        native_id: &str,
+        cwd: &Path,
+        mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
+    ) -> Result<Value> {
         use agent_client_protocol::schema::v1::{LoadSessionRequest, ResumeSessionRequest};
         let capabilities = &self.initialized["agentCapabilities"];
         let method = if capabilities["sessionCapabilities"]["resume"].is_object() {
@@ -228,14 +233,13 @@ impl Client {
             bail!("The agent cannot restore this session. Send a message to continue with the saved transcript");
         };
         self.set_native_id(native_id);
-        let servers = super::alphaxiv_mcp_servers()?;
         let params = if method == "session/resume" {
             serde_json::to_value(
-                ResumeSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(servers),
+                ResumeSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(mcp_servers),
             )?
         } else {
             serde_json::to_value(
-                LoadSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(servers),
+                LoadSessionRequest::new(native_id.to_owned(), cwd).mcp_servers(mcp_servers),
             )?
         };
         self.request(method, params).await
@@ -540,14 +544,14 @@ pub(super) async fn spawn(
     let mut command = if zcode {
         let node = super::executable_path("node")
             .ok_or_else(|| anyhow!("ZCode ACP requires Node.js on PATH"))?;
-        let mut command = tokio::process::Command::new(node);
+        let mut command = crate::process::tokio_command(node);
         command
             .args(["-e", include_str!("zcode-runtime.cjs")])
             .arg(executable)
             .arg("--orx-launch");
         command
     } else {
-        tokio::process::Command::new(executable)
+        crate::process::tokio_command(executable)
     };
     command
         .args(&definition.arguments)
@@ -782,6 +786,7 @@ mod tests {
                 .into(),
                 mode.into(),
             ],
+            unknown: Default::default(),
         }
     }
 
@@ -817,7 +822,14 @@ mod tests {
                 .await
                 .unwrap();
             let native_id = response["sessionId"].as_str().unwrap();
-            client.restore(native_id, &cwd).await.unwrap();
+            client
+                .restore(
+                    native_id,
+                    &cwd,
+                    super::super::alphaxiv_mcp_servers().unwrap(),
+                )
+                .await
+                .unwrap();
             host.shutdown().await;
         }
     }
