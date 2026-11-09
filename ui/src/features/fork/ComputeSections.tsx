@@ -1,15 +1,9 @@
+import { useWorkspace } from "../../workspace";
 // Colab and Kaggle compute settings, owned by the tuandang304 fork. Kept out of
 // SettingsPage.tsx so upstream edits there merge cleanly; see docs/fork-maintenance.md.
 import { cn } from "../../components/ui/cn";
-import {
-  queryClient,
-} from "../../queries/client";
 import { useQuery } from "@tanstack/react-query";
 
-import {
-  getColabSettingsQuery,
-  getKaggleSettingsQuery,
-} from "../../queries/settings";
 
 import {
   ExternalLink,
@@ -21,28 +15,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useState } from "react";
-import {
-  fmtNumber,
-  type ColabSettings,
-  type ColabAccount,
-  type ColabSavedAccount,
-  getColabSettings,
-  stopColabRuntime,
-  startColabLogin,
-  finishColabLogin,
-  cancelColabLogin,
-  importColabAccount,
-  setColabActiveAccount,
-  pauseColabAccount,
-  removeColabAccount,
-  type KaggleAccount,
-  type KaggleSettings,
-  getKaggleSettings,
-  addKaggleAccount,
-  importKaggleAccount,
-  setKaggleActiveAccount,
-  removeKaggleAccount,
-} from "../../api";
+import { fmtNumber, type ColabSettings, type ColabAccount, type ColabSavedAccount, type KaggleAccount, type KaggleSettings } from "../../api";
 import { m } from "../../paraglide/messages.js";
 import {
   Badge,
@@ -93,6 +66,7 @@ function ColabAccountCard({
   onAction: (label: string, action: () => Promise<ColabSettings>) => void;
   onStop: (account: string, endpoint: string) => void;
 }) {
+  const { pauseColabAccount, removeColabAccount, setColabActiveAccount } = useWorkspace().api;
   const account = saved.account;
   const tier = colabTierLabel(account?.tier ?? null);
   const gpus = (account?.eligible ?? []).filter((id) => id !== "cpu").map((id) => colabAcceleratorLabel(id, accelerators));
@@ -178,6 +152,7 @@ function ColabAccountCard({
 /** Adding a Google account: the Colab CLI's own sign-in, with Google's code
  * pasted back here. Each sign-in adds one account. */
 function ColabAddAccount({ busy, onSaved }: { busy: boolean; onSaved: (settings: ColabSettings) => void }) {
+  const { cancelColabLogin, finishColabLogin, startColabLogin } = useWorkspace().api;
   const [login, setLogin] = useState<{ id: string; url: string } | null>(null);
   const [code, setCode] = useState("");
   const [working, setWorking] = useState(false);
@@ -265,6 +240,9 @@ function ColabAddAccount({ busy, onSaved }: { busy: boolean; onSaved: (settings:
 }
 
 export function ColabSection() {
+  const { queryClient } = useWorkspace();
+  const { getColabSettingsQuery } = useWorkspace().queries;
+  const { getColabSettings, importColabAccount, stopColabRuntime } = useWorkspace().api;
   const options = getColabSettingsQuery();
   const query = useQuery(options);
   const s: ColabSettings | null = query.data ?? null;
@@ -513,6 +491,9 @@ function kaggleMethodLabel(method: KaggleAccount["method"]): string {
 /** Kaggle: CLI install guidance, several saved accounts, and each account's
  * weekly GPU/TPU quota. Credentials are sent once and never shown again. */
 export function KaggleSection() {
+  const { queryClient } = useWorkspace();
+  const { getKaggleSettingsQuery } = useWorkspace().queries;
+  const { addKaggleAccount, getKaggleSettings, importKaggleAccount, removeKaggleAccount, setKaggleActiveAccount } = useWorkspace().api;
   const options = getKaggleSettingsQuery();
   const query = useQuery(options);
   const s: KaggleSettings | null = query.data ?? null;

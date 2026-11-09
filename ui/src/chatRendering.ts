@@ -70,6 +70,8 @@ export function questionReplies(messages: ChatMessage[]): QuestionReplies {
   const questionById = new Map<string, string>();
   const prompts = new Set<string>();
   const pending = new Map<string, { id: string; answer: string; question: string }>();
+  // A held card an agent answered is followed by that chat's steered answer.
+  const answeredBy = new Map<string, string>();
   const originalQuestions = new Map<string, string>();
   for (const part of messages.flatMap((message) => message.parts)) {
     const questions = part.type === "tool" && part.state?.input?.questions;
@@ -99,9 +101,14 @@ export function questionReplies(messages: ChatMessage[]): QuestionReplies {
       if (prompt?.kind === "question" && prompt.question) {
         questionById.set(part.id, originalQuestions.get(prompt.question) ?? prompt.question);
       }
-      if (part.type === "prompt" && prompt?.kind === "question" && prompt.resolved && !prompt.nativeId && prompt.question) {
+      if (part.type === "prompt" && prompt?.resolved && prompt.nativeId && prompt.answeredBy) {
+        answeredBy.set(prompt.answeredBy, part.id);
+      } else if (part.type === "prompt" && prompt?.kind === "question" && prompt.resolved && !prompt.nativeId && prompt.question) {
         const answer = [(prompt.answers ?? []).join(", "), prompt.note].filter(Boolean).join("\n\n");
         if (answer) pending.set(`In response to: ${prompt.question}\n\n${answer}`, { id: part.id, answer, question: prompt.question });
+      } else if (part.type === "steer" && part.orx?.from && answeredBy.has(part.orx.from)) {
+        prompts.add(answeredBy.get(part.orx.from)!);
+        answeredBy.delete(part.orx.from);
       } else if (part.type === "steer" && part.text) {
         matchReply(part.id, part.text);
       }
@@ -143,7 +150,7 @@ export function partIsVisible(part: ChatPart, activePermissionId?: string | null
   }
   // Hidden reasoning must not displace a visible tool tail during brief thinking bursts.
   if (part.type === "reasoning") return false;
-  if (part.type === "text") return Boolean(part.text);
+  if (part.type === "text") return Boolean(part.text) || Boolean(part.orx);
   return true;
 }
 
@@ -213,12 +220,8 @@ export function unreadAfterBusyChange(
   return next;
 }
 
-export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: ChatPart[]; answer: ChatPart[] } {
-  // Keep unanswered prompts in the visible conversation.
-  if (parts.some((part) => part.type === "prompt" && !part.prompt?.resolved)) {
-    return { work: [], answer: parts };
-  }
-  let finalIndex = parts.findIndex((part) => part.type === "text" && part.phase === "final_answer");
+function finalAnswerIndex(parts: ChatPart[], streaming: boolean): number {
+  let finalIndex = parts.findIndex((part) => part.type === "text" && part.phase === "final_answer" && (streaming || partIsVisible(part)));
   if (finalIndex < 0 && !streaming && !parts.some((part) => part.phase)) {
     // Older transcripts have no phase: only the trailing text can be the answer.
     for (let index = parts.length - 1; index >= 0; index--) {
@@ -228,6 +231,15 @@ export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: C
       if (part.text) finalIndex = index;
     }
   }
+  return finalIndex;
+}
+
+export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: ChatPart[]; answer: ChatPart[] } {
+  // Keep unanswered prompts in the visible conversation.
+  if (parts.some((part) => part.type === "prompt" && !part.prompt?.resolved)) {
+    return { work: [], answer: parts };
+  }
+  const finalIndex = finalAnswerIndex(parts, streaming);
   return finalIndex < 0 || (!streaming && !parts.slice(finalIndex).some((part) => partIsVisible(part))) || !parts.slice(0, finalIndex).some((part) => partIsVisible(part))
     ? { work: [], answer: parts }
     : { work: parts.slice(0, finalIndex), answer: parts.slice(finalIndex) };
@@ -237,7 +249,11 @@ export function groupResponseMessages(messages: ChatMessage[], previousGroups: C
   const groups: ChatMessage[][] = [];
   for (const message of messages) {
     const previous = groups.at(-1);
-    if (message.role === "assistant" && previous?.[0].role === "assistant" && message.parts[0]?.id !== LOCAL_ERROR_PART_ID) {
+    const providerChanged = message.parts.some((part) => part.tool === "provider_switch")
+      || previous?.[0].parts.some((part) => part.tool === "provider_switch");
+    if (message.role === "assistant" && previous?.[0].role === "assistant" && !providerChanged
+      && message.parts[0]?.id !== LOCAL_ERROR_PART_ID
+      && finalAnswerIndex(previous[previous.length - 1].parts, false) < 0) {
       previous.push(message);
     } else {
       groups.push([message]);

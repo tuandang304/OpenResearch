@@ -1,13 +1,13 @@
+import { useMachines } from "../machineSelection";
+import { WorkspaceDomContext } from "../WorkspaceDom";
 import { Popover } from "@base-ui/react/popover";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { ArrowLeft, ArrowUpRight, Check, FileText, Folder, Search } from "lucide-react";
-import { useRef, useState, type RefObject } from "react";
-import { AlphaXivNotConnectedError, getAlphaXivPapers, type AlphaXivPaper } from "../api";
+import { useContext, useRef, useState } from "react";
+import { AlphaXivNotConnectedError, type AlphaXivPaper } from "../api";
 import { fmtNumber } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { workspaceKey } from "../queries/client";
-import { useAlphaXivFolders, useOpenResearchAccount } from "../queries/settings";
-import { openSignIn } from "./AccountChip";
+import { useSignIn } from "./AccountChip";
 import { EscapeScope } from "./EscapeScope";
 import { LitSourceLogo } from "./LitSourceLogo";
 import { useDebouncedValue } from "./NewProjectForm";
@@ -18,10 +18,11 @@ const STATE_CLASS_NAME =
 
 type Props = {
   onAdd: (papers: AlphaXivPaper[]) => void;
-  composerRef: RefObject<HTMLTextAreaElement | null>;
+  className: string;
 };
 
 export function LibraryPicker(props: Props) {
+  const { useOpenResearchAccount } = useMachines().owner.queries;
   const account = useOpenResearchAccount();
   const user = account.data?.user;
   if (!account.data?.loggedIn || !user) return null;
@@ -30,11 +31,17 @@ export function LibraryPicker(props: Props) {
 
 function SignedInLibraryPicker({
   onAdd,
-  composerRef,
+  className,
   user,
 }: Props & {
   user: { id: string; alphaxivUrl: string | null };
 }) {
+  const workspace = useMachines().owner;
+  const openSignIn = useSignIn();
+  const { workspaceKey } = workspace;
+  const { getAlphaXivPapers } = workspace.api;
+  const { useAlphaXivFolders } = workspace.queries;
+  const { portalContainer } = useContext(WorkspaceDomContext);
   const folders = useAlphaXivFolders();
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"recent" | "folders" | { folderId: string }>("recent");
@@ -53,7 +60,7 @@ function SignedInLibraryPicker({
     enabled: open && view !== "folders" && !folders.error,
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.nextCursor,
-  });
+  }, workspace.queryClient);
   const error = folders.error ?? (view !== "folders" ? papers.error : null);
   const visibleFolders =
     folders.data?.filter((item) =>
@@ -78,12 +85,12 @@ function SignedInLibraryPicker({
         <Tooltip interactive disabled={open} content={m.library_picker()}>
           <Popover.Trigger
             ref={trigger}
-            render={<IconButton className="composer-bare" aria-label={m.library_picker()} />}
+            render={<IconButton size="small" className={className} aria-label={m.library_picker()} />}
           >
-            <LitSourceLogo source="alphaxiv" decorative />
+            <LitSourceLogo source="alphaxiv" decorative framed={false} className="text-subtext [&_svg_*]:fill-current" />
           </Popover.Trigger>
         </Tooltip>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner
             side="top"
             align="start"
@@ -94,7 +101,7 @@ function SignedInLibraryPicker({
             <Popover.Popup
               aria-label={m.library_title()}
               initialFocus={searchInput}
-              finalFocus={() => (added.current ? composerRef.current : trigger.current)}
+              finalFocus={() => (added.current ? false : trigger.current)}
               className="flex w-104 max-w-[calc(100vw-1.5rem)] h-[min(34rem,var(--available-height))] flex-col overflow-hidden rounded-xl border border-border bg-background text-text shadow-menu outline-none"
             >
               <div className="flex items-center justify-between gap-3 px-3.5 pt-3 pb-2.5">
@@ -234,9 +241,6 @@ function SignedInLibraryPicker({
                       const checked = selected.some(
                         (item) => item.paperGroupId === paper.paperGroupId,
                       );
-                      const image = paper.coverBlobId
-                        ? `https://blog-media.assets.alphaxiv.org/covers/${paper.coverBlobId}.png`
-                        : `https://thumbnails.assets.alphaxiv.org/256/${paper.versionId}.png`;
                       return (
                         <li key={paper.paperGroupId}>
                           <button
@@ -254,20 +258,10 @@ function SignedInLibraryPicker({
                             className={`group flex w-full items-center gap-3 rounded-lg p-2 text-start focus-visible:outline-2 focus-visible:outline-focus ${checked ? "bg-highlight" : "hover:bg-surface"}`}
                           >
                             <span
-                              className="relative flex h-15 w-12 shrink-0 items-center justify-center overflow-hidden rounded-sm border border-border bg-panel text-muted"
+                              className="flex h-15 w-12 shrink-0 items-center justify-center rounded-sm border border-border bg-panel text-muted"
                               aria-hidden="true"
                             >
                               <FileText size={21} />
-                              <img
-                                src={image}
-                                alt=""
-                                loading="lazy"
-                                draggable={false}
-                                onError={(event) => {
-                                  event.currentTarget.style.visibility = "hidden";
-                                }}
-                                className="absolute inset-0 h-full w-full object-cover object-top"
-                              />
                             </span>
                             <span className="min-w-0 flex-1">
                               <span

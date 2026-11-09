@@ -1,14 +1,8 @@
+import { useWorkspace, type Workspace } from "../workspace";
 import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  decideChatSleepStrategy,
-  getChatSleep,
-  startChatSleep,
-  stopChatSleep,
-  turnOffChatSleep,
-  type SleepStatus,
-} from "../api";
+import { type SleepStatus } from "../api";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
@@ -16,9 +10,9 @@ import { Button, Input, Switch } from "./ui";
 import { EscapeScope } from "./EscapeScope";
 import { useDialogFocus } from "../features/fork/useDialogFocus";
 
-export const chatSleepQuery = (sessionId: string) => ({
-  queryKey: ["chat-sleep", sessionId] as const,
-  queryFn: ({ signal }: { signal: AbortSignal }) => getChatSleep(sessionId, signal),
+export const chatSleepQuery = (workspace: Workspace, sessionId: string) => ({
+  queryKey: workspace.workspaceKey("chat-sleep", sessionId),
+  queryFn: ({ signal }: { signal: AbortSignal }) => workspace.api.getChatSleep(sessionId, signal),
   refetchInterval: 30_000,
 });
 
@@ -52,9 +46,11 @@ const optionalNumber = (text: string) => {
 };
 
 export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
+  const workspace = useWorkspace();
+  const { decideChatSleepStrategy, startChatSleep, stopChatSleep, turnOffChatSleep } = workspace.api;
   const dialogRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
-  const { data: sleep } = useQuery(chatSleepQuery(sessionId));
+  const { data: sleep } = useQuery(chatSleepQuery(workspace, sessionId));
   const plan = sleep?.plan;
   const objective = plan?.objective;
   const hoursLeft = plan?.until ? Math.max(0, (plan.until - Date.now()) / 3_600_000) : null;
@@ -81,7 +77,7 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
     setError(null);
     try {
       const next = await action();
-      queryClient.setQueryData(chatSleepQuery(sessionId).queryKey, next);
+      queryClient.setQueryData(chatSleepQuery(workspace, sessionId).queryKey, next);
       if (close) onClose();
     } catch (cause) {
       setError(m.sleep_mode_failed({ error: cause instanceof Error ? cause.message : String(cause) }));

@@ -353,7 +353,7 @@ pub async fn status() -> Status {
 async fn cli_version(path: &Path) -> Option<String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        tokio::process::Command::new(path)
+        crate::process::tokio_command(path)
             .arg("version")
             .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
@@ -1231,7 +1231,7 @@ esac
             std::fs::create_dir_all(&source).unwrap();
             std::fs::write(source.join("hello.txt"), "hi\n").unwrap();
             let archive = tmp.path().join("0123456789abcdef.tar");
-            assert!(std::process::Command::new("tar")
+            assert!(crate::process::command("tar")
                 .arg("-cf")
                 .arg(&archive)
                 .arg("-C")
@@ -1271,7 +1271,7 @@ esac
                 .append(true)
                 .open(self.dir.join("log"))
                 .unwrap();
-            std::process::Command::new("bash")
+            crate::process::command("bash")
                 .arg(CONTROLLER_FILE)
                 .current_dir(&self.dir)
                 .env("FAKE_ROOT", &self.root)

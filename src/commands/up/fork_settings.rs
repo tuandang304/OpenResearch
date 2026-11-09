@@ -171,9 +171,8 @@ async fn delegation_policy_settings() -> ApiResult {
         .map_err(|e| ApiError::from(anyhow!("sub-agent limits task failed: {e}")))?
 }
 
-/// Replaces the whole policy. Read fresh on every `orx agent spawn`; the
-/// playbook and Claude Code's subagent model follow at each session's next
-/// playbook rewrite or CLI restart.
+/// Replaces the whole policy. The playbook and Claude Code's subagent model
+/// follow at each session's next playbook rewrite or CLI restart.
 async fn set_delegation_policy_settings(
     Json(policy): Json<crate::local::delegation::DelegationPolicy>,
 ) -> ApiResult {

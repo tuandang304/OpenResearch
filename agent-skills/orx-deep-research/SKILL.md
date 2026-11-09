@@ -7,8 +7,8 @@ description: "Coordinate multi-source research and a substantial cited report wi
 
 Act as the coordinator: define the question, partition the work, track evidence
 coverage, and deliver a verified narrative report in the user's language. In
-an OpenResearch session, use `orx agent spawn` for independent researchers and
-one writer. Prefer multiple available harnesses and model vendors; do not assume
+an OpenResearch session, use the orx MCP server's `delegate` tool for independent
+researchers and one writer. Prefer multiple available harnesses and model vendors; do not assume
 that a particular CLI, model, provider, or native Agent/Task tool is available.
 
 This workflow permits delegation of distinct literature subtopics. It is the
@@ -44,15 +44,9 @@ reading the final report or verifying its claims.
 
 ## Harness selection and bounded parallel work
 
-Read `orx-agent-delegation` for the installed command contract, then run:
-
-```sh
-orx agent harnesses --json
-```
-
-Use `installed: true` harnesses; `installed: null` means unknown, not available.
-For independent review, honor `review: true` and the user's permitted model
-choices. Prefer a vendor different from the coordinator's when one is allowed;
+Read `orx-agent-delegation` for the delegation contract, then call the
+`models` tool to see which models and harnesses are available. For independent
+review, honor the cross-harness and sub-agent limits in the session playbook. Prefer a vendor different from the coordinator's when one is allowed;
 OpenCode and Cursor take their vendor from the selected model, not their name.
 Do not install harnesses, change credentials, enable disabled review targets,
 or invent model identifiers. If only one usable harness exists, state that
@@ -61,17 +55,15 @@ constraint once and continue. Do not claim independent vendors without evidence.
 Assign 2–3 complementary subtopics for a typical broad request, fewer when one
 researcher suffices. Separate primary evidence, opposing evidence/limitations,
 and practical implications where appropriate. Use more only for real coverage
-needs; OpenResearch permits at most five live helpers per parent and forbids
-helpers spawning helpers. Queue larger coverage in batches. User-specified
+needs; keep helpers from delegating further. Queue larger coverage in batches. User-specified
 budgets and tool concurrency limits take precedence.
 
-Launch independent assignments before waiting for completion. OpenResearch
-spawns are asynchronous: keep the returned session ids and use the normal
-completion wakeups. A successful spawn means accepted, not research completed.
-Use the actual harness id returned by discovery, for example:
+Launch independent assignments before waiting for completion. `delegate`
+returns at once and each answer arrives as a new message; a successful call
+means accepted, not research completed. Name a model returned by `models`, give
+each researcher `worktree: "own"`, and use a task like:
 
-```sh
-orx agent spawn --harness codex --title "Evidence on the main claim" --stdin <<'TASK'
+```text
 Research the assigned subtopic only.
 First read: orx skill deep-research/references/researcher.md
 Objective and key questions: [complete self-contained assignment]
@@ -80,19 +72,16 @@ Project and relevant evidence: [absolute paths and run/experiment identifiers]
 Save notes to: [absolute unique topic notes path]
 Do not launch experiments, provision compute, publish, or modify experiment branches.
 Return the notes path, key findings, unresolved gaps, and actual harness/model.
-TASK
 ```
 
-Fill every bracketed field before use. Quote paths and use a quoted heredoc so
-prompt text is not shell code. Give each helper one output filename and no
+Fill every bracketed field before use. Give each helper one output filename and no
 shared file to edit. Researchers load [references/researcher.md](references/researcher.md),
 available through `orx skill deep-research/references/researcher.md` when the
 installed skill path is unknown. A child must do its own task and report gaps;
 only the coordinator dispatches more work.
 
 Outside an OpenResearch session, use a real native spawn tool if available,
-with the same bounded briefs and absolute file ownership. Do not call
-`orx agent spawn` outside its supported session context. If no delegation tool
+with the same bounded briefs and absolute file ownership. If no delegation tool
 works, research and write directly using the role references and disclose the
 single-agent fallback; do not block delivery or fabricate helper outputs.
 

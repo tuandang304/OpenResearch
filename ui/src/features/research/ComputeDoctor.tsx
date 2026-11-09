@@ -1,17 +1,18 @@
+import { useWorkspace } from "../../workspace";
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { CheckCircle2, CircleX, Stethoscope } from "lucide-react";
 import { m } from "../../paraglide/messages.js";
-import { getComputeSettingsQuery } from "../../queries/settings";
 import { TARGET_LABELS } from "../../computeTargets";
 import { BackendLogo } from "../../components/BackendLogos";
 import { SETTINGS_CARD_CLASS_NAME, TARGET_KIND } from "../../components/SettingsPage";
 import { Badge, Button, Spinner } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
-import { diagnoseCompute } from "./api";
 import type { ComputeTargetId } from "../../api";
 
 export function ComputeDoctor() {
+  const { getComputeSettingsQuery } = useWorkspace().queries;
+  const { diagnoseCompute } = useWorkspace().api;
   const settings = useQuery(getComputeSettingsQuery());
   const [backend, setBackend] = useState<ComputeTargetId>("colab");
   const probe = useMutation({ mutationFn: diagnoseCompute });

@@ -81,7 +81,6 @@ is available to new agent sessions and through:
 orx skill deep-research
 orx skill deep-research/references/researcher.md
 orx skill deep-research/references/report-writer.md
-orx agent harnesses --json
 ```
 
 Use `/deep-research` in a session that supports skill commands, or ask the agent

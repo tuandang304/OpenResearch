@@ -1,6 +1,5 @@
 // Colab, Google Cloud and Kaggle settings API, owned by the tuandang304 fork.
-// Re-exported from api.ts so callers import from one place; see docs/fork-maintenance.md.
-import { get, post } from "../../api";
+// Re-exported from api.ts and spread into each workspace's API; see docs/fork-maintenance.md.
 
 export interface ColabAccelerator {
   id: string;
@@ -124,8 +123,6 @@ export interface GcpSettings {
   gpus: { id: string; label: string; vramGb: number; usdPerHour: number }[];
 }
 
-export const getGcpSettings = (signal?: AbortSignal) => get<GcpSettings>("/api/settings/gcp", signal);
-
 export type GcpSettingsUpdate = {
   project?: string;
   zone?: string;
@@ -134,40 +131,6 @@ export type GcpSettingsUpdate = {
   clearCredit?: boolean;
   billingExportTable?: string;
 };
-
-export const saveGcpSettings = (update: GcpSettingsUpdate) =>
-  post<GcpSettings>("/api/settings/gcp", update);
-
-export const stopGcpInstance = (zone: string, name: string) =>
-  post<{ ok: true }>("/api/settings/gcp/instances/stop", { zone, name });
-
-export const getColabSettings = (signal?: AbortSignal, fresh = false) =>
-  get<ColabSettings>(fresh ? "/api/settings/colab?fresh=true" : "/api/settings/colab", signal);
-
-export const stopColabRuntime = (endpoint: string, account?: string) =>
-  post<{ ok: true }>("/api/settings/colab/runtimes/stop", { endpoint, account });
-
-/** Starts the Colab CLI's sign-in for a new account; `url` is Google's page. */
-export const startColabLogin = () =>
-  post<{ id: string; url: string }>("/api/settings/colab/accounts/login", {});
-
-export const finishColabLogin = (id: string, code: string) =>
-  post<ColabSettings>("/api/settings/colab/accounts/login/finish", { id, code });
-
-export const cancelColabLogin = (id: string) =>
-  post<{ ok: true }>("/api/settings/colab/accounts/login/cancel", { id });
-
-export const importColabAccount = () =>
-  post<ColabSettings>("/api/settings/colab/accounts/import", {});
-
-export const setColabActiveAccount = (account: string) =>
-  post<ColabSettings>("/api/settings/colab/accounts/active", { account });
-
-export const pauseColabAccount = (account: string, paused: boolean) =>
-  post<ColabSettings>("/api/settings/colab/accounts/pause", { account, paused });
-
-export const removeColabAccount = (account: string) =>
-  post<ColabSettings>("/api/settings/colab/accounts/remove", { account });
 
 export interface KaggleAccelerator {
   id: string;
@@ -229,21 +192,83 @@ export interface KaggleLiveKernel {
   url: string;
 }
 
-export const getKaggleLiveKernels = (signal?: AbortSignal, fresh = false) =>
-  get<{ kernels: KaggleLiveKernel[] }>(fresh ? "/api/settings/kaggle/kernels?fresh=true" : "/api/settings/kaggle/kernels", signal)
-    .then((r) => r.kernels);
+type Get = <T>(url: string, signal?: AbortSignal) => Promise<T>;
+type Post = <T>(url: string, body?: unknown) => Promise<T>;
 
-export const getKaggleSettings = (signal?: AbortSignal, fresh = false) =>
-  get<KaggleSettings>(fresh ? "/api/settings/kaggle?fresh=true" : "/api/settings/kaggle", signal);
+export function createForkComputeApi(get: Get, post: Post) {
+  const getGcpSettings = (signal?: AbortSignal) => get<GcpSettings>("/api/settings/gcp", signal);
 
-export const addKaggleAccount = (account: NewKaggleAccount) =>
-  post<KaggleSettings>("/api/settings/kaggle/accounts", account);
+  const saveGcpSettings = (update: GcpSettingsUpdate) =>
+    post<GcpSettings>("/api/settings/gcp", update);
 
-export const importKaggleAccount = () =>
-  post<KaggleSettings>("/api/settings/kaggle/accounts/import", {});
+  const stopGcpInstance = (zone: string, name: string) =>
+    post<{ ok: true }>("/api/settings/gcp/instances/stop", { zone, name });
 
-export const setKaggleActiveAccount = (username: string) =>
-  post<KaggleSettings>("/api/settings/kaggle/accounts/active", { username });
+  const getColabSettings = (signal?: AbortSignal, fresh = false) =>
+    get<ColabSettings>(fresh ? "/api/settings/colab?fresh=true" : "/api/settings/colab", signal);
 
-export const removeKaggleAccount = (username: string) =>
-  post<KaggleSettings>("/api/settings/kaggle/accounts/remove", { username });
+  const stopColabRuntime = (endpoint: string, account?: string) =>
+    post<{ ok: true }>("/api/settings/colab/runtimes/stop", { endpoint, account });
+
+  /** Starts the Colab CLI's sign-in for a new account; `url` is Google's page. */
+  const startColabLogin = () =>
+    post<{ id: string; url: string }>("/api/settings/colab/accounts/login", {});
+
+  const finishColabLogin = (id: string, code: string) =>
+    post<ColabSettings>("/api/settings/colab/accounts/login/finish", { id, code });
+
+  const cancelColabLogin = (id: string) =>
+    post<{ ok: true }>("/api/settings/colab/accounts/login/cancel", { id });
+
+  const importColabAccount = () =>
+    post<ColabSettings>("/api/settings/colab/accounts/import", {});
+
+  const setColabActiveAccount = (account: string) =>
+    post<ColabSettings>("/api/settings/colab/accounts/active", { account });
+
+  const pauseColabAccount = (account: string, paused: boolean) =>
+    post<ColabSettings>("/api/settings/colab/accounts/pause", { account, paused });
+
+  const removeColabAccount = (account: string) =>
+    post<ColabSettings>("/api/settings/colab/accounts/remove", { account });
+
+  const getKaggleLiveKernels = (signal?: AbortSignal, fresh = false) =>
+    get<{ kernels: KaggleLiveKernel[] }>(fresh ? "/api/settings/kaggle/kernels?fresh=true" : "/api/settings/kaggle/kernels", signal)
+      .then((r) => r.kernels);
+
+  const getKaggleSettings = (signal?: AbortSignal, fresh = false) =>
+    get<KaggleSettings>(fresh ? "/api/settings/kaggle?fresh=true" : "/api/settings/kaggle", signal);
+
+  const addKaggleAccount = (account: NewKaggleAccount) =>
+    post<KaggleSettings>("/api/settings/kaggle/accounts", account);
+
+  const importKaggleAccount = () =>
+    post<KaggleSettings>("/api/settings/kaggle/accounts/import", {});
+
+  const setKaggleActiveAccount = (username: string) =>
+    post<KaggleSettings>("/api/settings/kaggle/accounts/active", { username });
+
+  const removeKaggleAccount = (username: string) =>
+    post<KaggleSettings>("/api/settings/kaggle/accounts/remove", { username });
+
+  return {
+    getGcpSettings,
+    saveGcpSettings,
+    stopGcpInstance,
+    getColabSettings,
+    stopColabRuntime,
+    startColabLogin,
+    finishColabLogin,
+    cancelColabLogin,
+    importColabAccount,
+    setColabActiveAccount,
+    pauseColabAccount,
+    removeColabAccount,
+    getKaggleLiveKernels,
+    getKaggleSettings,
+    addKaggleAccount,
+    importKaggleAccount,
+    setKaggleActiveAccount,
+    removeKaggleAccount,
+  };
+}

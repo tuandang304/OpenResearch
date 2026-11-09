@@ -143,8 +143,9 @@ pub(super) async fn run_gcp(
         "supervise {run_id}: watching Google Cloud VM {name} ({})",
         target.dest
     );
+    let locked = std::sync::Mutex::new(store);
     let watch = watch_ssh_job(
-        &store,
+        &locked,
         status_of(&stored)?,
         target,
         openresearch::run_dir(&run_id),
@@ -153,6 +154,9 @@ pub(super) async fn run_gcp(
         None,
     )
     .await;
+    let store = locked
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     teardown_gcp(&store, &project, &zone, &name, &run_id).await;
     watch?;
     Ok(())

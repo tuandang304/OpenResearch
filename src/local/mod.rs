@@ -10,6 +10,8 @@
 pub mod acp;
 pub mod agent_lifecycle;
 pub mod agent_skills;
+#[cfg(test)]
+mod agent_text;
 pub mod auto_compact;
 pub mod autonomy;
 pub mod bash;
@@ -36,6 +38,7 @@ pub mod local_models;
 pub mod localrun;
 pub mod modal;
 pub mod model;
+pub mod model_routes;
 pub mod native_chats;
 pub mod native_store;
 pub mod opencode;
@@ -47,6 +50,7 @@ pub mod projects;
 pub mod ray;
 pub mod remote_cleanup;
 pub mod resolve;
+pub mod share;
 pub mod shell_env;
 pub mod skills;
 pub mod sleep;
@@ -136,33 +140,19 @@ pub const FLAVORED_BACKENDS: &[&str] = &[
 /// about these when they're the default with no saved flavor.
 pub const FLAVOR_REQUIRED_BACKENDS: &[&str] = &["hf", "modal", "openresearch"];
 
-#[cfg(test)]
-pub(crate) fn assert_agent_guidance_is_ui_agnostic(label: &str, guidance: &str) {
-    let guidance = guidance.to_lowercase();
-    for phrase in [
-        "git tab",
-        "settings →",
-        "orx up settings",
-        "hugging face section",
-        "artifacts tab",
-        "dashboard artifacts",
-        "dashboard's",
-        "dashboard injects",
-        "invisible to the dashboard",
-        "visible in the dashboard",
-        "chat ui",
-        "plan card",
-        "file viewer",
-        "web ui",
-        "\"test\" button",
-        "cancel from web",
-        "cancel from the web",
-    ] {
-        assert!(
-            !guidance.contains(phrase),
-            "{label} contains UI navigation: {phrase}"
-        );
-    }
+/// The `or_run` / `or_experiment` / `or_project` labels provider jobs carry.
+pub fn run_labels(
+    experiment_id: &str,
+    run_id: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let experiment = crate::store::Store::open()?
+        .get_local_experiment(experiment_id)?
+        .ok_or_else(|| anyhow!("Local experiment {experiment_id} not found."))?;
+    Ok(std::collections::HashMap::from([
+        ("or_run".to_string(), run_id.to_string()),
+        ("or_experiment".to_string(), experiment.id),
+        ("or_project".to_string(), experiment.project_id),
+    ]))
 }
 
 /// Fill a local-mode launch's backend/flavor from the persisted default

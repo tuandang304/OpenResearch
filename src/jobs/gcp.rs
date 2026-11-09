@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::process::Command;
 
 use crate::error::{anyhow, Result};
 
@@ -130,7 +129,7 @@ impl GcloudFailure {
 /// Run gcloud non-interactively and return its stdout, or its raw stderr.
 async fn run_gcloud(args: &[String]) -> std::result::Result<String, GcloudFailure> {
     let cli = find_cli().ok_or_else(|| GcloudFailure::Setup(anyhow!("{INSTALL_HINT}")))?;
-    let mut command = Command::new(cli);
+    let mut command = crate::process::tokio_command(cli);
     command
         .args(args)
         .arg("--quiet")
@@ -1013,7 +1012,7 @@ pub async fn ensure_ssh_key() -> Result<String> {
         if let Some(parent) = key.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let status = Command::new("ssh-keygen")
+        let status = crate::process::tokio_command("ssh-keygen")
             .args([
                 "-t", "rsa", "-b", "3072", "-N", "", "-q", "-C", SSH_USER, "-f",
             ])

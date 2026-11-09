@@ -1,44 +1,30 @@
-import { AppMenuBridge } from "./components/AppMenuBridge";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { queryClient } from "./queries/client";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { RouterProvider } from "@tanstack/react-router";
-import { HotkeysProvider } from "@tanstack/react-hotkeys";
-import { appHotkeys } from "./hotkeys";
-import { router } from "./router";
-import { DialogManager } from "./dialog";
-import { Toaster } from "./components/ui";
-import { DesktopZoomControls } from "./components/DesktopZoomControls";
-import { QueryDevtools } from "./components/QueryDevtools";
-import { WindowControls } from "./components/WindowControls";
-import { WINDOWS_TITLEBAR } from "./desktopTitlebar";
+import { AppRoot } from "./AppRoot";
 import { getLocale } from "./paraglide/runtime.js";
 import { loadLocaleMessages } from "virtual:paraglide-locales";
 import "./tailwind.css";
-
-// openresearch:// links opened in the desktop app; see the Opened handler in src/commands/app.rs.
-window.addEventListener("orx:open-path", (event) => {
-  if (event instanceof CustomEvent && typeof event.detail === "string") void router.navigate({ href: event.detail });
-});
 
 const locale = getLocale();
 document.documentElement.lang = locale;
 document.documentElement.dir = "ltr";
 
+// A plain-HTTP LAN origin (`orx up --host 0.0.0.0`) is not a secure context, which has no randomUUID.
+if (!("randomUUID" in crypto)) {
+  Object.defineProperty(crypto, "randomUUID", {
+    value: () => {
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    },
+  });
+}
+
 // Builds ship only the base locale up front; load the active one before the first render.
 void loadLocaleMessages(locale).catch(() => {}).then(() => createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <HotkeysProvider appHotkeys={appHotkeys}>
-        {"__ORX_DESKTOP__" in window && <AppMenuBridge />}
-        <RouterProvider router={router} />
-        <DialogManager />
-        {WINDOWS_TITLEBAR && <WindowControls />}
-      </HotkeysProvider>
-      {import.meta.env.DEV && <QueryDevtools />}
-    </QueryClientProvider>
-    <Toaster />
-    {"__ORX_DESKTOP__" in window && <DesktopZoomControls />}
+    <AppRoot />
   </StrictMode>,
 ));

@@ -12,27 +12,6 @@ use crate::store::{now_ms, Store, StoredRun};
 /// The flavor a launch without `--flavor` gets: the cheapest GPU.
 pub const DEFAULT_FLAVOR: &str = "t4";
 
-/// CLI wrapper: submit, then print the summary.
-pub async fn launch_local_gcp(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = crate::compute::submit(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} Google Cloud VM requested.");
-    println!("  flavor  {}", backend.flavor.as_deref().unwrap_or(""));
-    println!(
-        "  vm      {} ({}, {})",
-        backend.job_id.as_deref().unwrap_or(""),
-        backend.namespace.as_deref().unwrap_or(""),
-        backend.context.as_deref().unwrap_or("")
-    );
-    println!("  run     {}", run.id);
-    println!("  The VM is starting; the supervisor launches the run once it is up and deletes the VM when the run ends.");
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
-}
-
 pub async fn submit_local_gcp_with_source(
     args: &crate::ExpRunArgs,
     source: SourceSnapshot,
@@ -114,6 +93,7 @@ pub async fn submit_local_gcp_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        unknown: Default::default(),
     };
     source.apply_to_descriptor(&mut descriptor);
     // Create in a zone that actually offers the GPU, moving on when one is out

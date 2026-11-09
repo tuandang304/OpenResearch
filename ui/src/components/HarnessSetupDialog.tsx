@@ -1,8 +1,9 @@
+import { useWorkspace } from "../workspace";
 import type { DialogContentProps } from "../dialog";
 import { useEffect, useRef, useState } from "react";
 import type { Harness, HarnessSetupCommands } from "../api";
 import { m } from "../paraglide/messages.js";
-import { readHarnesses, refreshHarnesses } from "../queries/settings";
+
 import { HarnessLogo } from "./HarnessLogo";
 import { initialPhase, recheckedAction, setupAction, type SetupAction, type SetupPhase } from "./harnessSetupState";
 import { renderNote } from "./agentNote";
@@ -18,6 +19,8 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
   onAuth?: (harness: Harness) => void;
   onBack?: () => void;
 }) {
+  const { refreshHarnesses, readHarnesses } = useWorkspace().queries;
+
   const cancelled = useRef(false);
   if (isDisabled) cancelled.current = true;
   const [action, setAction] = useState<SetupAction>(() => setupAction(harness));
