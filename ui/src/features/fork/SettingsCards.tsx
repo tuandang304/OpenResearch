@@ -18,7 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { fmtNumber, type ComputeTargetId, type ComputeTargetSummary, type Harness, type HarnessFailover, type HarnessAccount, type HarnessAccounts, type HarnessPoolLimit, type HarnessPoolStatus, type HarnessId, type DecisionModelSettings, type GcpSettings, type GcpSettingsUpdate, type DelegationPolicy, type DelegationRule, type OptionChoice, harnessModelLabel, modelLabel, reasoningFor, fmtTokens } from "../../api";
+import { fmtNumber, type ComputeTargetId, type ComputeTargetSummary, type Harness, type HarnessFailover, type HarnessAccount, type HarnessAccounts, type HarnessPoolLimit, type HarnessPoolStatus, type HarnessId, type DecisionModelSettings, type CheckpointSettings, type GcpSettings, type GcpSettingsUpdate, type DelegationPolicy, type DelegationRule, type OptionChoice, harnessModelLabel, modelLabel, reasoningFor, fmtTokens } from "../../api";
 import { m } from "../../paraglide/messages.js";
 import { fmtUnits } from "../../features/fork/ComputeSections";
 import { ltr } from "../../i18n";
@@ -701,6 +701,115 @@ export function ComputeRoutingCard({ targets }: { targets: ComputeTargetSummary[
       )}
       {enabled && usable.length < 2 && <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_compute_routing_needs_two()}</p>}
       {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+/** Where Google Cloud and Modal runs save `$ORX_CHECKPOINT_DIR`: an rclone remote such as
+ * Google Drive, so checkpoints outlive the machine. */
+export function CheckpointStorageCard() {
+  const { setScopedQueryData } = useWorkspace();
+  const { getCheckpointSettingsQuery } = useWorkspace().queries;
+  const { saveCheckpointSettings } = useWorkspace().api;
+  const options = getCheckpointSettingsQuery();
+  const query = useQuery(options);
+  const data: CheckpointSettings | undefined = query.data;
+  const [remote, setRemote] = useState("");
+  const [interval, setIntervalMinutes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!data) return;
+    setRemote(data.enabled ? data.remote : "");
+    setIntervalMinutes(data.enabled ? String(data.intervalMinutes) : "");
+  }, [data]);
+
+  async function save(nextRemote: string) {
+    setSaving(true);
+    setError(null);
+    try {
+      const minutes = Number(interval);
+      const next = await saveCheckpointSettings(
+        nextRemote,
+        interval.trim() && Number.isFinite(minutes) ? minutes : undefined,
+      );
+      setScopedQueryData(options.queryKey, () => next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const unchanged =
+    data?.enabled === true
+      ? remote.trim() === data.remote && interval === String(data.intervalMinutes)
+      : !remote.trim();
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "mb-8")}>
+      <div className="flex items-start justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_checkpoints_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_checkpoints_description()}</p>
+        </div>
+        {data && (
+          <Badge variant={data.enabled ? (data.error ? "warning" : "success") : "default"}>
+            {data.enabled ? m.settings_checkpoints_on() : m.settings_checkpoints_off()}
+          </Badge>
+        )}
+      </div>
+      {query.isPending ? (
+        <LoadingRow>
+          <Spinner /> {m.common_checking()}
+        </LoadingRow>
+      ) : (
+        <>
+          <form
+            className="mt-3 flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void save(remote);
+            }}
+          >
+            <label className="flex min-w-48 flex-[2] flex-col gap-1 text-sm">
+              {m.settings_checkpoints_remote_label()}
+              <Input
+                type="text"
+                value={remote}
+                onChange={(event) => setRemote(event.target.value)}
+                placeholder="gdrive:openresearch"
+                autoComplete="off"
+                spellCheck={false}
+                dir="ltr"
+              />
+            </label>
+            <label className="flex w-36 flex-col gap-1 text-sm">
+              {m.settings_checkpoints_interval_label()}
+              <Input
+                type="number"
+                min="1"
+                max="1440"
+                inputMode="numeric"
+                value={interval}
+                onChange={(event) => setIntervalMinutes(event.target.value)}
+                placeholder="10"
+              />
+            </label>
+            <Button type="submit" disabled={saving || !remote.trim() || unchanged}>
+              {m.common_save()}
+            </Button>
+            {data?.enabled && (
+              <Button type="button" variant="ghost" disabled={saving} onClick={() => void save("")}>
+                {m.settings_checkpoints_turn_off()}
+              </Button>
+            )}
+          </form>
+          <p className="mt-1.5 mb-0 text-sm text-subtext">{m.settings_checkpoints_hint()}</p>
+          {data?.enabled && data.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{data.error}</p>}
+        </>
+      )}
+      {(error ?? query.error?.message) && <div className="error">{error ?? query.error?.message}</div>}
     </div>
   );
 }

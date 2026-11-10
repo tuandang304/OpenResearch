@@ -219,6 +219,12 @@ pub enum ComputeCommand {
         #[command(subcommand)]
         command: SshConfigCommand,
     },
+    /// Where Google Cloud and Modal runs save `$ORX_CHECKPOINT_DIR` (an rclone remote such as
+    /// Google Drive), so checkpoints outlive the machine.
+    Checkpoints {
+        #[command(subcommand)]
+        command: CheckpointsCommand,
+    },
     /// Machine-wide, user-owned compute guidance.
     Instructions {
         #[command(subcommand)]
@@ -359,6 +365,23 @@ pub enum SshConfigCommand {
         #[arg(long)]
         previous_file: String,
     },
+}
+#[derive(Debug, Subcommand)]
+pub enum CheckpointsCommand {
+    Show,
+    /// Save checkpoints to an rclone remote and folder, such as gdrive:openresearch. Add the
+    /// remote first with `rclone config`.
+    Set {
+        remote: String,
+        /// Minutes between syncs while a run is going (default 10).
+        #[arg(long)]
+        interval: Option<u64>,
+        /// The rclone config file holding the remote; rclone's default otherwise.
+        #[arg(long)]
+        rclone_config: Option<std::path::PathBuf>,
+    },
+    /// Stop saving checkpoints; files already saved stay where they are.
+    Clear,
 }
 #[derive(Debug, Subcommand)]
 pub enum InstructionsCommand {
@@ -624,6 +647,21 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
                 settings::write_ssh_config(read_input(&file)?, read_input(&previous_file)?).await?
             }
         },
+        ComputeCommand::Checkpoints { command } => {
+            use crate::jobs::checkpoints;
+            match command {
+                CheckpointsCommand::Show => {}
+                CheckpointsCommand::Set {
+                    remote,
+                    interval,
+                    rclone_config,
+                } => {
+                    checkpoints::save_settings(&remote, interval, rclone_config)?;
+                }
+                CheckpointsCommand::Clear => checkpoints::clear_settings()?,
+            }
+            checkpoints::describe(checkpoints::load_settings()?.as_ref())
+        }
         ComputeCommand::Instructions { command } => {
             let path = instructions_path();
             match command {

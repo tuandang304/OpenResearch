@@ -46,6 +46,10 @@ pub(super) fn routes() -> Router<AppState> {
             get(gcp_settings).post(set_gcp_settings),
         )
         .route("/api/settings/gcp/instances/stop", post(stop_gcp_instance))
+        .route(
+            "/api/settings/checkpoints",
+            get(checkpoint_settings).post(set_checkpoint_settings),
+        )
         .route("/api/settings/kaggle", get(kaggle_settings))
         .route("/api/settings/kaggle/accounts", post(add_kaggle_account))
         .route("/api/settings/kaggle/kernels", get(kaggle_live_kernels))
@@ -481,4 +485,36 @@ pub(super) async fn stop_gcp_instance(Json(req): Json<StopGcpInstanceReq>) -> Ap
         .await
         .map_err(|e| ApiError::from(anyhow!("{e}")))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+pub(super) async fn checkpoint_settings() -> ApiResult {
+    let settings = crate::jobs::checkpoints::load_settings().map_err(ApiError::from)?;
+    Ok(Json(crate::jobs::checkpoints::describe(settings.as_ref())))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetCheckpointSettingsReq {
+    /// An rclone remote and folder; `""` turns checkpoint storage off.
+    remote: String,
+    interval_minutes: Option<u64>,
+}
+
+pub(super) async fn set_checkpoint_settings(
+    Json(req): Json<SetCheckpointSettingsReq>,
+) -> ApiResult {
+    use crate::jobs::checkpoints;
+    if req.remote.trim().is_empty() {
+        checkpoints::clear_settings().map_err(ApiError::from)?;
+    } else {
+        // Keep the config file found when the remote was first saved, which may have come
+        // from the CLI's `RCLONE_CONFIG`.
+        let config = checkpoints::load_settings()
+            .ok()
+            .flatten()
+            .and_then(|saved| saved.rclone_config);
+        checkpoints::save_settings(&req.remote, req.interval_minutes, config)
+            .map_err(bad_request)?;
+    }
+    checkpoint_settings().await
 }

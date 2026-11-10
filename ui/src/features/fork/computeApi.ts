@@ -192,6 +192,19 @@ export interface KaggleLiveKernel {
   url: string;
 }
 
+/** Where Google Cloud and Modal runs save `$ORX_CHECKPOINT_DIR`. */
+export type CheckpointSettings =
+  | { enabled: false }
+  | {
+      enabled: true;
+      /** An rclone remote and folder, such as `gdrive:openresearch`. */
+      remote: string;
+      intervalMinutes: number;
+      rcloneConfig: string | null;
+      /** Why runs could not use the remote now, such as a remote missing from the config. */
+      error: string | null;
+    };
+
 type Get = <T>(url: string, signal?: AbortSignal) => Promise<T>;
 type Post = <T>(url: string, body?: unknown) => Promise<T>;
 
@@ -203,6 +216,13 @@ export function createForkComputeApi(get: Get, post: Post) {
 
   const stopGcpInstance = (zone: string, name: string) =>
     post<{ ok: true }>("/api/settings/gcp/instances/stop", { zone, name });
+
+  const getCheckpointSettings = (signal?: AbortSignal) =>
+    get<CheckpointSettings>("/api/settings/checkpoints", signal);
+
+  /** An empty `remote` turns checkpoint storage off. */
+  const saveCheckpointSettings = (remote: string, intervalMinutes?: number) =>
+    post<CheckpointSettings>("/api/settings/checkpoints", { remote, intervalMinutes });
 
   const getColabSettings = (signal?: AbortSignal, fresh = false) =>
     get<ColabSettings>(fresh ? "/api/settings/colab?fresh=true" : "/api/settings/colab", signal);
@@ -255,6 +275,8 @@ export function createForkComputeApi(get: Get, post: Post) {
     getGcpSettings,
     saveGcpSettings,
     stopGcpInstance,
+    getCheckpointSettings,
+    saveCheckpointSettings,
     getColabSettings,
     stopColabRuntime,
     startColabLogin,

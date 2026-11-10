@@ -140,6 +140,16 @@ The engine imports each 0.2.x wake-up once, including ones accepted after a down
 
 A run's results are what its command prints to the run log and what it logs to Trackio (`src/local/trackio.rs`); agents read metrics through `orx metrics`. Figures and reports land in the artifacts folder, and the run's commit ties each number to its code. orx adds no interpretation of its own.
 
+### Checkpoints
+
+Google Cloud VMs and Modal Sandboxes are deleted with the run, so files a run writes to `$ORX_CHECKPOINT_DIR` would go with them. When the user has saved an rclone remote such as Google Drive (`src/jobs/checkpoints.rs`), the run's script wraps the payload:
+
+- **Restore first.** The experiment's folder, `<remote>/<project>/<experiment>`, is copied into `$ORX_CHECKPOINT_DIR` before the payload starts, so a rerun resumes. A missing folder is a fresh start; any other failure stops the run before training, since its checkpoints would have nowhere to go.
+- **Sync while it runs, then once more.** A background copy runs on the saved interval, and a final copy with bounded retries runs after the payload exits, keeping its exit code. On Google Cloud the final copy runs outside the run's timeout. Cancel, a Sandbox timeout or a reclaimed Spot VM keep only the last periodic sync. Copies never delete files at the remote.
+- **Credentials at launch.** The remote's rclone config section is read when the run launches and travels as environment variables, never in a stored launch intent. A saved remote that cannot be read rejects the launch.
+
+The machine installs a pinned rclone when its image has none.
+
 ## Managed rentals
 
 A run on an OpenResearch box rents a machine through openresearch.sh for that run alone. **The laptop sleeping, losing its network or quitting never decides when billing stops.** With the engine on, a box is an `orx-host` root like an SSH host, staged through the same transport, with the same receipts and log collection ([remote](remote.md)); billing duty is the one addition.

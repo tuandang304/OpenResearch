@@ -5,6 +5,7 @@
 //! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
 //! is the serialized handle a later supervisor uses to reattach.
 
+pub mod checkpoints;
 pub mod colab;
 pub mod colab_account;
 pub mod colab_accounts;
