@@ -1561,7 +1561,7 @@
   "settings_failover_move_down": "Đưa {name} xuống",
   "settings_failover_include": "Dùng {name} làm dự phòng",
   "settings_decision_title": "Mô hình ra quyết định",
-  "settings_decision_description": "Một mô hình OpenAI chọn tài khoản cho một lượt khi tài khoản hiện tại sắp hết hạn mức, chọn harness để chuyển sang, và chọn nơi chạy công việc mới từ orx agent route, để hạn mức của các harness dùng được lâu hơn. Khi tắt, không có khóa hoặc bị lỗi, OpenResearch chỉ định tuyến theo hạn mức.",
+  "settings_decision_description": "Một mô hình OpenAI chọn tài khoản cho một lượt khi tài khoản hiện tại sắp hết hạn mức và chọn harness để chuyển sang, để hạn mức của các harness dùng được lâu hơn. Khi tắt, không có khóa hoặc bị lỗi, OpenResearch chỉ định tuyến theo hạn mức.",
   "settings_decision_needs_key": "Thêm OpenAI API key để bắt đầu định tuyến bằng mô hình ra quyết định.",
   "settings_decision_model_unavailable": "Khóa này không dùng được {model}. Hãy chọn mô hình khác hoặc kiểm tra quyền của project chứa khóa.",
   "settings_decision_env_override": "Biến môi trường ORX_DECISION_OPENAI_API_KEY ghi đè khóa đã lưu.",

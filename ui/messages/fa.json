@@ -1528,7 +1528,7 @@
   "settings_failover_move_down": "انتقال {name} به پایین",
   "settings_failover_include": "استفاده از {name} به‌عنوان جایگزین",
   "settings_decision_title": "مدل تصمیم",
-  "settings_decision_description": "یک مدل OpenAI که وقتی سهمیهٔ حساب کم می‌شود حساب نوبت را انتخاب می‌کند، harness جایگزین را برمی‌گزیند و تعیین می‌کند کار تازهٔ orx agent route کجا اجرا شود تا سهمیهٔ harnessها بیشتر دوام بیاورد. وقتی خاموش است، کلید ندارد یا خطا می‌دهد، OpenResearch فقط بر اساس سهمیه مسیر را تعیین می‌کند.",
+  "settings_decision_description": "یک مدل OpenAI که وقتی سهمیهٔ حساب کم می‌شود حساب نوبت را انتخاب می‌کند و harness جایگزین را برمی‌گزیند تا سهمیهٔ harnessها بیشتر دوام بیاورد. وقتی خاموش است، کلید ندارد یا خطا می‌دهد، OpenResearch فقط بر اساس سهمیه مسیر را تعیین می‌کند.",
   "settings_decision_needs_key": "برای مسیریابی با مدل تصمیم، یک کلید API از OpenAI اضافه کنید.",
   "settings_decision_model_unavailable": "این کلید نمی‌تواند از {model} استفاده کند. مدل دیگری انتخاب کنید یا دسترسی‌های پروژهٔ کلید را بررسی کنید.",
   "settings_decision_env_override": "متغیر محیطی ORX_DECISION_OPENAI_API_KEY بر کلید ذخیره‌شده اولویت دارد.",

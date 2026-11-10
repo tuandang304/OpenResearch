@@ -1559,7 +1559,7 @@
   "settings_failover_move_down": "{name} öğesini aşağı taşı",
   "settings_failover_include": "{name} öğesini yedek olarak kullan",
   "settings_decision_title": "Karar modeli",
-  "settings_decision_description": "Hesabı azaldığında bir tur için hesabı, geçilecek harness'i ve orx agent route ile gelen yeni işin nerede çalışacağını seçen bir OpenAI modeli; böylece harness'lerinizin kotası daha uzun dayanır. Kapalıyken, anahtar yokken veya başarısız olduğunda OpenResearch yalnızca kotaya göre yönlendirir.",
+  "settings_decision_description": "Hesabı azaldığında bir tur için hesabı ve geçilecek harness'i seçen bir OpenAI modeli; böylece harness'lerinizin kotası daha uzun dayanır. Kapalıyken, anahtar yokken veya başarısız olduğunda OpenResearch yalnızca kotaya göre yönlendirir.",
   "settings_decision_needs_key": "Karar modeliyle yönlendirmeye başlamak için bir OpenAI API anahtarı ekleyin.",
   "settings_decision_model_unavailable": "Bu anahtar {model} modelini kullanamaz. Başka bir model seçin veya anahtarın proje izinlerini denetleyin.",
   "settings_decision_env_override": "ORX_DECISION_OPENAI_API_KEY ortam değişkeni kayıtlı anahtarı geçersiz kılar.",

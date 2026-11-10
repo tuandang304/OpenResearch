@@ -1528,7 +1528,7 @@
   "settings_failover_move_down": "Przesuń {name} w dół",
   "settings_failover_include": "Używaj {name} jako zapasowego",
   "settings_decision_title": "Model decyzyjny",
-  "settings_decision_description": "Model OpenAI, który wybiera konto dla tury, gdy na jej koncie kończy się limit, harness do przełączenia oraz miejsce uruchomienia nowej pracy z orx agent route, aby limit Twoich harnessów starczał na dłużej. Gdy jest wyłączony, nie ma klucza lub zawiedzie, OpenResearch kieruje pracę wyłącznie według limitu.",
+  "settings_decision_description": "Model OpenAI, który wybiera konto dla tury, gdy na jej koncie kończy się limit, oraz harness do przełączenia, aby limit Twoich harnessów starczał na dłużej. Gdy jest wyłączony, nie ma klucza lub zawiedzie, OpenResearch kieruje pracę wyłącznie według limitu.",
   "settings_decision_needs_key": "Dodaj klucz API OpenAI, aby zacząć kierować pracę modelem decyzyjnym.",
   "settings_decision_model_unavailable": "Ten klucz nie może używać {model}. Wybierz inny model lub sprawdź uprawnienia projektu klucza.",
   "settings_decision_env_override": "Zmienna środowiskowa ORX_DECISION_OPENAI_API_KEY ma pierwszeństwo przed zapisanym kluczem.",

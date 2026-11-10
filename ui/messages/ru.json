@@ -1528,7 +1528,7 @@
   "settings_failover_move_down": "Переместить {name} ниже",
   "settings_failover_include": "Использовать {name} как резервный",
   "settings_decision_title": "Модель принятия решений",
-  "settings_decision_description": "Модель OpenAI, которая выбирает аккаунт для хода, когда у его аккаунта заканчивается квота, harness для переключения и место запуска новой работы из orx agent route, чтобы квоты ваших harness хватало дольше. Когда она выключена, нет ключа или она сбоит, OpenResearch распределяет только по квоте.",
+  "settings_decision_description": "Модель OpenAI, которая выбирает аккаунт для хода, когда у его аккаунта заканчивается квота, и harness для переключения, чтобы квоты ваших harness хватало дольше. Когда она выключена, нет ключа или она сбоит, OpenResearch распределяет только по квоте.",
   "settings_decision_needs_key": "Добавьте ключ OpenAI API, чтобы начать распределение с помощью модели принятия решений.",
   "settings_decision_model_unavailable": "Этот ключ не может использовать {model}. Выберите другую модель или проверьте права проекта ключа.",
   "settings_decision_env_override": "Переменная окружения ORX_DECISION_OPENAI_API_KEY переопределяет сохранённый ключ.",
