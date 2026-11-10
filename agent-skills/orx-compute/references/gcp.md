@@ -30,7 +30,8 @@ orx exp run <expId> --backend gcp --flavor n2-standard-16   # CPU only
   and each offer's `runwayHours` is how long it lasts. Treat it as an
   estimate; never launch a run that would outlast it.
 - Spot VMs cost far less but Google can reclaim them mid-run. When the user
-  has Spot on, a run must save checkpoints and resume from the latest one.
+  has Spot on, a run must save checkpoints to `$ORX_CHECKPOINT_DIR` and resume
+  from the latest one.
 - The VM runs a Deep Learning VM image with CUDA, Python, and the NVIDIA
   driver, which finishes installing on first boot; orx waits for it before the
   run starts. Install project dependencies from the lockfile in the run
@@ -38,7 +39,16 @@ orx exp run <expId> --backend gcp --flavor n2-standard-16   # CPU only
 - Timeout defaults to 4 hours. Compute Engine deletes the VM on its own one
   hour after the timeout even if orx cannot, and `orx up` deletes VMs whose run
   has ended. The VM and its disk disappear with the run, so all evidence must
-  reach the run log.
+  reach the run log or `$ORX_CHECKPOINT_DIR`.
+- `$ORX_CHECKPOINT_DIR` is where a run saves checkpoints. With checkpoint
+  storage on (`orx compute checkpoints show`), it syncs to the user's rclone
+  remote, such as Google Drive, every few minutes and when the run ends, even
+  after a timeout, and the next run of the same experiment starts with it
+  restored. Save checkpoints there, write each to a temporary name and rename
+  it when complete, and resume from the latest one found at start. With it
+  off, the run log says so and the folder dies with the VM; tell the user that
+  `orx compute checkpoints set <remote:folder>` keeps it. Only the user sets it
+  up, since it needs `rclone config` on their machine.
 - A GPU run starts in the configured zone when it offers that GPU; otherwise
   OpenResearch looks up the zones that do (`gcloud compute accelerator-types list`)
   and creates the VM in the nearest one, moving on to the next nearest when a

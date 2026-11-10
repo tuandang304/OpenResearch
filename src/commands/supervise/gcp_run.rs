@@ -78,10 +78,21 @@ pub(super) async fn run_gcp(
         if is_gpu {
             script = gcp::wait_for_gpu(&script);
         }
-        let script =
-            openresearch::wrap_with_timeout(&script, descriptor.timeout_secs.unwrap_or(4 * 3600));
+        // Outside the timeout, so checkpoints are still saved after the run is cut off.
+        let script = crate::jobs::checkpoints::wrap(&openresearch::wrap_with_timeout(
+            &script,
+            descriptor.timeout_secs.unwrap_or(4 * 3600),
+        ));
         let mut env: std::collections::HashMap<String, String> =
             crate::config::list_synced_env().into_iter().collect();
+        match crate::jobs::checkpoints::run_env(&run_id) {
+            Ok(checkpoint_env) => env.extend(checkpoint_env),
+            Err(error) => {
+                fail(format!("Checkpoint storage cannot be used: {error}"))?;
+                teardown_gcp(&store, &project, &zone, &name, &run_id).await;
+                return Ok(());
+            }
+        }
         if let Ok(hf_token) = hf::resolve_token() {
             env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
         }

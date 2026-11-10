@@ -23,5 +23,15 @@ orx exp run <expId> --backend modal --flavor cpu --image python:3.12
   adds `uv` to every image's PATH; an image's own `uv` on its PATH takes precedence.
 - `orx` copies the committed snapshot into the Sandbox; Modal never needs
   repository access.
+- `$ORX_CHECKPOINT_DIR` is where a run saves checkpoints. With checkpoint
+  storage on (`orx compute checkpoints show`), it syncs to the user's rclone
+  remote, such as Google Drive, every few minutes and when the run ends, and
+  the next run of the same experiment starts with it restored. A Sandbox cut
+  off by its timeout keeps only the last periodic sync. Save checkpoints there,
+  write each to a temporary name and rename it when complete, and resume from
+  the latest one found at start. With it off, the run log says so and the
+  folder dies with the Sandbox; tell the user that `orx compute checkpoints
+  set <remote:folder>` keeps it. Only the user sets it up, since it needs
+  `rclone config` on their machine.
 
 See [run monitoring](../SKILL.md#run-engine-setting).

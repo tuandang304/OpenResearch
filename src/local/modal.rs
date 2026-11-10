@@ -39,7 +39,10 @@ pub fn launch_spec(
         .clone()
         .unwrap_or_else(|| modal::default_image(resources.gpu.is_some()));
     let spec = modal::ModalJobSpec {
-        script: crate::compute::gated_script("/tmp/orx-source.tar", command),
+        script: crate::jobs::checkpoints::wrap(&crate::compute::gated_script(
+            "/tmp/orx-source.tar",
+            command,
+        )),
         image,
         gpu: resources.gpu,
         cpu: resources.cpu,
@@ -97,12 +100,16 @@ pub async fn submit_local_modal_with_source(
         .image
         .clone()
         .unwrap_or_else(|| modal::default_image(resources.gpu.is_some()));
-    let script = crate::compute::gated_script("/tmp/orx-source.tar", &run_command);
+    let script = crate::jobs::checkpoints::wrap(&crate::compute::gated_script(
+        "/tmp/orx-source.tar",
+        &run_command,
+    ));
 
     // The sandbox's env: everything the user synced (API keys), plus the tokens
     // the run script and common tooling expect. Rides an ephemeral Modal
     // Secret, never the plain env arg.
     let mut env = crate::config::run_env(&run_id);
+    env.extend(crate::jobs::checkpoints::run_env(&run_id)?);
     if let Ok(hf_token) = hf::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
