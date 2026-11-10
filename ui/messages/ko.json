@@ -1528,7 +1528,7 @@
   "settings_failover_move_down": "{name} 아래로 이동",
   "settings_failover_include": "{name}을(를) 대체 harness로 사용",
   "settings_decision_title": "결정 모델",
-  "settings_decision_description": "OpenAI 모델이 계정 할당량이 부족할 때 턴에 쓸 계정, 전환할 하네스, orx agent route로 새 작업을 실행할 위치를 골라 하네스 할당량을 더 오래 쓰게 합니다. 꺼져 있거나 키가 없거나 실패하면 OpenResearch가 할당량만으로 경로를 정합니다.",
+  "settings_decision_description": "OpenAI 모델이 계정 할당량이 부족할 때 턴에 쓸 계정과 전환할 하네스를 골라 하네스 할당량을 더 오래 쓰게 합니다. 꺼져 있거나 키가 없거나 실패하면 OpenResearch가 할당량만으로 경로를 정합니다.",
   "settings_decision_needs_key": "결정 모델로 경로를 정하려면 OpenAI API 키를 추가하세요.",
   "settings_decision_model_unavailable": "이 키로는 {model}을(를) 사용할 수 없습니다. 다른 모델을 고르거나 키의 프로젝트 권한을 확인하세요.",
   "settings_decision_env_override": "ORX_DECISION_OPENAI_API_KEY 환경 변수가 저장된 키보다 우선합니다.",

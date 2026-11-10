@@ -1528,7 +1528,7 @@
   "settings_failover_move_down": "{name} を下へ移動",
   "settings_failover_include": "{name} を切り替え先として使う",
   "settings_decision_title": "判断モデル",
-  "settings_decision_description": "OpenAI のモデルが、アカウントの残りクォータが少ないときのターンのアカウント、切り替え先のハーネス、orx agent route で新しい作業を実行する場所を選び、ハーネスのクォータを長持ちさせます。オフ、キーなし、または失敗した場合は、OpenResearch がクォータだけで振り分けます。",
+  "settings_decision_description": "OpenAI のモデルが、アカウントの残りクォータが少ないときのターンのアカウントと切り替え先のハーネスを選び、ハーネスのクォータを長持ちさせます。オフ、キーなし、または失敗した場合は、OpenResearch がクォータだけで振り分けます。",
   "settings_decision_needs_key": "判断モデルで振り分けるには OpenAI API キーを追加してください。",
   "settings_decision_model_unavailable": "このキーでは {model} を使えません。別のモデルを選ぶか、キーのプロジェクト権限を確認してください。",
   "settings_decision_env_override": "環境変数 ORX_DECISION_OPENAI_API_KEY が保存済みのキーより優先されます。",

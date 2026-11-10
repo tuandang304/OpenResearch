@@ -1528,7 +1528,7 @@
   "settings_failover_move_down": "نقل {name} لأسفل",
   "settings_failover_include": "استخدام {name} كبديل",
   "settings_decision_title": "نموذج القرار",
-  "settings_decision_description": "نموذج من OpenAI يختار الحساب للدور عندما تنخفض حصة حسابه، والـ harness الذي يُنتقل إليه، ومكان تشغيل العمل الجديد من orx agent route، لتدوم حصة الـ harnesses لديك أطول. عندما يكون متوقفًا أو بلا مفتاح أو يفشل، يوزّع OpenResearch حسب الحصة وحدها.",
+  "settings_decision_description": "نموذج من OpenAI يختار الحساب للدور عندما تنخفض حصة حسابه، والـ harness الذي يُنتقل إليه، لتدوم حصة الـ harnesses لديك أطول. عندما يكون متوقفًا أو بلا مفتاح أو يفشل، يوزّع OpenResearch حسب الحصة وحدها.",
   "settings_decision_needs_key": "أضف مفتاح OpenAI API لبدء التوجيه بنموذج القرار.",
   "settings_decision_model_unavailable": "لا يمكن لهذا المفتاح استخدام {model}. اختر نموذجًا آخر أو تحقّق من صلاحيات مشروع المفتاح.",
   "settings_decision_env_override": "متغير البيئة ORX_DECISION_OPENAI_API_KEY يتقدّم على المفتاح المحفوظ.",

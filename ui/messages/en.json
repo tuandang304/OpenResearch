@@ -1528,7 +1528,7 @@
   "settings_failover_move_down": "Move {name} down",
   "settings_failover_include": "Use {name} as a fallback",
   "settings_decision_title": "Decision model",
-  "settings_decision_description": "An OpenAI model that picks the account for a turn when its account runs low, the harness to fail over to, and where new work from orx agent route should run, so your harnesses' quota lasts longer. When it is off, has no key, or fails, OpenResearch routes by quota alone.",
+  "settings_decision_description": "An OpenAI model that picks the account for a turn when its account runs low, and the harness to fail over to, so your harnesses' quota lasts longer. When it is off, has no key, or fails, OpenResearch routes by quota alone.",
   "settings_decision_needs_key": "Add an OpenAI API key to start routing with the decision model.",
   "settings_decision_model_unavailable": "This key cannot use {model}. Pick another model or check the key's project permissions.",
   "settings_decision_env_override": "The ORX_DECISION_OPENAI_API_KEY environment variable overrides the saved key.",

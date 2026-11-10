@@ -1528,7 +1528,7 @@
   "settings_failover_move_down": "Bajar {name}",
   "settings_failover_include": "Usar {name} como respaldo",
   "settings_decision_title": "Modelo de decisión",
-  "settings_decision_description": "Un modelo de OpenAI que elige la cuenta de un turno cuando a la suya le queda poca cuota, el harness al que cambiar y dónde debe ejecutarse el trabajo nuevo de orx agent route, para que la cuota de tus harnesses dure más. Si está apagado, no tiene clave o falla, OpenResearch decide solo por la cuota.",
+  "settings_decision_description": "Un modelo de OpenAI que elige la cuenta de un turno cuando a la suya le queda poca cuota y el harness al que cambiar, para que la cuota de tus harnesses dure más. Si está apagado, no tiene clave o falla, OpenResearch decide solo por la cuota.",
   "settings_decision_needs_key": "Añade una clave de API de OpenAI para empezar a usar el modelo de decisión.",
   "settings_decision_model_unavailable": "Esta clave no puede usar {model}. Elige otro modelo o revisa los permisos del proyecto de la clave.",
   "settings_decision_env_override": "La variable de entorno ORX_DECISION_OPENAI_API_KEY tiene prioridad sobre la clave guardada.",
