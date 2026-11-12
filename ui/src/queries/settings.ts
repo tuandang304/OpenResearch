@@ -332,12 +332,6 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
 
 
   // --- fork additions ---
-  const getDecisionModelSettingsQuery = () => queryOptions({
-    queryKey: workspaceKey("getDecisionModelSettings"),
-    queryFn: ({ signal }) => api.getDecisionModelSettings(signal),
-    staleTime: 300_000,
-  });
-
   const getColabSettingsQuery = () => queryOptions({
     queryKey: workspaceKey("getColabSettings"),
     queryFn: ({ signal }) => api.getColabSettings(signal),
@@ -366,12 +360,6 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
   const getComputeRoutingSettingsQuery = () => queryOptions({
     queryKey: workspaceKey("getComputeRoutingSettings"),
     queryFn: ({ signal }) => api.getComputeRoutingSettings(signal),
-    staleTime: 300_000,
-  });
-
-  const getAutoCompactSettingsQuery = () => queryOptions({
-    queryKey: workspaceKey("getAutoCompactSettings"),
-    queryFn: ({ signal }) => api.getAutoCompactSettings(signal),
     staleTime: 300_000,
   });
 
@@ -446,13 +434,11 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     readHarnesses,
     getLocalModelsQuery,
     reportLocaleQuery,
-    getDecisionModelSettingsQuery,
     getColabSettingsQuery,
     getKaggleSettingsQuery,
     getKaggleLiveKernelsQuery,
     getGcpSettingsQuery,
     getComputeRoutingSettingsQuery,
-    getAutoCompactSettingsQuery,
     getComputePricesQuery,
     getCrossHarnessSettingsQuery,
     getDelegationPolicyQuery,

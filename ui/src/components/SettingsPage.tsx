@@ -93,7 +93,7 @@ import { useColoredMarkdown, useThemePreference, type ThemePreference } from "..
 import { m } from "../paraglide/messages.js";
 import { ComputeDoctor } from "../features/research/ComputeDoctor";
 import { ColabSection, KaggleSection } from "../features/fork/ComputeSections";
-import { ACCOUNT_HARNESSES, HarnessAccountsCard, CrossHarnessCard, DelegationPolicyCard, AutoCompactCard, ComputeRoutingCard, fmtUsd, ProviderPricesCard, GcpSection, DecisionModelCard, HarnessFailoverCard } from "../features/fork/SettingsCards";
+import { ACCOUNT_HARNESSES, HarnessAccountsCard, CrossHarnessCard, DelegationPolicyCard, ComputeRoutingCard, fmtUsd, ProviderPricesCard, GcpSection, HarnessFailoverCard } from "../features/fork/SettingsCards";
 import { fmtClock, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
@@ -568,7 +568,6 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       )}
       {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />}
       {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
-      <DecisionModelCard />
       <CrossHarnessCard harnesses={harnesses} />
       <DelegationPolicyCard harnesses={harnesses} />
       <NestedDelegationRow />
@@ -4597,9 +4596,6 @@ export function SettingsView({
             </section>
             <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <HarnessesTab remote={remote} />
-            </section>
-            <section ref={tab === "context" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <AutoCompactCard />
             </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <OverleafCard />

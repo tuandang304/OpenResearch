@@ -1,16 +1,14 @@
 import { useContext } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
-import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
-import { fmtTokens, type AutoCompactSettings, type ContextUsage } from "../api";
+import { fmtTokens, type ContextUsage } from "../api";
 import { Popover } from "@base-ui/react/popover";
 import { ProgressBar } from "./ProgressBar";
 import { Button } from "./ui";
-import { useWorkspace } from "../workspace";
 
 /** Amber ≥80%, red ≥95% — mirrors Claude Desktop's context meter. */
 function tone(pct: number): string {
@@ -33,9 +31,7 @@ export function ContextMeter({ usage, busy = false, onCompact }: { usage?: Conte
 
 function VisibleContextMeter({ usage, busy, onCompact }: { usage: ContextUsage; busy: boolean; onCompact?: () => void }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
-  const { getAutoCompactSettingsQuery } = useWorkspace().queries;
   const [open, setOpen] = useState(false);
-  const autoCompact = useQuery({ ...getAutoCompactSettingsQuery(), enabled: open }).data;
   const { usedTokens, contextWindow } = usage;
   const pct =
     contextWindow && contextWindow > 0
@@ -96,15 +92,6 @@ function VisibleContextMeter({ usage, busy, onCompact }: { usage: ContextUsage; 
                 {pct !== null && (
                   <ProgressBar value={usedTokens} max={contextWindow!} fillColor={fill} />
                 )}
-                {autoCompact && (
-                  <div className="context-meter-auto mt-2 text-sm text-muted">
-                    {!autoCompact.enabled
-                      ? m.context_meter_auto_compact_off()
-                      : pct === null
-                        ? m.context_meter_auto_compact_unknown()
-                        : m.context_meter_auto_compact_at({ percent: ltr(autoCompactPoint(autoCompact, contextWindow!)) })}
-                  </div>
-                )}
                 {onCompact && (
                   <Button
                     type="button"
@@ -124,13 +111,4 @@ function VisibleContextMeter({ usage, busy, onCompact }: { usage: ContextUsage; 
       </Popover.Root>
     </DirectionProvider>
   );
-}
-
-/** Where auto-compact fires for this window: the percentage, or the token
- * limit when that comes first. */
-function autoCompactPoint(settings: AutoCompactSettings, contextWindow: number): string {
-  const byPercent = (contextWindow * settings.percent) / 100;
-  return settings.maxTokens !== null && settings.maxTokens < byPercent
-    ? fmtTokens(settings.maxTokens)
-    : `${settings.percent}%`;
 }

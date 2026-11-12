@@ -12,7 +12,6 @@ pub mod agent_lifecycle;
 pub mod agent_skills;
 #[cfg(test)]
 mod agent_text;
-pub mod auto_compact;
 pub mod autonomy;
 pub mod bash;
 pub mod browser_cookies;
@@ -20,7 +19,6 @@ pub mod chat;
 pub mod claude;
 pub mod codex;
 pub mod datadir;
-pub mod decision;
 pub(crate) mod deep_research;
 pub mod delegation;
 pub mod demo;
