@@ -533,6 +533,7 @@ pub fn controller_script(spec: &ControllerSpec<'_>) -> String {
         .replace("__TIMEOUT__", &spec.timeout_secs.to_string())
         .replace("__ENV_KEYS__", &env_keys)
         .replace("__DRIVER__", &sh_quote(DRIVER_FILE))
+        .replace("__DEADLINE__", super::SHELL_DEADLINE)
 }
 
 const CONTROLLER_TEMPLATE: &str = r#"#!/usr/bin/env bash
@@ -549,11 +550,11 @@ out=__OUTPUT_DIR__
 poll=${ORX_COLAB_POLL_SECS:-15}
 released=0
 detached=0
-release() {
+__DEADLINE__release() {
   if [ "$released" = 0 ]; then
     released=1
     echo "[orx] Releasing Colab runtime $session"
-    "$colab" stop -s "$session" >/dev/null 2>&1 \
+    deadline 120 "$colab" stop -s "$session" </dev/null >/dev/null 2>&1 \
       || echo "[orx] Could not release $session; run: colab stop -s $session"
   fi
 }
@@ -578,7 +579,7 @@ trap on_term TERM INT HUP
 mkdir -p "$fetch"
 
 get() {
-  "$colab" download -s "$session" "$ctl/$1" "$2" </dev/null >/dev/null 2>&1
+  deadline 300 "$colab" download -s "$session" "$ctl/$1" "$2" </dev/null >/dev/null 2>&1
 }
 field() {
   sed -n "s/^$1=//p" "$fetch/state" | head -n 1
@@ -753,7 +754,8 @@ fn driver_source_in(run_command: &str, root: &str) -> String {
     let content = format!("{}/content", root.trim_end_matches('/'));
     let runner = RUNNER_TEMPLATE
         .replace("__ORX_SCRIPT_B64__", &engine.encode(script))
-        .replace("__ORX_CONTENT__", &content);
+        .replace("__ORX_CONTENT__", &content)
+        .replace("__ORX_SETTLE__", super::PY_SETTLE);
     DRIVER_TEMPLATE
         .replace("__ORX_CONTENT__", &content)
         .replace("__ORX_RUNNER_B64__", &engine.encode(runner))
@@ -868,6 +870,7 @@ class Log:
 
 
 log = Log()
+__ORX_SETTLE__
 
 
 def say(text):
@@ -977,14 +980,20 @@ def main():
     proc = subprocess.Popen(
         ["timeout", "--signal=TERM", "--kill-after=60", str(timeout), "bash", "-c", script],
         cwd=WORK, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, errors="replace",
+        text=True, bufsize=1, errors="replace", start_new_session=True,
     )
     done = threading.Event()
     if gpus:
         threading.Thread(target=watch_gpu, args=(done,), daemon=True).start()
-    for line in proc.stdout:
-        log.write(line)
+
+    def copy():
+        for line in proc.stdout:
+            log.write(line)
+
+    reader = threading.Thread(target=copy, daemon=True)
+    reader.start()
     code = proc.wait()
+    _orx_settle(proc, reader, say)
     done.set()
     gpu_summary()
     if code == 124:
@@ -1359,6 +1368,25 @@ esac
         assert!(!run.dir.join(".colab-fetch").exists());
         let driver = std::fs::read_to_string(run.dir.join(DRIVER_FILE)).unwrap();
         assert!(!driver.contains("s3cret"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_run_ends_when_its_command_exits_even_if_children_hold_its_output() {
+        // One leftover in the run's process group, one that escaped it.
+        let run = FakeRun::new("sleep 600 & setsid sleep 45 & echo started; exit 4");
+        let started = std::time::Instant::now();
+        let code = run.wait(run.start());
+        let log = run.log();
+        assert_eq!(code, 4, "{log}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(40),
+            "{log}"
+        );
+        assert!(log.contains("started\n"), "{log}");
+        assert!(log.contains("left processes running"), "{log}");
+        assert!(log.contains("not waiting for it"), "{log}");
+        assert_eq!(run.calls("stop"), 1, "released");
     }
 
     #[cfg(target_os = "linux")]
