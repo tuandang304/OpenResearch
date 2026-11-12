@@ -104,6 +104,11 @@ fn home_dir() -> Option<PathBuf> {
     Some(test_home())
 }
 
+/// The user's home directory; [`test_home`] under test.
+pub(crate) fn user_home() -> Option<PathBuf> {
+    home_dir()
+}
+
 /// Debug builds divide background timers (run supervision, turn leases) by `ORX_TEST_SPEEDUP`,
 /// read once, so end-to-end tests finish in seconds.
 pub(crate) fn paced(wait: std::time::Duration) -> std::time::Duration {

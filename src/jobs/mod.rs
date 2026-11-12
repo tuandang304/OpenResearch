@@ -5,6 +5,7 @@
 //! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
 //! is the serialized handle a later supervisor uses to reattach.
 
+pub mod checkpoints;
 pub mod colab;
 pub mod colab_account;
 pub mod colab_accounts;
@@ -42,6 +43,57 @@ pub const PYTHONUNBUFFERED: &str = "PYTHONUNBUFFERED";
 /// Redirected CPython output uses Windows' ANSI codepage (often cp1252), so other
 /// characters crash a run.
 pub const PYTHONIOENCODING: &str = "PYTHONIOENCODING";
+
+/// Bash for controllers that drive a provider CLI: `deadline SECS CMD...` runs
+/// CMD and kills it after SECS. The Kaggle and Colab CLIs set no network
+/// timeouts, so one dropped connection would otherwise hang the run for good.
+/// Works on the bash 3.2 macOS ships, which has no `timeout`.
+pub const SHELL_DEADLINE: &str = r#"deadline() {
+  local secs=$1 pid watch rc
+  shift
+  "$@" &
+  pid=$!
+  ( trap 'kill "$s" 2>/dev/null; exit 0' TERM; sleep "$secs" & s=$!; wait "$s"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  watch=$!
+  wait "$pid"
+  rc=$?
+  kill "$watch" 2>/dev/null
+  wait "$watch" 2>/dev/null
+  return "$rc"
+}
+"#;
+
+/// Python for drivers that run the user's command on a provider's machine with
+/// its output on a pipe (`start_new_session=True`, read by `reader`). A process
+/// the command leaves in the background (a data loader worker, a tracker's
+/// service, a `cmd &`) keeps the pipe open after the command exits, so reading
+/// to EOF would keep the kernel busy until the provider's time limit. The run
+/// is over when its command exits: stop what it left behind and move on.
+pub const PY_SETTLE: &str = r#"
+def _orx_settle(proc, reader, say):
+    import os, signal, time
+    reader.join(5)
+    try:
+        os.killpg(proc.pid, 0)
+    except OSError:
+        reader.join(30)
+    else:
+        say("[orx] The run's command exited but left processes running; stopping them.")
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except OSError:
+                break
+            for _ in range(20):
+                time.sleep(0.5)
+                try:
+                    os.killpg(proc.pid, 0)
+                except OSError:
+                    break
+        reader.join(5)
+    if reader.is_alive():
+        say("[orx] A process the run started in its own session still holds the run's output; not waiting for it.")
+"#;
 
 /// Default CPython's streaming and encoding unless the caller set them; kubernetes
 /// open-codes it because its env is a JSON array.
@@ -95,7 +147,7 @@ pub struct BackendDescriptor {
     pub ssh_port: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_user: Option<String>,
-    /// Requested execution limit for OpenResearch and Slurm jobs.
+    /// Requested execution limit for OpenResearch, Hugging Face, and Slurm jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     /// Requested `#SBATCH --cpus-per-task` (slurm_job only).

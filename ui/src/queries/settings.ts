@@ -357,6 +357,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     staleTime: 30_000,
   });
 
+  const getCheckpointSettingsQuery = () => queryOptions({
+    queryKey: workspaceKey("getCheckpointSettings"),
+    queryFn: ({ signal }) => api.getCheckpointSettings(signal),
+    staleTime: 30_000,
+  });
+
   const getComputeRoutingSettingsQuery = () => queryOptions({
     queryKey: workspaceKey("getComputeRoutingSettings"),
     queryFn: ({ signal }) => api.getComputeRoutingSettings(signal),
@@ -438,6 +444,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     getKaggleSettingsQuery,
     getKaggleLiveKernelsQuery,
     getGcpSettingsQuery,
+    getCheckpointSettingsQuery,
     getComputeRoutingSettingsQuery,
     getComputePricesQuery,
     getCrossHarnessSettingsQuery,

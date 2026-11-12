@@ -39,6 +39,7 @@ git diff --numstat upstream/main -- . ':!ui/dist' ':!ui/messages' \
 | `ui/src/features/fork/litSourceMeta.ts`, `ForkLitSourcesList.tsx` (arXiv and Semantic Scholar names, marks, toggles) | `ForkLitSource` in the `LitSource` union and strategy check in `orxCommand.ts`; two spreads in `LitSourceLogo.tsx`; `<ForkLitSourcesList />` in `LitSourcesPicker.tsx`; two activity labels in `ChatPanel.tsx` |
 | `ui/src/features/fork/computeApi.ts` (Colab, GCP, Kaggle types and calls) | `export * from "./features/fork/computeApi";` in `api.ts` |
 | `src/jobs/{colab,colab_account,colab_runtimes,gcp,gcp_billing,kaggle,provider_prices}.rs`, `src/local/gcp.rs` | `mod` lines and backend dispatch in `jobs/mod.rs`, `compute.rs`, `localrun.rs` |
+| `src/jobs/checkpoints.rs` (checkpoint storage over rclone for GCP and Modal); `CheckpointStorageCard` in `SettingsCards.tsx`; `/api/settings/checkpoints` in `fork_compute.rs` | `pub mod checkpoints;` in `jobs/mod.rs`; the `Checkpoints` subcommand in `compute.rs`; the script wrap and env in `local/modal.rs` and `engine/adapters/modal.rs`; `config::user_home` |
 | `src/local/harness/{accounts,failover}.rs`, `src/store/harness_accounts.rs`, `src/commands/up/harness_accounts.rs` | Turn routing in `local/chat/mod.rs`, account homes in `native_store.rs`, harness CLI in `commands/agent.rs` |
 
 Still inline: the harness and routing types in `api.ts`, the
