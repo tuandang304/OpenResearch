@@ -1372,3 +1372,16 @@ export function HarnessFailoverCard({ harnesses }: { harnesses: Harness[] }) {
   );
 }
 
+
+/** Settings → Agents: the fork's routing cards under the agent list. */
+export function ForkHarnessCards() {
+  const { getHarnessesQuery } = useWorkspace().queries;
+  const { data: harnesses = null } = useQuery(getHarnessesQuery());
+  return (
+    <>
+      {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
+      <CrossHarnessCard harnesses={harnesses} />
+      <DelegationPolicyCard harnesses={harnesses} />
+    </>
+  );
+}

@@ -34,7 +34,7 @@ git diff --numstat upstream/main -- . ':!ui/dist' ':!ui/messages' \
 | `src/commands/compute/prices.rs` (`orx compute prices`), `gpu_zones.rs` (`orx compute gpu-zones`) | `mod prices;`, `mod gpu_zones;` and the `Prices` and `GpuZones` subcommand variants in `compute.rs` |
 | `src/local/controller_runs.rs` (Colab, Kaggle and GCP launch specs: a local engine run whose `run.sh` writes the controller and runs it), `src/local/gcp.rs` (`orx gcp-run`, the GCP controller) | the three `prepare` arms in `compute.rs`; the kind lists in `engine/runtime.rs`, `engine/legacy.rs` and `engine/adapters/local.rs`; `cancel_sh` in the local adapter; `url` in `store::public_backend`; the hidden `GcpRun` command in `main.rs` |
 | `src/jobs/modal/credit.rs` (Modal credit and list prices) | `mod credit; pub use credit::*;` and the `billing` launcher subcommand in `modal.rs` |
-| `ui/src/features/fork/ComputeSections.tsx` (Colab, Kaggle cards), `SettingsCards.tsx` (harness accounts, failover, cross-harness, compute routing, provider prices, GCP) | two imports and the card mounts in `SettingsPage.tsx`; the shared class names and helpers they use are exported from `SettingsPage.tsx` |
+| `ui/src/features/fork/ComputeSections.tsx` (Colab, Kaggle cards), `SettingsCards.tsx` (harness accounts, failover, cross-harness, compute routing, provider prices, GCP) | two imports and the card mounts in `SettingsPage.tsx`: `<ForkHarnessCards />` (failover, cross-harness, sub-agent limits) in `AgentsTab` and `HarnessAccountsCard` in an agent row of `AgentList`; the shared class names and helpers they use are exported from `SettingsPage.tsx` |
 | `src/commands/discover/extra_sources.rs` (`orx discover arxiv\|semanticscholar`) | `pub(crate) mod extra_sources;` and two match arms in `discover.rs`; two `DiscoverCommand` variants in `main.rs`; `pub(crate)` on `http`, `public_get`, `compare_dates` in `client.rs`; the filter in `set_lit_sources_settings` in `up.rs` that keeps fork toggles; `/api/settings/fork-lit-sources` lives in `fork_settings.rs` |
 | `ui/src/features/fork/litSourceMeta.ts`, `ForkLitSourcesList.tsx` (arXiv and Semantic Scholar names, marks, toggles) | `ForkLitSource` in the `LitSource` union and strategy check in `orxCommand.ts`; two spreads in `LitSourceLogo.tsx`; `<ForkLitSourcesList />` in `LitSourcesPicker.tsx`; two activity labels in `ChatPanel.tsx` |
 | `ui/src/features/fork/computeApi.ts` (Colab, GCP, Kaggle types and calls) | `export * from "./features/fork/computeApi";` in `api.ts` |
@@ -43,7 +43,8 @@ git diff --numstat upstream/main -- . ':!ui/dist' ':!ui/messages' \
 | `src/local/harness/{accounts,failover}.rs`, `src/store/harness_accounts.rs`, `src/commands/up/harness_accounts.rs` | Turn routing in `local/chat/mod.rs`, account homes in `native_store.rs`, harness CLI in `commands/agent.rs` |
 
 Still inline: the harness and routing types in `api.ts`, the
-chat-time account routing in `local/chat/mod.rs`, and `recommended_model` in
+chat-time account routing in `local/chat/mod.rs` and the agent harnesses (the
+fork's `account` beside upstream's `profile`), and `recommended_model` in
 `up.rs`. These are woven into upstream logic rather than standalone blocks.
 
 UI strings must stay in `ui/messages/*.json` because `check-i18n` reads only

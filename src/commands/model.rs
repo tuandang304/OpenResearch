@@ -2,8 +2,9 @@
 //! harness that serves it, optionally checking it against a given harness.
 
 use crate::error::{anyhow, Result};
+use crate::local::harness::check_model_for_harness;
 use crate::local::harness::model_route::harness_display_name;
-use crate::local::harness::{check_model_for_harness, resolve_model};
+use crate::local::harness::model_route::resolve_model;
 
 pub async fn run(args: crate::ModelArgs) -> Result<()> {
     let resolved = resolve_model(&args.name).map_err(|message| anyhow!("{message}"))?;

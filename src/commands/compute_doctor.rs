@@ -64,7 +64,7 @@ pub async fn diagnose(
         if backend == "colab" {
             colab_checks(&mut report.checks).await;
         } else {
-            let result = super::up::compute_settings::check(backend, host, container, no_container, address).await;
+            let result = super::up::compute_settings::check(backend, host, container, no_container, address, &Default::default()).await;
             let (ok, message) = match result {
                 Ok(value) => (value["ready"] == true, probe_message(&value)),
                 Err(error) => (false, error.to_string()),
