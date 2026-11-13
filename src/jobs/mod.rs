@@ -1,9 +1,7 @@
-//! Job backends — external compute that orx launches and supervises itself.
+//! Job backends — provider clients the run engine's adapters drive.
 //!
-//! Orx submits natively (HF Jobs, Modal, Vercel Sandbox, Kubernetes, SSH, Slurm, an OpenResearch
-//! box, Tinker, Google Colab or Kaggle through a local controller, or this machine) and a detached
-//! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
-//! is the serialized handle a later supervisor uses to reattach.
+//! A run launched by orx 0.2 keeps its handle in `backend_json` as a [`BackendDescriptor`], which
+//! the engine reads to watch or adopt it.
 
 pub mod checkpoints;
 pub mod colab;
@@ -177,21 +175,10 @@ impl BackendDescriptor {
         serde_json::from_str(json).map_err(|e| anyhow!("Unreadable backend descriptor: {}", e))
     }
 
+    /// Writes a 0.2.x row for tests; orx no longer writes descriptors.
+    #[cfg(test)]
     pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
-    }
-
-    /// The HF (namespace, jobId) handle, or an error naming what's missing.
-    pub fn hf_ref(&self) -> Result<(&str, &str)> {
-        if self.kind != "hf_job" {
-            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
-        }
-        match (self.namespace.as_deref(), self.job_id.as_deref()) {
-            (Some(ns), Some(id)) => Ok((ns, id)),
-            _ => Err(anyhow!(
-                "Backend descriptor is missing namespace/jobId — was the job submitted?"
-            )),
-        }
+        serde_json::to_string(self).unwrap()
     }
 
     /// The k8s (namespace, job name) handle; context rides on `self.context`.
@@ -205,16 +192,6 @@ impl BackendDescriptor {
                 "Backend descriptor is missing namespace/jobName — was the job submitted?"
             )),
         }
-    }
-
-    /// The Modal sandbox id (the reattach handle); `namespace` holds the app.
-    pub fn modal_ref(&self) -> Result<&str> {
-        if self.kind != "modal_job" {
-            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
-        }
-        self.job_id.as_deref().ok_or_else(|| {
-            anyhow!("Backend descriptor is missing the Modal sandbox id — was the job submitted?")
-        })
     }
 
     /// The Vercel (sandbox name, process id) handle; the name rides on
@@ -241,33 +218,6 @@ impl BackendDescriptor {
             (Some(host), Some(id)) => Ok((host, id)),
             _ => Err(anyhow!(
                 "Backend descriptor is missing the slurm host/job id — was the job submitted?"
-            )),
-        }
-    }
-
-    /// The local run dir (the reattach handle) for a local controller.
-    pub fn local_ref(&self) -> Result<&str> {
-        if !matches!(
-            self.kind.as_str(),
-            "local_job" | "tinker_job" | "colab_job" | "kaggle_job"
-        ) {
-            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
-        }
-        self.job_id.as_deref().ok_or_else(|| {
-            anyhow!("Backend descriptor is missing the run dir — was the job submitted?")
-        })
-    }
-
-    /// The Ray Jobs (address, submission id) handle; address rides on
-    /// `namespace`, dashboard link on `url`.
-    pub fn ray_ref(&self) -> Result<(&str, &str)> {
-        if self.kind != "ray_job" {
-            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
-        }
-        match (self.namespace.as_deref(), self.job_id.as_deref()) {
-            (Some(addr), Some(id)) => Ok((addr, id)),
-            _ => Err(anyhow!(
-                "Backend descriptor is missing the Ray address/submission id — was the job submitted?"
             )),
         }
     }
@@ -299,37 +249,6 @@ impl BackendDescriptor {
         }
     }
 
-    /// The Compute Engine (project, zone, VM name) handle; the zone rides on
-    /// `context`.
-    pub fn gcp_ref(&self) -> Result<(&str, &str, &str)> {
-        if self.kind != "gcp_job" {
-            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
-        }
-        match (
-            self.namespace.as_deref(),
-            self.context.as_deref(),
-            self.job_id.as_deref(),
-        ) {
-            (Some(project), Some(zone), Some(name)) => Ok((project, zone, name)),
-            _ => Err(anyhow!(
-                "Backend descriptor is missing the project/zone/VM — was the VM created?"
-            )),
-        }
-    }
-
-    /// The VM's SSH target once the supervisor has recorded its IP (gcp_job only).
-    /// Like [`Self::openresearch_ssh_target`], the VM is machine-provisioned, so the
-    /// target is managed (keyed by the VM name): the shared SSH service connects
-    /// directly instead of through a pinned user-authenticated master socket.
-    pub fn gcp_ssh_target(&self) -> Option<ssh::SshTarget> {
-        if self.kind != "gcp_job" {
-            return None;
-        }
-        let mut target = gcp::ssh_target(self.ssh_host.as_deref()?).ok()?;
-        target.managed_generation = Some(self.job_id.clone()?);
-        Some(target)
-    }
-
     /// The box's SSH endpoint as a ready-to-use target, once the supervisor
     /// has recorded it (openresearch_job only). Uses
     /// [`ssh::HostKeyPolicy::Ephemeral`] — see its docs for why these
@@ -353,32 +272,8 @@ impl BackendDescriptor {
     }
 }
 
-/// Map an HF job stage onto the local run-status vocabulary. `UPDATING` appears
-/// in the wild as a live state (see huggingface_hub).
-pub fn stage_to_run_status(stage: &str) -> crate::store::RunStatus {
-    use crate::store::RunStatus;
-    match stage {
-        "SCHEDULING" => RunStatus::Starting,
-        "RUNNING" | "UPDATING" => RunStatus::Running,
-        "COMPLETED" => RunStatus::Done,
-        "ERROR" => RunStatus::Failed,
-        "CANCELED" | "DELETED" => RunStatus::Cancelled,
-        _ => RunStatus::Running,
-    }
-}
-
 pub fn is_terminal_stage(stage: &str) -> bool {
     matches!(stage, "COMPLETED" | "CANCELED" | "ERROR" | "DELETED")
-}
-
-/// A run log's lines. An unterminated last line may still be mid-flush, so it
-/// only counts once the writer has exited (`drain`).
-pub fn log_lines(text: &str, drain: bool) -> impl Iterator<Item = &str> {
-    text.split_inclusive('\n')
-        .filter_map(move |line| match line.strip_suffix('\n') {
-            Some(line) => Some(line.strip_suffix('\r').unwrap_or(line)),
-            None => drain.then_some(line),
-        })
 }
 
 #[cfg(test)]
@@ -518,7 +413,6 @@ mod tests {
     fn tinker_descriptor_round_trips_as_a_local_handle() {
         let json = r#"{"kind":"tinker_job","jobId":"/tmp/run"}"#;
         let descriptor = BackendDescriptor::parse(json).unwrap();
-        assert_eq!(descriptor.local_ref().unwrap(), "/tmp/run");
         assert_eq!(
             BackendDescriptor::parse(&descriptor.to_json())
                 .unwrap()
@@ -551,23 +445,6 @@ mod tests {
         assert!(opts.contains("StrictHostKeyChecking=no"), "{opts}");
     }
 
-    /// GCP VMs are managed targets: without a generation the shared SSH service
-    /// would demand a pinned master socket and fail before opening TCP.
-    #[test]
-    fn gcp_ssh_target_is_managed_by_vm_name() {
-        let mut d = openresearch_descriptor();
-        d.kind = "gcp_job".to_string();
-        d.namespace = Some("proj".to_string());
-        d.context = Some("us-central1-a".to_string());
-        d.job_id = Some("orx-vm-1".to_string());
-        assert!(d.gcp_ssh_target().is_none());
-        d.ssh_host = Some("203.0.113.9".to_string());
-        let target = d.gcp_ssh_target().unwrap();
-        assert_eq!(target.managed_generation.as_deref(), Some("orx-vm-1"));
-        assert!(target.dest.ends_with("@203.0.113.9"), "{}", target.dest);
-        assert!(d.openresearch_ssh_target().is_none());
-    }
-
     #[test]
     fn default_python_env_injects_when_absent_and_lets_author_win() {
         // Injected when the caller didn't set them.
@@ -586,16 +463,5 @@ mod tests {
             got.get(PYTHONIOENCODING).map(String::as_str),
             Some("cp1252")
         );
-    }
-
-    #[test]
-    fn log_lines_hold_back_a_partial_last_line_until_drained() {
-        let text = "a\r\nb\n{\"partial\": ";
-        assert_eq!(log_lines(text, false).collect::<Vec<_>>(), ["a", "b"]);
-        assert_eq!(
-            log_lines(text, true).collect::<Vec<_>>(),
-            ["a", "b", "{\"partial\": "]
-        );
-        assert_eq!(log_lines("", true).count(), 0);
     }
 }

@@ -776,7 +776,7 @@ fn own_hardware() -> Vec<Provider> {
 
 /// Whether `~/.ssh/config` names at least one concrete host.
 fn ssh_config_has_host() -> bool {
-    dirs::home_dir()
+    crate::config::home_dir()
         .and_then(|home| std::fs::read_to_string(home.join(".ssh/config")).ok())
         .is_some_and(|raw| {
             raw.lines().any(|line| {

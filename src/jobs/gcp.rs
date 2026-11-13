@@ -104,7 +104,7 @@ pub fn save_settings(settings: &GcpSettings) -> Result<()> {
 
 pub fn find_cli() -> Option<PathBuf> {
     crate::local::shell_env::find_on_path("gcloud").or_else(|| {
-        dirs::home_dir().and_then(|home| {
+        crate::config::home_dir().and_then(|home| {
             crate::local::shell_env::find_in_dir(&home.join("google-cloud-sdk/bin"), "gcloud")
         })
     })
@@ -201,7 +201,7 @@ fn gcloud_error(stderr: &str) -> String {
 pub fn configured_project_on_disk() -> Option<String> {
     let dir = std::env::var_os("CLOUDSDK_CONFIG")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".config/gcloud")))?;
+        .or_else(|| crate::config::home_dir().map(|home| home.join(".config/gcloud")))?;
     let active = std::fs::read_to_string(dir.join("active_config"))
         .map(|name| name.trim().to_string())
         .unwrap_or_else(|_| "default".into());
@@ -1001,7 +1001,8 @@ pub async fn wait_running(
 /// gcloud's own key pair, created the way `gcloud compute ssh` would when this
 /// machine has none yet.
 pub fn ssh_key_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("No home directory for the SSH key."))?;
+    let home =
+        crate::config::home_dir().ok_or_else(|| anyhow!("No home directory for the SSH key."))?;
     Ok(home.join(".ssh").join("google_compute_engine"))
 }
 
@@ -1120,8 +1121,8 @@ pub async fn reap_orphans() -> Vec<String> {
     };
     let used_gcp = store.list_runs(1000).is_ok_and(|runs| {
         runs.iter().any(|run| {
-            serde_json::from_str::<Value>(&run.backend_json)
-                .is_ok_and(|backend| backend["kind"] == "gcp_job")
+            crate::local::controller_runs::run_backend(&store, run)
+                .is_some_and(|backend| backend["kind"] == "gcp_job")
         })
     });
     if !used_gcp || find_cli().is_none() {

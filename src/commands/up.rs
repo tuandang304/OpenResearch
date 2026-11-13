@@ -102,6 +102,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let data_dir = crate::commands::remote_host::canonical_data_dir()?;
     // The engine lock: one engine per data directory.
     let dashboard_lock = DashboardLock::acquire(&data_dir)?;
+    // A laptop attached to an earlier host may have signed out since.
+    if persistent_host {
+        if let Err(error) = crate::alphaxiv::forget_forwarded() {
+            eprintln!("orx up: could not forget the alphaXiv sign-in forwarded to the previous host: {error}");
+        }
+    }
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
     let backend_lock = tokio::task::spawn_blocking(updates::BackendLock::acquire)
@@ -130,18 +136,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
         local::chat::reconcile_unfinished_turns(&store)?;
         // Under the engine lock, before any notice can be produced.
         store.migrate_run_wakeups()?;
-        if !crate::config::run_engine_settings()?.0 {
-            for run in store.list_active_runs()? {
-                if !crate::engine::is_engine_row(&run)
-                    && store.get_local_experiment(&run.experiment_id)?.is_some()
-                {
-                    store.watch_legacy_run(&run.id, None)?;
-                    if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
-                        eprintln!("could not recover supervisor for run {}: {err}", run.id);
-                    }
-                }
-            }
-        }
     }
     let clock: Arc<dyn crate::engine::clock::Clock> =
         Arc::new(crate::engine::clock::SystemClock::new());
@@ -150,7 +144,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         engine.clone(),
         clock.clone(),
         crate::store::data_dir(),
-        std::env::var_os("ORX_SSH_CONFIG").map(Into::into),
+        crate::config::ssh_config(),
     );
     let instance = uuid::Uuid::new_v4().to_string();
     let project_lifecycle = Arc::new(ProjectLifecycle::default());
@@ -225,6 +219,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
 
     spawn_agent_preflight(state.clone());
+    spawn_agent_updates(state.clone());
     search::spawn_backfill(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.
@@ -248,10 +243,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_gate.clone(),
     ));
     runtime.start();
-    tokio::spawn(adopt_orphaned_runs(
-        state.data_dir_move_in_progress.clone(),
-        state.data_dir_gate.clone(),
-    ));
     tokio::spawn(reclaim_orphaned_run_artifacts(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
@@ -400,6 +391,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
         drop(backend_lock);
+        if let Err(error) = crate::commands::remote_host::ServerDescriptor::withdraw(&data_dir) {
+            eprintln!(
+                "orx up: could not withdraw the server descriptor before restarting: {error:#}"
+            );
+        }
         if !state.reopen.load(Ordering::SeqCst) && !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
             let failures = updates::failure_count();
@@ -837,6 +833,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
         )
+        .route("/api/pending-work", get(pending_work))
         .route("/api/update", get(update_status))
         .route("/api/update/notes", get(update_notes))
         .route("/api/update/apply", post(apply_update))
@@ -1028,6 +1025,14 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
 }
 
 fn server_router(app: Router, remote_auth: Option<RemoteAuth>, reach: up_remote::Reach) -> Router {
+    // Outside `/api`, so no gateway forwards a browser's request to it.
+    let forwarded_alphaxiv = axum::routing::put(keep_forwarded_alphaxiv)
+        .delete(forget_forwarded_alphaxiv)
+        .layer(DefaultBodyLimit::max(16 * 1024));
+    let app = match remote_auth {
+        Some(_) => app.route("/_orx/alphaxiv", forwarded_alphaxiv),
+        None => app,
+    };
     let app = app
         .layer(middleware::from_fn(track_active))
         .layer(middleware::from_fn_with_state(
@@ -1082,6 +1087,22 @@ async fn require_remote_auth(
         )
         .into_response()
     }
+}
+
+/// An attached laptop's alphaXiv access token, for this host's agents and CLI.
+async fn keep_forwarded_alphaxiv(body: axum::body::Bytes) -> Result<StatusCode, ApiError> {
+    crate::alphaxiv::keep_forwarded(&body).map_err(|error| {
+        match error.downcast_ref::<crate::alphaxiv::HttpFailure>() {
+            Some(failure) => ApiError(failure.status, failure.message.clone()),
+            None => error.into(),
+        }
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn forget_forwarded_alphaxiv() -> Result<StatusCode, ApiError> {
+    crate::alphaxiv::forget_forwarded()?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn remote_route_forbidden(path: &str) -> bool {
@@ -2801,6 +2822,12 @@ struct CreateRunReq {
     cpus: Option<u32>,
     mem: Option<String>,
     partition: Option<String>,
+    qos: Option<String>,
+    nodelist: Option<String>,
+    constraint: Option<String>,
+    exclude: Option<String>,
+    #[serde(default)]
+    sbatch_args: Vec<String>,
     flavor: Option<String>,
     host: Option<String>,
     container: Option<String>,
@@ -2843,6 +2870,11 @@ impl CreateRunReq {
             cpus: self.cpus,
             mem: self.mem,
             partition: self.partition,
+            qos: self.qos,
+            nodelist: self.nodelist,
+            constraint: self.constraint,
+            exclude: self.exclude,
+            sbatch_args: self.sbatch_args,
             force: self.force,
             chat_session_id: self.chat_session_id,
             agent_origin: self.agent_origin,
@@ -4705,7 +4737,7 @@ fn validated_absolute_file_path(
         return Err(bad_request("invalid path"));
     }
     let resolved = match trimmed.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => dirs::home_dir()
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => crate::config::home_dir()
             .ok_or_else(|| bad_request("no home directory"))?
             .join(rest.trim_start_matches('/')),
         _ => std::path::PathBuf::from(trimmed),
@@ -5093,59 +5125,6 @@ impl axum::body::HttpBody for ActiveBody {
 const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 const REMOTE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
-    // Runs whose spawn failure is already logged, so a stuck run logs once.
-    let mut reported = HashSet::new();
-    loop {
-        tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
-        if moving.load(Ordering::SeqCst) {
-            continue;
-        }
-        let _gate = gate.lock().await;
-        if moving.load(Ordering::SeqCst) {
-            continue;
-        }
-        match tokio::task::spawn_blocking(adopt_orphaned_runs_once).await {
-            Ok(Ok(failures)) => {
-                for (run_id, err) in failures {
-                    if reported.insert(run_id.clone()) {
-                        eprintln!("orx up: could not recover supervisor for run {run_id}: {err}");
-                    }
-                }
-            }
-            Ok(Err(err)) => {
-                eprintln!("orx up: could not check runs for missing supervisors: {err}")
-            }
-            Err(_) => {}
-        }
-    }
-}
-
-fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
-    let mut failures = Vec::new();
-    if crate::config::run_engine_settings()?.0 {
-        return Ok(failures);
-    }
-    let store = Store::open()?;
-    for run in store.list_active_runs()? {
-        // Without a job handle the launch may still be submitting, and a supervisor would fail it.
-        let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
-            .is_ok_and(|descriptor| descriptor.job_id.is_some());
-        if crate::engine::is_engine_row(&run)
-            || !submitted
-            || now_ms() - run.updated_at < crate::engine::ORPHANED_RUN_SETTLE_MS
-            || store.get_local_experiment(&run.experiment_id)?.is_none()
-            || crate::commands::supervise::supervisor_running(&run.id)
-        {
-            continue;
-        }
-        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
-            failures.push((run.id, err));
-        }
-    }
-    Ok(failures)
-}
-
 /// Background task so a large first reclaim never delays startup; it releases the gate between passes.
 async fn reclaim_orphaned_run_artifacts(
     moving: Arc<AtomicBool>,
@@ -5296,7 +5275,7 @@ fn spawn_restart_when_idle(state: AppState) {
             {
                 continue;
             }
-            if begin_restart(&state, 0).await {
+            if begin_restart(&state, 0, false).await {
                 state.restart.notify_one();
                 return;
             }
@@ -5308,8 +5287,8 @@ fn spawn_restart_when_idle(state: AppState) {
 static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
 
 /// Stop admitting work and commit to a restart if nothing is in flight beyond
-/// `own_requests` (the caller's). Returns false, and admits again, otherwise.
-async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
+/// `own_requests` (the caller's), save for chat turns when `stop_agents`. Returns false, and admits again, otherwise.
+async fn begin_restart(state: &AppState, own_requests: usize, stop_agents: bool) -> bool {
     let mut committed = RESTART_COMMITTED.lock().await;
     if *committed {
         return true;
@@ -5325,13 +5304,37 @@ async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
                     | RemoteSessionStatus::NeedsUpdate
             )
         })
-        && state.chat.stop_admitting_if_idle().await
+        && (stop_agents || state.chat.stop_admitting_if_idle().await)
     {
+        state.chat.stop_admitting();
         *committed = true;
         return true;
     }
     DRAINING.store(false, Ordering::SeqCst);
     false
+}
+
+/// Once a day, keep each agent orx can install current: through the user's own
+/// updater, else with orx's copy (`harness_setup::keep_current`).
+fn spawn_agent_updates(state: AppState) {
+    tokio::spawn(async move {
+        // Startup detection's probes go first.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            for harness in local::harness::managed::HARNESSES {
+                match harness_setup::keep_current(harness).await {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        if let Some(info) = local::harness::detect_harness(harness).await {
+                            publish_harness(&state, &info).await;
+                        }
+                    }
+                    Err(error) => eprintln!("orx up: could not update {harness}: {error:#}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
 }
 
 /// Startup summary of detected coding agents. Never blocks. It goes through
@@ -5707,7 +5710,9 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
             .into_response();
         }
     };
-    let move_claimed = move_store.claim_data_dir_move(&move_token).unwrap_or(false);
+    let move_claimed = move_store
+        .claim_data_dir_move(&move_token, &state.chat.held_turn_leases())
+        .unwrap_or(false);
     if !move_claimed {
         release(&state);
         return ApiError(
@@ -5884,24 +5889,15 @@ fn reject_if_stopping(state: &AppState) -> std::result::Result<(), ApiError> {
     Ok(())
 }
 
+/// Older dashboards on a remote host still read and toggle this.
 async fn run_engine_settings() -> ApiResult {
-    let (enabled, forced_by) = crate::config::run_engine_settings().map_err(bad_request)?;
-    Ok(Json(json!({"enabled": enabled, "forcedBy": forced_by})))
+    Ok(Json(json!({"enabled": true, "forcedBy": null})))
 }
 
-#[derive(Deserialize)]
-struct RunEngineReq {
-    enabled: bool,
-}
-
-async fn set_run_engine(Json(req): Json<RunEngineReq>) -> ApiResult {
-    match crate::config::run_engine_settings().map_err(bad_request)?.1 {
-        Some("canary") => return Err(bad_request("Canary builds always use the new experiment engine.")),
-        Some(_) => return Err(bad_request("ORX_RUN_ENGINE controls this setting. Remove it from the server environment to use this switch.")),
-        None => {}
-    }
-    crate::config::set_run_engine_enabled(req.enabled)?;
-    run_engine_settings().await
+async fn set_run_engine() -> ApiResult {
+    Err(bad_request(
+        "Every build now uses the new experiment engine; update this app to remove the switch.",
+    ))
 }
 
 // --- git settings -----------------------------------------------------------
@@ -6122,6 +6118,13 @@ async fn set_dashboard_locale(Json(SetLocaleReq { locale }): Json<SetLocaleReq>)
     .map_err(|e| ApiError::from(anyhow!("locale task failed: {e}")))?
 }
 
+/// What a quit would interrupt, for the page's close dialog.
+async fn pending_work() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(json!(Store::open()?.pending_work()?))))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("pending work task failed: {e}")))?
+}
+
 // --- updates -----------------------------------------------------------------
 
 async fn update_status() -> ApiResult {
@@ -6209,7 +6212,18 @@ async fn apply_update() -> ApiResult {
 /// Relaunch into the copy the updater already installed. Answers first, then
 /// restarts, so the dashboard learns the request landed before the connection
 /// drops; it reloads once the new server is up.
-async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
+/// Sent by the dashboard once the user agreed to stop the agents that are working; older pages post no body.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestartReq {
+    stop_agents: bool,
+}
+
+async fn restart_after_update(
+    State(state): State<AppState>,
+    req: Option<Json<RestartReq>>,
+) -> ApiResult {
+    let stop_agents = req.is_some_and(|Json(req)| req.stop_agents);
     let status = tokio::task::spawn_blocking(updates::status)
         .await
         .map_err(|e| ApiError::from(anyhow!("update status task failed: {e}")))?;
@@ -6222,7 +6236,7 @@ async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
     // A dashboard poll landing alongside the click is not work worth refusing over.
     let mut began = false;
     for _ in 0..10 {
-        began = begin_restart(&state, 1).await;
+        began = begin_restart(&state, 1, stop_agents).await;
         if began {
             break;
         }
@@ -7109,16 +7123,76 @@ fn session_checkout_root(
 }
 
 pub(crate) async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    openresearch_terminal(
-        headers,
-        ws,
-        vec!["login".into(), "--non-interactive".into()],
-    )
-    .await
+    let program = crate::paths::spawnable_exe()
+        .map(|exe| exe.to_string_lossy().into_owned())
+        .map_err(anyhow::Error::from);
+    let mut args = vec!["login".into(), "--non-interactive".into()];
+    if signs_in_with_code(&headers) {
+        args.push("--device".into());
+    }
+    command_terminal(&headers, ws, program, args, Vec::new(), false).await
 }
 
+/// alphaXiv can send only this machine's own browser back to it, so a page
+/// served elsewhere, or a server inside SSH, signs in with a code.
+fn signs_in_with_code(headers: &HeaderMap) -> bool {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    !up_remote::host_allowed(host, up_remote::Reach::Loopback)
+        || crate::remote::detect_ssh_session().is_some()
+}
+
+/// Connects alphaXiv over the websocket: `authUrl` with the page that approves
+/// it, then `complete` or `error`. Closing the socket abandons the sign-in.
 pub(crate) async fn alphaxiv_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    openresearch_terminal(headers, ws, vec!["login".into(), "--alphaxiv".into()]).await
+    if let Some(rejected) = reject_cross_origin(&headers) {
+        return rejected;
+    }
+    let device = signs_in_with_code(&headers);
+    let active = Active::new();
+    ws.on_upgrade(move |mut socket| async move {
+        let _active = active;
+        let (prompts, mut prompted) = tokio::sync::mpsc::unbounded_channel();
+        let login = crate::commands::login::connect_alphaxiv(device, move |prompt| {
+            let (url, code) = match prompt {
+                crate::commands::login::Prompt::Browser(url) => (url, None),
+                crate::commands::login::Prompt::Device { url, code } => (url, Some(code)),
+            };
+            let _ = prompts.send(json!({ "type": "authUrl", "url": url, "code": code }));
+        });
+        tokio::pin!(login);
+
+        let finished = loop {
+            tokio::select! {
+                biased;
+                Some(prompt) = prompted.recv() => {
+                    if socket.send(Message::Text(prompt.to_string().into())).await.is_err() {
+                        return;
+                    }
+                }
+                finished = &mut login => break finished,
+                incoming = socket.recv() => {
+                    if matches!(incoming, None | Some(Err(_)) | Some(Ok(Message::Close(_)))) {
+                        return;
+                    }
+                }
+            }
+        };
+
+        let message = match finished {
+            Ok(_) => json!({ "type": "complete" }),
+            Err(error) => json!({ "type": "error", "error": error.to_string() }),
+        };
+        if socket
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .is_ok()
+        {
+            close_socket(&mut socket).await;
+        }
+    })
 }
 
 fn alphaxiv_error(error: crate::error::Error) -> ApiError {
@@ -7162,17 +7236,6 @@ pub(crate) async fn alphaxiv_papers(Query(query): Query<AlphaXivPapersQuery>) ->
     .await
     .map(Json)
     .map_err(alphaxiv_error)
-}
-
-async fn openresearch_terminal(
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-    args: Vec<String>,
-) -> Response {
-    let program = crate::paths::spawnable_exe()
-        .map(|exe| exe.to_string_lossy().into_owned())
-        .map_err(anyhow::Error::from);
-    command_terminal(&headers, ws, program, args, Vec::new(), false).await
 }
 
 /// Commands the settings page may run, keyed by the exact note text. The
@@ -7223,13 +7286,13 @@ async fn run_settings_command(
     let mut env = Vec::new();
     let program = if argv[0] == "zcode" && local::acp::executable_path("zcode").is_none() {
         let mut candidates = Vec::new();
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::config::home_dir() {
             candidates.push(home.join("Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"));
         }
         candidates.push(std::path::PathBuf::from(
             "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
         ));
-        if let Some(data) = dirs::data_local_dir() {
+        if let Some(data) = crate::config::data_local_dir() {
             candidates.push(data.join("Programs/ZCode/resources/glm/zcode.cjs"));
         }
         match (
@@ -7243,7 +7306,9 @@ async fn run_settings_command(
                     })
                     .filter(|home| !home.is_empty())
                     .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".zcode"));
+                    .unwrap_or_else(|| {
+                        crate::config::home_dir().unwrap_or_default().join(".zcode")
+                    });
                 env = zcode_provider_env(&cli, &home);
                 env.push(("ZCODE_HOME", home.into_os_string()));
                 args.insert(0, cli.to_string_lossy().into_owned());
@@ -8723,6 +8788,7 @@ async fn build_chat_session(
         project_id: req.project_id,
         harness,
         native_session_id: None,
+        native_fork_at: None,
         title: None,
         title_source: None,
         model,
@@ -10967,6 +11033,11 @@ mod tests {
             "cpus": 8,
             "mem": "64G",
             "partition": "gpu",
+            "qos": "acc_ehpc",
+            "nodelist": "node[01-02]",
+            "constraint": "a100",
+            "exclude": "node07",
+            "sbatchArgs": ["--rsc g=1"],
             "chatSessionId": "session-1",
             "telemetrySuppressed": true,
             "force": true,
@@ -10978,6 +11049,11 @@ mod tests {
         assert_eq!(forwarded.cpus, Some(8));
         assert_eq!(forwarded.mem.as_deref(), Some("64G"));
         assert_eq!(forwarded.partition.as_deref(), Some("gpu"));
+        assert_eq!(forwarded.qos.as_deref(), Some("acc_ehpc"));
+        assert_eq!(forwarded.nodelist.as_deref(), Some("node[01-02]"));
+        assert_eq!(forwarded.constraint.as_deref(), Some("a100"));
+        assert_eq!(forwarded.exclude.as_deref(), Some("node07"));
+        assert_eq!(forwarded.sbatch_args, ["--rsc g=1"]);
         assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
         assert!(forwarded.forwarded);
         assert!(forwarded.telemetry_suppressed);
@@ -11301,6 +11377,131 @@ mod tests {
         line.split(' ').nth(1).unwrap().parse().unwrap()
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_browser_on_another_machine_connects_alphaxiv_with_a_code() {
+        use futures::StreamExt as _;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Mutex;
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest as _, Message as Frame};
+
+        if !crate::config::in_test_child(&[
+            "ALPHAXIV_API_URL",
+            "ALPHAXIV_WEB_URL",
+            "SSH_CONNECTION",
+            "SSH_TTY",
+            "SSH_CLIENT",
+        ]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "100");
+
+        // alphaXiv approves the second code after five polls; OpenResearch links it.
+        let issued = Arc::new(AtomicUsize::new(0));
+        let polls = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+        let fake = {
+            let (issued, polls) = (issued.clone(), polls.clone());
+            Router::new()
+                .route(
+                    "/auth/device/code",
+                    axum::routing::post(move |headers: HeaderMap| async move {
+                        let n = issued.fetch_add(1, Ordering::SeqCst) + 1;
+                        let site = format!("http://{}", headers["host"].to_str().unwrap());
+                        Json(json!({
+                            "device_code": format!("device-{n}"),
+                            "user_code": format!("WXYZ-000{n}"),
+                            "verification_uri": format!("{site}/device"),
+                            "verification_uri_complete": format!("{site}/device?user_code=WXYZ-000{n}"),
+                            "expires_in": 600,
+                            "interval": 1,
+                        }))
+                    }),
+                )
+                .route(
+                    "/auth/oauth2/token",
+                    axum::routing::post(
+                        move |axum::Form(form): axum::Form<HashMap<String, String>>| async move {
+                            let code = form["device_code"].clone();
+                            let count = {
+                                let mut polls = polls.lock().unwrap();
+                                let count = polls.entry(code.clone()).or_default();
+                                *count += 1;
+                                *count
+                            };
+                            if code != "device-2" || count <= 5 {
+                                let pending = Json(json!({ "error": "authorization_pending" }));
+                                return (StatusCode::BAD_REQUEST, pending).into_response();
+                            }
+                            Json(json!({
+                                "access_token": "access-1",
+                                "refresh_token": "refresh-1",
+                                "expires_in": 3600,
+                                "id_token": "e30.e30.sig",
+                            }))
+                            .into_response()
+                        },
+                    ),
+                )
+                .route(
+                    "/auth/alphaxiv/link",
+                    axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+                )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, fake).await });
+        std::env::set_var("ALPHAXIV_API_URL", &api);
+        std::env::set_var("ALPHAXIV_WEB_URL", &api);
+        crate::config::save_credentials(&crate::config::Credentials {
+            api_url: api.clone(),
+            token: "pat-1".into(),
+        })
+        .await
+        .unwrap();
+
+        let address = serve(router(test_state(), None, up_remote::Reach::Lan)).await;
+        let lan = format!("192.168.1.5:{}", address.port());
+        let connect = || async {
+            let mut request = format!("ws://{address}/api/settings/alphaxiv/login")
+                .into_client_request()
+                .unwrap();
+            let headers = request.headers_mut();
+            headers.insert("host", lan.parse().unwrap());
+            headers.insert("origin", format!("http://{lan}").parse().unwrap());
+            tokio_tungstenite::connect_async(request).await.unwrap().0
+        };
+        async fn next<S, E>(socket: &mut S) -> Value
+        where
+            S: futures::Stream<Item = Result<Frame, E>> + Unpin,
+            E: std::fmt::Debug,
+        {
+            match socket.next().await {
+                Some(Ok(Frame::Text(text))) => serde_json::from_str(&text).unwrap(),
+                other => panic!("expected a control message, got {other:?}"),
+            }
+        }
+
+        // Closing the page's socket abandons the sign-in.
+        let mut abandoned = connect().await;
+        assert_eq!(
+            next(&mut abandoned).await,
+            json!({ "type": "authUrl", "url": format!("{api}/device?user_code=WXYZ-0001"), "code": "WXYZ-0001" })
+        );
+        abandoned.close(None).await.unwrap();
+        drop(abandoned);
+        let polls_when_closed = polls.lock().unwrap().get("device-1").copied().unwrap_or(0);
+
+        let mut socket = connect().await;
+        assert_eq!(next(&mut socket).await["code"], "WXYZ-0002");
+        assert_eq!(next(&mut socket).await, json!({ "type": "complete" }));
+        let stored: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::config::config_dir().join("alphaxiv.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored["refreshToken"], "refresh-1");
+        let device_1 = polls.lock().unwrap().get("device-1").copied().unwrap_or(0);
+        assert!(device_1 <= polls_when_closed + 1, "{device_1} polls");
+    }
+
     #[tokio::test]
     async fn a_lan_dashboard_answers_private_hosts_and_peers_only() {
         let app = router(test_state(), None, up_remote::Reach::Lan);
@@ -11540,6 +11741,64 @@ mod tests {
             status(address, "GET /api/health", &[&host, &attachment]).await,
             401
         );
+    }
+
+    #[tokio::test]
+    async fn only_an_attached_laptop_forwards_its_alphaxiv_sign_in() {
+        if !crate::config::in_test_child(&["ALPHAXIV_API_URL"]) {
+            return;
+        }
+        const ATTACHMENT: &str = "abcdefghijklmnopqrstuvwxyz-attachment";
+        const CALLBACK: &str = "abcdefghijklmnopqrstuvwxyz-callback";
+        let auth = RemoteAuth::new(CALLBACK);
+        auth.register(ATTACHMENT);
+        let host = serve(router(test_state(), Some(auth), up_remote::Reach::Loopback)).await;
+        let laptop = serve(router(test_state(), None, up_remote::Reach::Loopback)).await;
+        let forwarded = crate::config::config_dir().join("alphaxiv-forwarded.json");
+        let body = json!({
+            "apiUrl": crate::config::alphaxiv_api_url(),
+            "accessToken": "forwarded",
+            "expiresAtMs": crate::store::now_ms() + 3_600_000,
+        })
+        .to_string();
+        let client = crate::net::loopback_client().build().unwrap();
+        let put = |address: std::net::SocketAddr, bearer: &str, body: String| {
+            client
+                .put(format!("http://{address}/_orx/alphaxiv"))
+                .bearer_auth(bearer)
+                .body(body)
+                .send()
+        };
+
+        for bearer in ["guess", CALLBACK] {
+            let response = put(host, bearer, body.clone()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let response = put(laptop, ATTACHMENT, body.clone()).await.unwrap();
+        assert_ne!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!forwarded.exists());
+
+        let response = put(host, ATTACHMENT, body.clone()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(std::fs::read_to_string(&forwarded).unwrap(), body);
+        let elsewhere = body.replace(
+            &crate::config::alphaxiv_api_url(),
+            "https://alphaxiv.invalid",
+        );
+        let response = put(host, ATTACHMENT, elsewhere).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = put(host, ATTACHMENT, "x".repeat(32 * 1024)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(std::fs::read_to_string(&forwarded).unwrap(), body);
+
+        let response = client
+            .delete(format!("http://{host}/_orx/alphaxiv"))
+            .bearer_auth(ATTACHMENT)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!forwarded.exists());
     }
 
     #[tokio::test]
@@ -11785,7 +12044,7 @@ mod tests {
 
     #[test]
     fn absolute_file_paths_expand_a_leading_tilde() {
-        let home = dirs::home_dir().expect("home dir");
+        let home = crate::config::home_dir().expect("home dir");
         // `~/x` and bare `~` resolve under home; the display stays as typed.
         assert_eq!(
             abs_path("~/.ssh/config"),

@@ -34,4 +34,4 @@ orx exp run <expId> --backend modal --flavor cpu --image python:3.12
   set <remote:folder>` keeps it. Only the user sets it up, since it needs
   `rclone config` on their machine.
 
-See [run monitoring](../SKILL.md#run-engine-setting).
+See [run monitoring](../SKILL.md#who-watches-a-run).

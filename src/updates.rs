@@ -332,18 +332,16 @@ pub struct Receipt {
 pub fn receipt_path() -> PathBuf {
     // Through `shell_env`, like `config::config_dir()`: in macOS app mode the
     // user's real XDG_CONFIG_HOME lives only in this process.
-    let base = crate::local::shell_env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            // Where the PowerShell installer writes it.
-            #[cfg(windows)]
-            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                return PathBuf::from(local);
-            }
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".config")
-        });
+    let base = crate::config::env_path("XDG_CONFIG_HOME").unwrap_or_else(|| {
+        // Where the PowerShell installer writes it.
+        #[cfg(windows)]
+        if let Some(local) = crate::config::env_path("LOCALAPPDATA") {
+            return local;
+        }
+        crate::config::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config")
+    });
     base.join(APP_NAME)
         .join(format!("{}-receipt.json", APP_NAME))
 }
@@ -2131,6 +2129,9 @@ impl UpdateWarning {
         if opted_out() {
             return UpdateWarning { refresh: None };
         }
+        // In an `orx up` chat, the server checks and updates; a send cut off at
+        // exit can fail the agent's command in its sandbox.
+        let in_chat = crate::local::chat::in_local_session();
 
         let current = current_version();
         let cache = read_cache();
@@ -2143,7 +2144,7 @@ impl UpdateWarning {
                     && release_available(&current, latest, &cache.latest_tag)
             })
         });
-        let automatic = available && auto_update_eligible();
+        let automatic = available && !in_chat && auto_update_eligible();
 
         if let Some(message) = cached_latest
             .as_ref()
@@ -2182,7 +2183,7 @@ impl UpdateWarning {
             .as_ref()
             .map(|c| now_unix().saturating_sub(c.checked_at) >= CHECK_TTL.as_secs())
             .unwrap_or(true);
-        if !stale {
+        if !stale || in_chat {
             return UpdateWarning { refresh: None };
         }
 
@@ -2258,6 +2259,22 @@ mod tests {
     use std::ffi::OsString;
     use std::path::Path;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn chat_commands_leave_update_checks_to_orx_up() {
+        let cleared = [
+            crate::local::chat::LOCAL_SESSION_ENV,
+            "ORX_NO_UPDATE_CHECK",
+            "NO_UPDATE_NOTIFIER",
+            "OPENRESEARCH_CLI_DISABLE_UPDATE",
+        ];
+        if !crate::config::in_test_child(&cleared) {
+            return;
+        }
+        std::env::set_var(crate::local::chat::LOCAL_SESSION_ENV, "1");
+
+        assert!(super::UpdateWarning::start(true).refresh.is_none());
+    }
 
     #[test]
     fn changes_are_the_difference_of_cumulative_totals() {

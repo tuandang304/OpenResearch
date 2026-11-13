@@ -205,13 +205,16 @@ pub fn flavor_usd_per_hour(flavor: &str, spot: bool) -> f64 {
 
 /// What orx's own Google Cloud runs since `as_of` cost at list price.
 fn estimated_cost(settings: &GcpSettings, as_of: i64) -> f64 {
-    let Ok(runs) = crate::store::Store::open().and_then(|store| store.list_runs(1000)) else {
+    let Ok(store) = crate::store::Store::open() else {
+        return 0.0;
+    };
+    let Ok(runs) = store.list_runs(1000) else {
         return 0.0;
     };
     let now = crate::store::now_ms();
     runs.iter()
         .filter_map(|run| {
-            let backend: Value = serde_json::from_str(&run.backend_json).ok()?;
+            let backend = crate::local::controller_runs::run_backend(&store, run)?;
             if backend["kind"] != "gcp_job" {
                 return None;
             }

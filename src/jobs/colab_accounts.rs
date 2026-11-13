@@ -78,7 +78,7 @@ pub fn token_file(home: &Path) -> PathBuf {
 
 /// The user's real home, where the CLI keeps its own sign-in.
 pub fn cli_home() -> Option<PathBuf> {
-    dirs::home_dir()
+    crate::config::home_dir()
 }
 
 /// The CLI's own sign-in, if it has one.
@@ -336,13 +336,16 @@ pub async fn remove_account(name: &str) -> Result<()> {
 
 /// Account id → a Colab run on it that has not ended.
 fn live_runs() -> HashMap<String, String> {
-    let Ok(runs) = crate::store::Store::open().and_then(|store| store.list_runs(1000)) else {
+    let Ok(store) = crate::store::Store::open() else {
+        return HashMap::new();
+    };
+    let Ok(runs) = store.list_runs(1000) else {
         return HashMap::new();
     };
     runs.into_iter()
         .filter(|run| !crate::store::is_terminal_status(&run.status))
         .filter_map(|run| {
-            let backend: serde_json::Value = serde_json::from_str(&run.backend_json).ok()?;
+            let backend = crate::local::controller_runs::run_backend(&store, &run)?;
             if backend["kind"] != "colab_job" {
                 return None;
             }

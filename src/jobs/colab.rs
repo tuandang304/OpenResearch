@@ -12,12 +12,9 @@
 //!      chunks (`colab download`), then its `ORX_OUTPUT_DIR` as a tar,
 //!   5. releases the runtime when it is done or cancelled (`colab stop`).
 //!
-//! When this machine sleeps, the controller just catches up. When it shuts
-//! down, the controller is TERMed without a cancel and leaves the runtime up;
-//! the supervisor that `orx up` starts again finds the run's controller dead,
-//! sees [`RESUMABLE_FILE`], and runs the controller again, which skips to
-//! following. Colab still ends a runtime after its maximum lifetime, and one
-//! left idle after the run ends, whether or not this machine is back.
+//! The controller is the payload of a local engine run. When this machine
+//! sleeps, the controller just catches up; when it is TERMed (a cancel, or this
+//! machine shutting down), it releases the runtime, so nothing bills unwatched.
 //!
 //! Secrets never touch disk or argv: the controller reads them from its own
 //! environment and pipes them, base64-encoded, into the kernel over stdin; the
@@ -285,7 +282,7 @@ fn largest_gpu() -> Accelerator {
 /// The `colab` executable: PATH first, then uv/pipx's `~/.local/bin`.
 pub fn find_cli() -> Option<PathBuf> {
     crate::local::shell_env::find_on_path("colab").or_else(|| {
-        dirs::home_dir().and_then(|home| {
+        crate::config::home_dir().and_then(|home| {
             crate::local::shell_env::find_in_dir(&home.join(".local/bin"), "colab")
         })
     })
@@ -402,15 +399,11 @@ pub const CONTROLLER_FILE: &str = "colab-controller.sh";
 pub const DRIVER_FILE: &str = "colab-driver.py";
 /// The run's `ORX_OUTPUT_DIR` lands here in the run dir when it ends.
 pub const OUTPUT_DIR: &str = "colab-output";
-/// Written once the run is going on Colab without this machine; from then on
-/// a dead controller is picked up again rather than failing the run.
+/// Written once the run is going on Colab; a controller run again in the same
+/// run dir skips straight to following it.
 pub const RESUMABLE_FILE: &str = "colab-resumable";
 /// Written when the controller is done with the run for good.
 pub const FINISHED_FILE: &str = "colab-finished";
-/// How often a run was picked up again after its controller died.
-const RESUMES_FILE: &str = "colab-resumes";
-/// Enough for many reboots, few enough to stop a controller that dies at once.
-const MAX_RESUMES: u32 = 50;
 /// Where the runner keeps its log, state and outputs on the runtime, as the
 /// CLI's file commands name it (relative to `/`).
 const REMOTE_CTL: &str = "content/orx-run/ctl";
@@ -448,26 +441,6 @@ fn remote_archive_name(archive: &Path) -> String {
         .take(16)
         .collect();
     format!("orx-source-{digest}.tar")
-}
-
-/// Whether a Colab run whose controller has died should be picked up again:
-/// the run was going on Colab, nobody cancelled it, and the controller never
-/// finished it. Counts the attempt, and gives up after [`MAX_RESUMES`].
-pub fn take_resume(dir: &Path) -> bool {
-    if !dir.join(RESUMABLE_FILE).exists()
-        || dir.join(FINISHED_FILE).exists()
-        || dir.join(super::localbox::CANCEL_REQUESTED_FILE).exists()
-    {
-        return false;
-    }
-    let resumes: u32 = std::fs::read_to_string(dir.join(RESUMES_FILE))
-        .ok()
-        .and_then(|text| text.trim().parse().ok())
-        .unwrap_or(0);
-    if resumes >= MAX_RESUMES {
-        return false;
-    }
-    std::fs::write(dir.join(RESUMES_FILE), format!("{}\n", resumes + 1)).is_ok()
 }
 
 /// The bash controller that drives one run (see the module docs). Run again
@@ -510,10 +483,6 @@ pub fn controller_script(spec: &ControllerSpec<'_>) -> String {
         .replace("__RESUMABLE__", &sh_quote(RESUMABLE_FILE))
         .replace("__FINISHED__", &sh_quote(FINISHED_FILE))
         .replace(
-            "__CANCEL__",
-            &sh_quote(super::localbox::CANCEL_REQUESTED_FILE),
-        )
-        .replace(
             "__REASON__",
             &sh_quote(super::localbox::FAILURE_REASON_FILE),
         )
@@ -549,7 +518,6 @@ fetch=.colab-fetch
 out=__OUTPUT_DIR__
 poll=${ORX_COLAB_POLL_SECS:-15}
 released=0
-detached=0
 __DEADLINE__release() {
   if [ "$released" = 0 ]; then
     released=1
@@ -559,23 +527,12 @@ __DEADLINE__release() {
   fi
 }
 finish() {
-  if [ "$detached" = 1 ]; then
-    echo "[orx] This machine stopped following the run; it goes on on Colab. orx picks it up again when this machine is back."
-  else
-    release
-    : > __FINISHED__
-  fi
+  release
+  : > __FINISHED__
   rm -rf "$fetch"
 }
 trap finish EXIT
-# A TERM without a cancel is this machine shutting down: keep the runtime.
-on_term() {
-  if [ -f __RESUMABLE__ ] && [ ! -f __CANCEL__ ]; then
-    detached=1
-  fi
-  exit 143
-}
-trap on_term TERM INT HUP
+trap 'exit 143' TERM INT HUP
 mkdir -p "$fetch"
 
 get() {
@@ -1182,25 +1139,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_dead_controller_is_picked_up_only_for_a_live_uncancelled_run() {
-        let dir = TempDir::new();
-        let dir = dir.path();
-        assert!(!take_resume(dir), "not started on Colab yet");
-        std::fs::write(dir.join(RESUMABLE_FILE), "").unwrap();
-        assert!(take_resume(dir));
-        std::fs::write(dir.join(super::super::localbox::CANCEL_REQUESTED_FILE), "").unwrap();
-        assert!(!take_resume(dir), "cancelled");
-        std::fs::remove_file(dir.join(super::super::localbox::CANCEL_REQUESTED_FILE)).unwrap();
-        std::fs::write(dir.join(FINISHED_FILE), "").unwrap();
-        assert!(!take_resume(dir), "finished");
-        std::fs::remove_file(dir.join(FINISHED_FILE)).unwrap();
-        for _ in 1..MAX_RESUMES {
-            assert!(take_resume(dir));
-        }
-        assert!(!take_resume(dir), "gives up eventually");
-    }
-
     /// A stand-in for the `colab` CLI: the runtime's filesystem is `$FAKE_ROOT`
     /// and `exec` runs the cell with this machine's python.
     #[cfg(target_os = "linux")]
@@ -1391,42 +1329,13 @@ esac
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_shutdown_leaves_the_run_going_and_a_restart_picks_it_up() {
-        let run = FakeRun::new("echo before; sleep 4; echo after");
-        let child = run.start();
-        run.wait_for(RESUMABLE_FILE);
-        run.term(&child);
-        assert_eq!(run.wait(child), 143);
-        assert_eq!(run.calls("stop"), 0, "kept the runtime: {}", run.log());
-        assert!(!run.dir.join(FINISHED_FILE).exists());
-        assert!(take_resume(&run.dir));
-
-        let code = run.wait(run.start());
-        let log = run.log();
-        assert_eq!(code, 0, "{log}");
-        assert!(log.contains("Picking the run up again"), "{log}");
-        assert_eq!(log.matches("before\n").count(), 1, "{log}");
-        assert_eq!(log.matches("after\n").count(), 1, "{log}");
-        assert_eq!(run.calls("new"), 1);
-        assert_eq!(run.calls("stop"), 1);
-        assert!(!take_resume(&run.dir));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
     fn a_cancel_releases_the_runtime() {
         let run = FakeRun::new("sleep 30");
         let child = run.start();
         run.wait_for(RESUMABLE_FILE);
-        std::fs::write(
-            run.dir.join(super::super::localbox::CANCEL_REQUESTED_FILE),
-            "",
-        )
-        .unwrap();
         run.term(&child);
         assert_eq!(run.wait(child), 143);
         assert_eq!(run.calls("stop"), 1, "{}", run.log());
         assert!(run.dir.join(FINISHED_FILE).exists());
-        assert!(!take_resume(&run.dir));
     }
 }
