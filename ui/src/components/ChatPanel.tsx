@@ -1836,22 +1836,17 @@ function computeToolActivity(part: ChatPart): ToolActivity {
     }
     case "importedchat":
       return { kind: "project", label: m.activity_imported_chat() };
-    case "contextcompaction": {
-      // orx's auto-compact marks its row with the fill that triggered it.
-      const autoPercent = normalizedInput.auto === true && typeof normalizedInput.percent === "number"
-        ? ltr(`${normalizedInput.percent}%`)
-        : null;
+    case "contextcompaction":
       return {
         kind: "command",
         label: part.state?.status === "error"
           ? m.activity_compacting_failed()
           // A row left running (the host died mid-compaction) is not a success.
           : part.state?.status === "running"
-            ? autoPercent ? m.activity_auto_compacting_context({ percent: autoPercent }) : m.activity_compacting_context()
-            : autoPercent ? m.activity_auto_compacted_context({ percent: autoPercent }) : m.activity_compacted_context(),
-        progressLabel: autoPercent ? m.activity_auto_compacting_context({ percent: autoPercent }) : m.activity_compacting_context(),
+            ? m.activity_compacting_context()
+            : m.activity_compacted_context(),
+        progressLabel: m.activity_compacting_context(),
       };
-    }
     default: {
       const detail = description ?? filePath ?? rawCommand ?? part.state?.title ?? "";
       return { kind: "command", label: detail ? `${tool}: ${detail}` : tool };

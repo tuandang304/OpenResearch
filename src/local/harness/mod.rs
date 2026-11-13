@@ -86,16 +86,6 @@ pub(crate) fn native_recovery_snapshot(session_id: &str, current_turn_id: &str) 
     crate::local::chat::handoff::context(&store, &session, current_user_id.as_deref(), None, window)
 }
 
-/// The company behind a harness's models, for picking an independent one.
-pub(crate) fn harness_vendor(harness: &str) -> &'static str {
-    match harness {
-        "claude-code" => "Anthropic",
-        "codex" => "OpenAI",
-        "antigravity" => "Google",
-        _ => "depends on the model",
-    }
-}
-
 pub(crate) fn native_recovery_context(ctx: &TurnCtx, harness: &str) -> Result<Option<String>> {
     let snapshot = native_recovery_snapshot(&ctx.session_id, &ctx.turn_id)?;
     Ok((!snapshot.is_empty()).then(|| format!(

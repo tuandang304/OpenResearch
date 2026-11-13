@@ -1,6 +1,6 @@
 //! Settings routes owned by the tuandang304 fork: research tools, harness
-//! accounts, the decision model, cross-harness review, sub-agent limits, compute routing and
-//! auto-compact, plus the compute routes in `fork_compute`. `up.rs` mounts them all with one
+//! accounts, cross-harness review, sub-agent limits and compute routing, plus the compute
+//! routes in `fork_compute`. `up.rs` mounts them all with one
 //! `.merge(fork_settings::routes())`. See `docs/fork-maintenance.md`.
 
 use super::*;
@@ -33,10 +33,6 @@ pub(super) fn routes() -> Router<AppState> {
             get(compute_routing_settings).post(set_compute_routing_settings),
         )
         .route(
-            "/api/settings/auto-compact",
-            get(auto_compact_settings).post(set_auto_compact_settings),
-        )
-        .route(
             "/api/harnesses/accounts",
             get(harness_accounts::list).post(harness_accounts::add),
         )
@@ -51,10 +47,6 @@ pub(super) fn routes() -> Router<AppState> {
         .route(
             "/api/harnesses/accounts/login",
             get(harness_accounts::login),
-        )
-        .route(
-            "/api/settings/decision-model",
-            get(harness_accounts::decision_settings).post(harness_accounts::set_decision_settings),
         )
         .route(
             "/api/settings/fork-lit-sources",
@@ -187,32 +179,6 @@ async fn set_delegation_policy_settings(
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("sub-agent limits task failed: {e}")))?
-}
-
-async fn auto_compact_settings() -> ApiResult {
-    Ok(Json(json!(crate::local::auto_compact::settings())))
-}
-
-#[derive(Deserialize)]
-struct SetAutoCompactReq {
-    enabled: Option<bool>,
-    percent: Option<u8>,
-    /// `0` turns the token limit off.
-    #[serde(rename = "maxTokens")]
-    max_tokens: Option<u64>,
-}
-
-/// Read at the end of every turn, so a change applies from the next one.
-async fn set_auto_compact_settings(Json(req): Json<SetAutoCompactReq>) -> ApiResult {
-    tokio::task::spawn_blocking(move || {
-        crate::local::auto_compact::set_settings(req.enabled, req.percent, req.max_tokens)
-            .map(|settings| Json(json!(settings)))
-            .map_err(|error| {
-                ApiError::from(anyhow!("could not save the auto-compact setting: {error}"))
-            })
-    })
-    .await
-    .map_err(|e| ApiError::from(anyhow!("auto-compact task failed: {e}")))?
 }
 
 fn compute_routing_settings_json() -> Value {

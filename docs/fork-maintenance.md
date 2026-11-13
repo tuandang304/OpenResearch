@@ -30,20 +30,19 @@ git diff --numstat upstream/main -- . ':!ui/dist' ':!ui/messages' \
 
 | Fork code | Hook in the upstream file |
 | --- | --- |
-| `src/commands/up/fork_settings.rs` (all fork API routes: research tools, harness accounts, decision model, cross-harness, compute routing) and `fork_compute.rs` (prices, Colab, GCP, Kaggle handlers) | `mod` lines and one `.merge(fork_settings::routes())` in `up.rs`; one `use super::fork_compute::{...}` in `compute_settings.rs` for `orx compute show/configure` |
+| `src/commands/up/fork_settings.rs` (all fork API routes: research tools, harness accounts, cross-harness, compute routing) and `fork_compute.rs` (prices, Colab, GCP, Kaggle handlers) | `mod` lines and one `.merge(fork_settings::routes())` in `up.rs`; one `use super::fork_compute::{...}` in `compute_settings.rs` for `orx compute show/configure` |
 | `src/commands/compute/prices.rs` (`orx compute prices`), `gpu_zones.rs` (`orx compute gpu-zones`) | `mod prices;`, `mod gpu_zones;` and the `Prices` and `GpuZones` subcommand variants in `compute.rs` |
 | `src/commands/supervise/gcp_run.rs`, `memory_guard.rs`, `colab_resume.rs` | `mod` lines, the `gcp_job` dispatch, the memory guard calls and the Colab resume check in `run_local` in `supervise.rs` |
 | `src/jobs/modal/credit.rs` (Modal credit and list prices) | `mod credit; pub use credit::*;` and the `billing` launcher subcommand in `modal.rs` |
-| `ui/src/features/fork/ComputeSections.tsx` (Colab, Kaggle cards), `SettingsCards.tsx` (harness accounts, failover, decision model, cross-harness, compute routing, provider prices, GCP) | two imports and the card mounts in `SettingsPage.tsx`; the shared class names and helpers they use are exported from `SettingsPage.tsx` |
+| `ui/src/features/fork/ComputeSections.tsx` (Colab, Kaggle cards), `SettingsCards.tsx` (harness accounts, failover, cross-harness, compute routing, provider prices, GCP) | two imports and the card mounts in `SettingsPage.tsx`; the shared class names and helpers they use are exported from `SettingsPage.tsx` |
 | `src/commands/discover/extra_sources.rs` (`orx discover arxiv\|semanticscholar`) | `pub(crate) mod extra_sources;` and two match arms in `discover.rs`; two `DiscoverCommand` variants in `main.rs`; `pub(crate)` on `http`, `public_get`, `compare_dates` in `client.rs`; the filter in `set_lit_sources_settings` in `up.rs` that keeps fork toggles; `/api/settings/fork-lit-sources` lives in `fork_settings.rs` |
 | `ui/src/features/fork/litSourceMeta.ts`, `ForkLitSourcesList.tsx` (arXiv and Semantic Scholar names, marks, toggles) | `ForkLitSource` in the `LitSource` union and strategy check in `orxCommand.ts`; two spreads in `LitSourceLogo.tsx`; `<ForkLitSourcesList />` in `LitSourcesPicker.tsx`; two activity labels in `ChatPanel.tsx` |
 | `ui/src/features/fork/computeApi.ts` (Colab, GCP, Kaggle types and calls) | `export * from "./features/fork/computeApi";` in `api.ts` |
 | `src/jobs/{colab,colab_account,colab_runtimes,gcp,gcp_billing,kaggle,provider_prices}.rs`, `src/local/gcp.rs` | `mod` lines and backend dispatch in `jobs/mod.rs`, `compute.rs`, `localrun.rs` |
 | `src/jobs/checkpoints.rs` (checkpoint storage over rclone for GCP and Modal); `CheckpointStorageCard` in `SettingsCards.tsx`; `/api/settings/checkpoints` in `fork_compute.rs` | `pub mod checkpoints;` in `jobs/mod.rs`; the `Checkpoints` subcommand in `compute.rs`; the script wrap and env in `local/modal.rs` and `engine/adapters/modal.rs`; `config::user_home` |
 | `src/local/harness/{accounts,failover}.rs`, `src/store/harness_accounts.rs`, `src/commands/up/harness_accounts.rs` | Turn routing in `local/chat/mod.rs`, account homes in `native_store.rs`, harness CLI in `commands/agent.rs` |
-| `src/local/auto_compact.rs` (auto-compact threshold, settings, failure back-off); `AutoCompactCard` in `SettingsCards.tsx` | `pub mod auto_compact;` in `local/mod.rs`; two settings fields in `telemetry.rs`; in `local/chat/mod.rs` the end-of-turn check, `auto_compact`/`start_compaction` split out of `compact_session`, and the marker's `input`; the auto row label in `ChatPanel.tsx`; the status line and Compact now button in `ContextMeter.tsx` |
 
-Still inline: the harness, routing and decision model types in `api.ts`, the
+Still inline: the harness and routing types in `api.ts`, the
 chat-time account routing in `local/chat/mod.rs`, and `recommended_model` in
 `up.rs`. These are woven into upstream logic rather than standalone blocks.
 

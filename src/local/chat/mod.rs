@@ -1962,55 +1962,6 @@ impl ChatHost {
         let Some(guard) = TurnGuard::claim(self, session_id, None).await else {
             return Err(anyhow!("session is busy — interrupt it first"));
         };
-        self.start_compaction(guard, session_id, None).await
-    }
-
-    /// Auto-compact a session whose turn just ended `percent` full (see
-    /// [`crate::local::auto_compact`]). Runs ahead of any queued message: a
-    /// slot left draining for the queue is taken over, and the queue drains
-    /// once the compaction finishes. `false` when the session is busy with
-    /// something else or has nothing to compact.
-    async fn auto_compact(self: &Arc<Self>, session_id: &str, percent: u8) -> bool {
-        let guard = {
-            let mut turns = self.turns.lock().await;
-            match turns.get(session_id) {
-                Some(TurnState::Draining) => {
-                    turns.insert(
-                        session_id.to_string(),
-                        TurnState::Reserved { turn_id: None },
-                    );
-                    Some(TurnGuard::adopt(self, session_id))
-                }
-                Some(_) => None,
-                None => {
-                    drop(turns);
-                    TurnGuard::claim(self, session_id, None).await
-                }
-            }
-        };
-        let Some(guard) = guard else {
-            return false;
-        };
-        match self
-            .start_compaction(guard, session_id, Some(percent))
-            .await
-        {
-            Ok(_) => true,
-            Err(error) => {
-                eprintln!("orx up: auto-compact {session_id}: {error}");
-                false
-            }
-        }
-    }
-
-    /// Start compacting in the slot `guard` holds. `auto` is the fill
-    /// percentage that triggered an auto-compact, `None` for a manual one.
-    async fn start_compaction(
-        self: &Arc<Self>,
-        guard: TurnGuard,
-        session_id: &str,
-        auto: Option<u8>,
-    ) -> Result<WireMessage> {
         let session = {
             let store = Store::open()?;
             store
@@ -2042,8 +1993,7 @@ impl ChatHost {
         }
         let marker = {
             let store = Store::open()?;
-            let input = auto.map(|percent| json!({ "auto": true, "percent": percent }));
-            self.publish_compaction_marker(&store, session_id, None, "running", None, input)?
+            self.publish_compaction_marker(&store, session_id, None, "running", None)?
         };
 
         let host = self.clone();
@@ -2051,7 +2001,7 @@ impl ChatHost {
         let owned_marker = marker.clone();
         let mut turns = self.turns.lock().await;
         let handle = tokio::spawn(async move {
-            host.run_compaction(owned_session, session, snapshot, owned_marker, auto)
+            host.run_compaction(owned_session, session, snapshot, owned_marker)
                 .await;
         });
         turns.insert(
@@ -2082,7 +2032,6 @@ impl ChatHost {
         session: StoredChatSession,
         snapshot: String,
         marker: WireMessage,
-        auto: Option<u8>,
     ) {
         let outcome = self
             .compaction_outcome(&session_id, &session, &snapshot)
@@ -2099,11 +2048,6 @@ impl ChatHost {
                     Some(error) => ("error", Some(error.to_string())),
                     None => ("completed", None),
                 };
-                if settled.is_none() {
-                    crate::local::auto_compact::record_compacted(&session_id);
-                } else if auto.is_some() {
-                    crate::local::auto_compact::record_failure(&session_id);
-                }
                 // Stop can land mid-write; its `error` row is the truthful one.
                 if self.owns_compaction(&session_id, &marker.id).await {
                     let _ = self.publish_compaction_marker(
@@ -2112,7 +2056,6 @@ impl ChatHost {
                         Some(&marker),
                         status,
                         detail,
-                        None,
                     );
                 }
             }
@@ -2238,15 +2181,7 @@ impl ChatHost {
         previous: Option<&WireMessage>,
         status: &str,
         error: Option<String>,
-        input: Option<Value>,
     ) -> Result<WireMessage> {
-        // An in-place update keeps what the row was opened with (auto or not).
-        let input = input.or_else(|| {
-            previous
-                .and_then(|previous| previous.parts.first())
-                .and_then(|part| part.state.as_ref())
-                .and_then(|state| state.input.clone())
-        });
         let mut message = match previous {
             Some(previous) => previous.clone(),
             None => WireMessage {
@@ -2258,11 +2193,12 @@ impl ChatHost {
                 parent_id: None,
             },
         };
-        let mut part = WirePart::tool(COMPACTED_TOOL, COMPACTED_TOOL, status, error);
-        if let Some(state) = part.state.as_mut() {
-            state.input = input;
-        }
-        message.parts = vec![part];
+        message.parts = vec![WirePart::tool(
+            COMPACTED_TOOL,
+            COMPACTED_TOOL,
+            status,
+            error,
+        )];
         message.completed_at = (status != "running").then(now_ms);
         let stored = StoredChatMessage {
             id: message.id.clone(),
@@ -6522,7 +6458,7 @@ impl ChatHost {
             });
             // Captured before the harness runs: it may rewrite both.
             let base_text = ctx.text.clone();
-            ctx.select_account().await;
+            ctx.select_account();
             let mut result = run_harness_turn(&mut ctx).await;
             ctx.record_account_attempt(&result);
             let mut tried = vec![ctx.harness.clone()];
@@ -6537,7 +6473,7 @@ impl ChatHost {
                 match step {
                     FailoverStep::Harness(next, reason, permission) => {
                         ctx.fail_over(&next, &reason, permission, &base_text);
-                        ctx.select_account().await;
+                        ctx.select_account();
                         steer_route = ctx.host.clone().refresh_steering(&mut ctx, steer_route);
                     }
                     FailoverStep::Account {
@@ -6631,19 +6567,9 @@ impl ChatHost {
                     let _ = store.set_chat_session_context_usage(&ctx.session_id, &json);
                 }
             }
-            let auto_compact = ctx
-                .context_usage
-                .as_ref()
-                .and_then(|usage| crate::local::auto_compact::due(&ctx.session_id, usage));
             ctx.host
                 .finish_turn(&ctx.session_id, Some(&ctx.assistant.id))
                 .await;
-            // The compaction drains the queue itself once it finishes.
-            if let Some(percent) = auto_compact {
-                if ctx.host.auto_compact(&ctx.session_id, percent).await {
-                    return;
-                }
-            }
             ctx.host.drain_queue(&ctx.session_id).await;
         });
         turns.insert(
@@ -6741,9 +6667,6 @@ impl ChatHost {
                 }
             }
         }
-        if let Some(step) = self.decided_failover(ctx, &policy, message, tried).await {
-            return Some(step);
-        }
         for id in policy.candidates(&ctx.harness, tried) {
             if !self.owns_turn(&ctx.session_id, &ctx.turn_id).await {
                 return None;
@@ -6771,94 +6694,6 @@ impl ChatHost {
             }
         }
         None
-    }
-
-    /// The fallback harness the decision model picks among every ready one,
-    /// when it is on and more than one is ready. `None` leaves the user's
-    /// fallback order to decide; harnesses found not ready are added to
-    /// `tried` either way, and the picked one too.
-    async fn decided_failover(
-        &self,
-        ctx: &TurnCtx,
-        policy: &crate::local::harness::HarnessFailover,
-        message: &str,
-        tried: &mut Vec<String>,
-    ) -> Option<FailoverStep> {
-        use crate::local::decision;
-        use crate::local::harness::accounts;
-        if !decision::settings().active() {
-            return None;
-        }
-        let mut ready = Vec::new();
-        for id in policy.candidates(&ctx.harness, tried) {
-            let Some(permission) = crate::local::harness::carry_permission(
-                &ctx.harness,
-                ctx.permission_mode,
-                ctx.plan_mode,
-                &id,
-            ) else {
-                tried.push(id);
-                continue;
-            };
-            let info = tokio::time::timeout(
-                FAILOVER_DETECT_TIMEOUT,
-                crate::local::harness::detect_harness(&id),
-            )
-            .await
-            .ok()
-            .flatten()
-            .filter(|info| info.agent_ready);
-            match info {
-                Some(info) => ready.push((id, permission, info)),
-                None => tried.push(id),
-            }
-        }
-        if ready.len() < 2 || !self.owns_turn(&ctx.session_id, &ctx.turn_id).await {
-            return None;
-        }
-        let now = crate::store::now_ms();
-        let mut request = decision::RouteRequest::new(decision::Purpose::Failover, &ctx.text);
-        request.current = decision::Current {
-            harness: Some(ctx.harness.clone()),
-            model: ctx.model.clone(),
-            account: ctx.account.clone(),
-        };
-        request.harnesses = ready
-            .iter()
-            .map(|(id, _, info)| decision::HarnessOption {
-                id: id.clone(),
-                vendor: crate::local::harness::harness_vendor(id).to_string(),
-                models: decision::model_ids(&info.models),
-                recommended_model: info.recommended_model.clone(),
-            })
-            .collect();
-        if let Ok(statuses) = accounts::statuses(None) {
-            request.accounts = statuses
-                .iter()
-                .filter(|account| account.signed_in && !account.paused)
-                .filter(|account| ready.iter().any(|(id, _, _)| *id == account.harness))
-                .flat_map(|account| {
-                    account.pools.iter().map(|pool| {
-                        decision::AccountOption::from_status(
-                            &account.harness,
-                            &account.id,
-                            pool,
-                            now,
-                        )
-                    })
-                })
-                .collect();
-        }
-        let picked = match decision::decide(&request).await {
-            Ok(route) => route.and_then(|route| route.harness)?,
-            Err(error) => {
-                eprintln!("orx up: decision model unavailable, using the fallback order: {error}");
-                return None;
-            }
-        };
-        let (id, permission, _) = ready.into_iter().find(|(id, _, _)| *id == picked)?;
-        tried.push(id.clone());
-        Some(FailoverStep::Harness(id, message.to_string(), permission))
     }
 
     /// Point the session's steering at the harness a turn failed over to:
@@ -8926,10 +8761,8 @@ impl TurnCtx {
     }
 
     /// Run this turn on the account with the most quota left for its model,
-    /// staying on the chat's last account while that one has room. When that
-    /// account runs low and the decision model is on, it picks among the
-    /// accounts with room instead.
-    async fn select_account(&mut self) {
+    /// staying on the chat's last account while that one has room.
+    fn select_account(&mut self) {
         use crate::local::harness::accounts;
         if !accounts::supports_accounts(&self.harness) {
             self.account = None;
@@ -8945,45 +8778,11 @@ impl TurnCtx {
             })
             .flatten()
             .filter(|id| accounts::find(&self.harness, id).is_some());
-        let chosen = self
-            .decided_account(sticky.as_deref())
-            .await
-            .or_else(|| accounts::choose(&self.harness, self.model.as_deref(), sticky.as_deref()))
+        let chosen = accounts::choose(&self.harness, self.model.as_deref(), sticky.as_deref())
             .or_else(|| sticky.clone())
             .unwrap_or_else(|| accounts::DEFAULT.to_string());
         let previous = sticky.unwrap_or_else(|| accounts::DEFAULT.to_string());
         self.adopt_account(&chosen, &previous);
-    }
-
-    /// The account the decision model picks for this turn, when it is on and
-    /// there is a choice to make. `None` leaves the choice to quota alone.
-    async fn decided_account(&self, sticky: Option<&str>) -> Option<String> {
-        use crate::local::decision;
-        use crate::local::harness::accounts;
-        if !decision::settings().active() {
-            return None;
-        }
-        let options = accounts::open_choice(&self.harness, self.model.as_deref(), sticky)?;
-        let now = crate::store::now_ms();
-        let mut request = decision::RouteRequest::new(decision::Purpose::Turn, &self.text);
-        request.current = decision::Current {
-            harness: Some(self.harness.clone()),
-            model: self.model.clone(),
-            account: sticky.map(str::to_string),
-        };
-        request.accounts = options
-            .iter()
-            .map(|(id, status)| {
-                decision::AccountOption::from_status(&self.harness, id, status, now)
-            })
-            .collect();
-        match decision::decide(&request).await {
-            Ok(route) => route.and_then(|route| route.account),
-            Err(error) => {
-                eprintln!("orx up: decision model unavailable, routing by quota: {error}");
-                None
-            }
-        }
     }
 
     fn adopt_account(&mut self, account: &str, previous: &str) {
@@ -9380,7 +9179,6 @@ impl TurnCtx {
                 usage.context_window = prev.context_window;
             }
         }
-        crate::local::auto_compact::observe(&self.session_id, usage.used_tokens);
         self.context_usage = Some(usage.clone());
         self.host.emit(
             "chat.usage",
@@ -10964,30 +10762,18 @@ mod cap_tests {
         ));
 
         let running = host
-            .publish_compaction_marker(
-                &store,
-                "session",
-                None,
-                "running",
-                None,
-                Some(json!({ "auto": true, "percent": 85 })),
-            )
+            .publish_compaction_marker(&store, "session", None, "running", None)
             .unwrap();
         assert_eq!(running.parts[0].state.as_ref().unwrap().status, "running");
         assert!(running.completed_at.is_none());
 
         let done = host
-            .publish_compaction_marker(&store, "session", Some(&running), "completed", None, None)
+            .publish_compaction_marker(&store, "session", Some(&running), "completed", None)
             .unwrap();
         assert_eq!(done.id, running.id, "the row is updated, not replaced");
         assert_eq!(done.parent_id, running.parent_id);
         assert!(done.completed_at.is_some());
         assert_eq!(done.parts[0].state.as_ref().unwrap().status, "completed");
-        assert_eq!(
-            done.parts[0].state.as_ref().unwrap().input,
-            Some(json!({ "auto": true, "percent": 85 })),
-            "an auto-compact row stays marked as one when it settles"
-        );
         // One row on the branch: a second would read as a new branch root.
         assert_eq!(store.list_chat_messages("session").unwrap().len(), 1);
 
@@ -11198,25 +10984,6 @@ mod cap_tests {
         assert!(error.contains("busy"), "unexpected error: {error}");
         // The live turn's slot survives the refusal.
         assert!(host.turns.lock().await.contains_key("session"));
-    }
-
-    #[tokio::test]
-    async fn auto_compact_leaves_a_running_turn_alone() {
-        let host = Arc::new(ChatHost::new(
-            Arc::new(AgentHost::new(None)),
-            Arc::new(crate::local::codex::CodexHost::new()),
-            Arc::new(crate::local::claude::ClaudeHost::new()),
-        ));
-        host.turns
-            .lock()
-            .await
-            .insert("session".into(), TurnState::Reserved { turn_id: None });
-
-        assert!(!host.auto_compact("session", 90).await);
-        assert!(matches!(
-            host.turns.lock().await.get("session"),
-            Some(TurnState::Reserved { .. })
-        ));
     }
 
     #[test]

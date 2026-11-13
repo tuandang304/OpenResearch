@@ -1668,16 +1668,6 @@ export interface HarnessFailover {
   order: HarnessId[];
 }
 
-export interface DecisionModelSettings {
-  enabled: boolean;
-  model: string;
-  defaultModel: string;
-  keySource: "env" | "settings" | null;
-  maskedKey: string | null;
-  /** `null` right after a save, which skips the network check. */
-  validationStatus: "missing" | "valid" | "invalid" | "modelUnavailable" | null;
-}
-
 export interface ComputeRoutingSettings {
   enabled: boolean;
   /** Backends the user kept out of per-run routing. */
@@ -1720,15 +1710,6 @@ export interface ProviderPrices {
   offers: ProviderOffer[];
   note: string | null;
   error: string | null;
-}
-
-/** Compact a chat on its own once a turn ends with its context this full. */
-export interface AutoCompactSettings {
-  enabled: boolean;
-  /** Threshold in percent of the context window (50–95). */
-  percent: number;
-  /** Also compact once this many tokens are in use; `null` = no token limit. */
-  maxTokens: number | null;
 }
 
 export interface CrossHarnessSettings {
@@ -3023,11 +3004,6 @@ export function createApi(
     get<ChatPart | null>(`/api/chat/sessions/${sessionId}/subagent?partId=${encodeURIComponent(partId)}`, signal);
 
   // --- fork additions ---
-  const getDecisionModelSettings = (signal?: AbortSignal) => get<DecisionModelSettings>("/api/settings/decision-model", signal);
-
-  const saveDecisionModelSettings = (patch: { enabled?: boolean; model?: string; apiKey?: string }) =>
-    post<DecisionModelSettings>("/api/settings/decision-model", patch);
-
   const getComputeRoutingSettings = (signal?: AbortSignal) =>
     get<ComputeRoutingSettings>("/api/settings/compute-routing", signal);
 
@@ -3039,13 +3015,6 @@ export function createApi(
 
   const setComputeRoutingSettings = (update: { enabled?: boolean; excluded?: ComputeTargetId[] }) =>
     post<ComputeRoutingSettings>("/api/settings/compute-routing", update);
-
-  const getAutoCompactSettings = (signal?: AbortSignal) =>
-    get<AutoCompactSettings>("/api/settings/auto-compact", signal);
-
-  /** `maxTokens: 0` turns the token limit off. */
-  const setAutoCompactSettings = (update: { enabled?: boolean; percent?: number; maxTokens?: number }) =>
-    post<AutoCompactSettings>("/api/settings/auto-compact", update);
 
   const getCrossHarnessSettings = (signal?: AbortSignal) =>
     get<CrossHarnessSettings>("/api/settings/cross-harness", signal);
@@ -3114,13 +3083,9 @@ export function createApi(
       .then((r) => r.sleep);
 
   const forkApi = {
-    getDecisionModelSettings,
-    saveDecisionModelSettings,
     getComputeRoutingSettings,
     getComputePrices,
     setComputeRoutingSettings,
-    getAutoCompactSettings,
-    setAutoCompactSettings,
     getCrossHarnessSettings,
     setCrossHarnessSettings,
     getDelegationPolicy,

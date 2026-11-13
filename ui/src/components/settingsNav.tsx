@@ -13,7 +13,7 @@ type SettingsNavItem = {
   activeTabs: Tab[];
 };
 
-export const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "context", "storage"];
+export const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
 
 /** Primary rail entries. Configuration sections share the Settings entry. */
 export const SETTINGS_NAV: SettingsNavItem[] = [
