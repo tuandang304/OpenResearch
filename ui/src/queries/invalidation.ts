@@ -21,7 +21,7 @@ export function isImmutableQuery(query: Query) {
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
-export const liveFamilies = ["getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
+const liveFamilies = ["getSessionExperiments", "getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
 
 const settingsFamilies: Record<string, readonly string[]> = {
   hf: ["getHfSettings", "getComputeSettings", "getEnvVars", "getTrackioRuns"],
@@ -72,6 +72,23 @@ export function createInvalidation(client: WorkspaceClient) {
     return queryClient.invalidateQueries(filters);
   }
 
+  let repairing: Promise<void> | undefined;
+  let repairAgain = false;
+  function repairLiveQueries() {
+    repairAgain = true;
+    repairing ??= (async () => {
+      const scope = workspaceScope();
+      while (repairAgain && isCurrentScope(scope)) {
+        // Keep cold-read callers alive, then repair their pre-gap snapshot once it lands.
+        repairAgain = queryClient.getQueryCache().findAll({ queryKey: scope, type: "active" }).some((query) =>
+          liveFamilies.includes(String(query.queryKey[2])) && !isImmutableQuery(query) && query.state.data === undefined && query.state.fetchStatus === "fetching");
+        // Not deferred while hidden: the loop waits on these refetches.
+        await queryClient.invalidateQueries({ queryKey: scope, predicate: (query) => liveFamilies.includes(String(query.queryKey[2])) && !isImmutableQuery(query) });
+      }
+    })().finally(() => { repairing = undefined; });
+    return repairing;
+  }
+
   function invalidateFamilies(families: readonly string[], scope = workspaceScope(), predicate?: QueryFilters["predicate"], cancelReads = false) {
     if (!isCurrentScope(scope)) return;
     const filters = {
@@ -82,7 +99,7 @@ export function createInvalidation(client: WorkspaceClient) {
       void queryClient.cancelQueries(filters).then(() => {
         if (isCurrentScope(scope)) void invalidate(filters);
       });
-    } else void invalidate(filters);
+    } else return invalidate(filters);
   }
 
   function invalidateProjectFiles(
@@ -174,6 +191,7 @@ export function createInvalidation(client: WorkspaceClient) {
   }
 
   return {
+    repairLiveQueries,
     invalidateFamilies,
     invalidateProjectFiles,
     removeSession,
