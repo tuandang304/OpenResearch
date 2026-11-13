@@ -419,7 +419,8 @@ async fn run_cli(cli: &Path, home: &Path, args: &[&str]) -> std::result::Result<
 
 /// The CLI's own last error line, or a sign-in hint for an auth failure.
 fn cli_error(stderr: &str, stdout: &str) -> String {
-    let text = format!("{stderr}\n{stdout}");
+    // The CLI prints its error to stderr after any stdout, so it reads last.
+    let text = format!("{stdout}\n{stderr}");
     let lower = text.to_ascii_lowercase();
     if lower.contains("authentication required")
         || lower.contains("401")
@@ -430,9 +431,16 @@ fn cli_error(stderr: &str, stdout: &str) -> String {
     }
     text.lines()
         .map(str::trim)
+        .filter(|line| !is_version_warning(line))
         .rfind(|line| !line.is_empty())
         .map(|line| line.chars().take(300).collect())
         .unwrap_or_else(|| "The Kaggle CLI failed without a message.".into())
+}
+
+/// The notice the CLI prints on every call once Kaggle publishes a newer
+/// release; it never explains a failure.
+fn is_version_warning(line: &str) -> bool {
+    line.starts_with("Warning: Looks like you're using an outdated `kaggle` version")
 }
 
 /// A new account's credentials, as the user pasted them.
@@ -1806,6 +1814,22 @@ exit 0
         assert_eq!(
             cli_error("Traceback\nValueError: boom\n", ""),
             "ValueError: boom"
+        );
+    }
+
+    #[test]
+    fn the_outdated_version_notice_never_hides_the_error() {
+        let notice = "Warning: Looks like you're using an outdated `kaggle` version (installed: 2.2.4), please consider upgrading to the latest version (2.2.5)\n";
+        assert_eq!(
+            cli_error(
+                "429 Client Error: Too Many Requests for url: https://api.kaggle.com/v1/x\n",
+                notice
+            ),
+            "429 Client Error: Too Many Requests for url: https://api.kaggle.com/v1/x"
+        );
+        assert_eq!(
+            cli_error("", notice),
+            "The Kaggle CLI failed without a message."
         );
     }
 
