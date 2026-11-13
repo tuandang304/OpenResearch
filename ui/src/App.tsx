@@ -129,6 +129,7 @@ import { Button, IconButton, MenuItem, SEGMENTED_CLASS_NAME, showAlert, Spinner,
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 import { WorkspaceConnection } from "./components/WorkspaceConnection";
 import { delegateModelLabel } from "./delegates";
+import { useModelName } from "./components/pickerAgents";
 import { lazyNamed } from "./lazyComponent";
 
 // Views with heavy dependencies (xterm, React Flow, diffs, the settings forms)
@@ -1118,19 +1119,20 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [runExperimentNames]);
 
   // Rebuilt only when a title or harness changes, so transcripts do not re-render on every session update.
+  const modelName = useModelName();
   const chatSessionsRef = useRef(sessionsQuery.data);
   chatSessionsRef.current = sessionsQuery.data;
   const chatInfoKey = (sessionsQuery.data ?? [])
-    .map((session) => `${session.id}\u0000${session.title ?? ""}\u0000${session.model ?? ""}\u0000${session.harness}`)
+    .map((session) => `${session.id}\u0000${session.title ?? ""}\u0000${session.model ?? ""}\u0000${session.harness}\u0000${session.profile ?? ""}`)
     .join("\u0001");
   const chatInfo = useMemo(() => {
     void chatInfoKey;
     const chats = new Map((chatSessionsRef.current ?? []).map((session) => [
       session.id,
-      { title: session.title?.trim() || delegateModelLabel(session), harness: session.harness },
+      { title: session.title?.trim() || delegateModelLabel(session, modelName), harness: session.harness },
     ]));
     return (sessionId: string) => chats.get(sessionId);
-  }, [chatInfoKey]);
+  }, [chatInfoKey, modelName]);
 
   const experimentName = useCallback((experimentId: string) => {
     const exact = experimentNames.get(experimentId);
@@ -1855,11 +1857,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const sideParentSession = sessionsQuery.data?.find((session) => session.id === activeSessionId);
   const sideDraftAgent = useMemo(() => sideParentSession ? {
     harness: sideParentSession.harness,
+    profile: sideParentSession.profile ?? null,
     model: sideParentSession.model,
     serviceTier: sideParentSession.serviceTier,
     permissionMode: sideParentSession.permissionMode === "plan" ? null : sideParentSession.permissionMode,
     reasoningLevel: sideParentSession.reasoningLevel,
-  } : null, [sideParentSession?.harness, sideParentSession?.model,
+  } : null, [sideParentSession?.harness, sideParentSession?.profile, sideParentSession?.model,
     sideParentSession?.serviceTier, sideParentSession?.permissionMode,
     sideParentSession?.reasoningLevel]);
   const requestedCodeTab =
@@ -2046,7 +2049,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         <div className={EMPTY_STATE_CLASS_NAME}>
           <Spinner />
         </div>
-        <WorkspaceConnection runtime={runtime} corner />
       </div>
     );
   }

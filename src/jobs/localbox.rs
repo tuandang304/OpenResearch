@@ -110,7 +110,7 @@ pub const FAILURE_REASON_FILE: &str = "failure_reason";
 
 /// The terminal state recorded in exit_code, if any. An empty file is run.sh
 /// mid-write (`>` truncates before the code lands) — not terminal yet.
-fn exit_code_state(dir: &Path) -> Option<JobState> {
+pub(crate) fn exit_code_state(dir: &Path) -> Option<JobState> {
     let raw = std::fs::read_to_string(dir.join("exit_code")).ok()?;
     let raw = raw.trim();
     if raw.is_empty() {

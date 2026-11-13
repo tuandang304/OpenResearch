@@ -12,7 +12,7 @@ pub async fn billing(since_ms: Option<i64>) -> Result<Value> {
     let since = since_ms.map(|ms| ms.to_string());
     let mut args = vec!["billing"];
     args.extend(since.as_deref());
-    let out = launcher_capture(&args, None).await?;
+    let out = launcher_capture(&args, None, None, None).await?;
     serde_json::from_slice(&out).map_err(|e| anyhow!("Modal billing output was not JSON: {e}"))
 }
 

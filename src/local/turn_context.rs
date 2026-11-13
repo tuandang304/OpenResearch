@@ -218,6 +218,7 @@ mod tests {
         {
             let store = Store::open_at(root.clone()).unwrap();
             let mut session = StoredChatSession {
+                profile_id: None,
                 id: "chat".into(),
                 project_id: "p".into(),
                 harness: "claude".into(),

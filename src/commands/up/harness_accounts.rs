@@ -169,9 +169,12 @@ async fn run_login(
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
     let mut output = String::new();
-    let completed = (req.harness == "antigravity")
-        .then_some(super::harness_setup::antigravity_prompt_ready as fn(&str) -> bool);
-    match super::relay_pty(socket, session, Some(&mut output), size, completed).await {
+    let mut screen = super::harness_setup::TerminalScreen {
+        completed: (req.harness == "antigravity")
+            .then_some(super::harness_setup::antigravity_prompt_ready as fn(&str) -> bool),
+        sign_in: None,
+    };
+    match super::relay_pty(socket, session, Some(&mut output), size, Some(&mut screen)).await {
         Some(Ok(_)) | Some(Err(_)) if accounts::signed_in(&req.harness, &req.id) => Ok(()),
         Some(Ok(status)) if status.success() => Err(
             "The sign-in finished, but no saved credentials were found for this account.".into(),
