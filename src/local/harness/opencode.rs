@@ -46,9 +46,6 @@ use crate::local::local_models::is_loopback_url;
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::{find_opencode, ResolvedBinary};
 
-const OPENCODE_REINSTALL: &str =
-    "Reinstall opencode (curl -fsSL https://opencode.ai/install | bash)";
-
 #[path = "opencode_v2.rs"]
 mod v2;
 
@@ -305,10 +302,10 @@ impl OpenCode {
             // Authentication failures are reported by user-initiated requests.
             info.models = models;
         } else if info.install_broken {
-            info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
+            info.agent_note = Some(info.broken_note("Reinstall it"));
         } else if !info.installed {
             info.agent_note = Some(
-                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then configure a local model or sign in with `opencode auth login`."
+                "Install OpenCode, then configure a local model or sign in with `opencode auth login`."
                     .to_string(),
             );
         } else if !snapshot {
@@ -485,8 +482,10 @@ impl Harness for OpenCode {
 fn opencode_auth_path() -> Option<PathBuf> {
     let base = crate::local::shell_env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))?;
-    Some(base.join("opencode").join("auth.json"))
+        .or_else(|| crate::config::home_dir().map(|h| h.join(".local").join("share")))?;
+    Some(crate::config::test_contained(
+        base.join("opencode").join("auth.json"),
+    ))
 }
 
 /// The cheap config read for the snapshot pass: `OPENCODE_CONFIG_CONTENT`,
@@ -523,7 +522,7 @@ fn snapshot_config() -> (Value, bool) {
         // alone; the file never enters the picture.
         json!({})
     } else if let Some(custom) = crate::local::shell_env::var("OPENCODE_CONFIG") {
-        let path = PathBuf::from(custom);
+        let path = crate::config::test_contained(PathBuf::from(custom));
         let parsed = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str::<Value>(&text).ok());
@@ -531,7 +530,7 @@ fn snapshot_config() -> (Value, bool) {
         parsed.unwrap_or(Value::Null)
     } else {
         let dir = crate::local::shell_env::var("OPENCODE_CONFIG_DIR")
-            .map(PathBuf::from)
+            .map(|dir| crate::config::test_contained(dir.into()))
             .unwrap_or_else(|| super::xdg_config_home().join("opencode"));
         let json = dir.join("opencode.json");
         let parsed = std::fs::read_to_string(&json)
@@ -839,7 +838,7 @@ async fn opencode_child(
 async fn run_models(bin: PathBuf, args: &[&str]) -> Option<String> {
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.args(args)
-        .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+        .current_dir(crate::config::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
@@ -2146,6 +2145,19 @@ mod tests {
         assert!(native_store::opencode_database::DatabaseLease::acquire(&db, 1).is_err());
     }
 
+    #[test]
+    fn config_overrides_outside_the_test_root_panic() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        for var in ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR"] {
+            std::env::set_var(var, "/orx-not-a-config");
+            let read = std::panic::catch_unwind(snapshot_config);
+            assert!(read.is_err(), "{var} read {:?}", read.unwrap());
+            std::env::remove_var(var);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn v1_one_shot_verifies_file_captured_config_and_generates_on_selected_model() {
@@ -2183,6 +2195,7 @@ mod tests {
             .env_clear()
             .args(["--exact", "local::harness::opencode::tests::v1_one_shot_verifies_file_captured_config_and_generates_on_selected_model", "--nocapture"])
             .env(CHILD, &script)
+            .env("TMPDIR", std::env::temp_dir())
             .env("HOME", root)
             .env("PATH", "/usr/bin:/bin")
             .env("XDG_DATA_HOME", root.join("data"))
@@ -2247,30 +2260,11 @@ mod tests {
 
     #[test]
     fn detection_lists_cloud_models_without_generating() {
-        const CHILD: &str = "ORX_TEST_OPENCODE_DETECTION";
-        if std::env::var_os(CHILD).is_some() {
-            let runtime = tokio::runtime::Runtime::new().unwrap();
-            let info = runtime.block_on(OpenCode.detect()).unwrap();
-            assert!(info.installed && info.authenticated && info.agent_ready);
-            assert!(info
-                .models
-                .iter()
-                .any(|model| model.id == "openrouter/paid"));
-            let calls = std::fs::read_to_string(std::env::var_os("ORX_TEST_OPENCODE_LOG").unwrap())
-                .unwrap();
-            assert!(calls.lines().any(|line| line.starts_with("models")));
-            assert!(
-                !calls.lines().any(|line| line.starts_with("run")),
-                "detection generated text: {calls}"
-            );
+        if !crate::config::in_test_child(&[]) {
             return;
         }
-
-        // A subprocess isolates HOME, credentials and detection caches from
-        // other tests. The CLI fixture records commands; it never calls a model.
-        let fixture =
-            crate::local::git::TemporaryDirectory::new("orx-detect-no-generation").unwrap();
-        let root = fixture.path();
+        // The CLI fixture records commands; it never calls a model.
+        let root = std::env::temp_dir();
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let data = root.join("data");
@@ -2294,37 +2288,25 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let mut child = crate::process::command(std::env::current_exe().unwrap());
-        child.env_clear();
-        for key in ["SystemRoot", "COMSPEC", "TEMP", "TMP"] {
-            if let Some(value) = std::env::var_os(key) {
-                child.env(key, value);
-            }
-        }
-        let output = child
-            .args([
-                "--exact",
-                "local::harness::opencode::tests::detection_lists_cloud_models_without_generating",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .env("ORX_TEST_OPENCODE_LOG", root.join("calls.log"))
-            .env("HOME", root)
-            .env("USERPROFILE", root)
-            .env("PATH", &bin)
-            .env("PATHEXT", ".CMD;.EXE")
-            .env("XDG_DATA_HOME", &data)
-            .env("XDG_CONFIG_HOME", root.join("config"))
-            .env("XDG_CACHE_HOME", root.join("cache"))
-            .env("ORX_DATA_DIR", root.join("orx"))
-            .env("OPENCODE_CONFIG_CONTENT", "{}")
-            .output()
-            .unwrap();
+        let log = root.join("calls.log");
+        std::env::set_var("ORX_TEST_OPENCODE_LOG", &log);
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("PATHEXT", ".CMD;.EXE");
+        std::env::set_var("XDG_DATA_HOME", &data);
+        std::env::set_var("OPENCODE_CONFIG_CONTENT", "{}");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let info = runtime.block_on(OpenCode.detect()).unwrap();
+        assert!(info.installed && info.authenticated && info.agent_ready);
+        assert!(info
+            .models
+            .iter()
+            .any(|model| model.id == "openrouter/paid"));
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(calls.lines().any(|line| line.starts_with("models")));
         assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            !calls.lines().any(|line| line.starts_with("run")),
+            "detection generated text: {calls}"
         );
     }
 

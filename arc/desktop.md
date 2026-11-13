@@ -30,19 +30,24 @@ The main thread owns the window's run loop, as every desktop toolkit requires, w
 
 ## Closing and quitting
 
-**Closing the window never stops the engine's work.** When the app runs its own server:
+**Work never stops without the user choosing it.** When the app runs its own server, a close and a quit take the same path:
 
-- **Close while busy:** the window hides, the page unloads and the engine runs windowless. Busy means an unfinished run, an undelivered notice, a running chat turn or an open dashboard event stream. The window's own page holds such a stream until it unloads, so a close with a local workspace open goes windowless even with no work.
-- **Close while not busy:** the app quits.
+- **Nothing pending:** the app quits. Pending work is a running chat turn, an unfinished run, or a run whose result no chat has received.
+- **Work pending:** the page lists each running chat and pending run under what quitting does to it, following them as they finish and dropping the close once none is left, and opening one cancels the close and shows it. The user chooses between quitting, keeping the work running and going back. Only the page is themed and translated and can open what it lists, so a windowless close brings the window back to ask there; when the page cannot ask, or does not load or show the dialog in time, a native alert names the same work. Work that could not be counted is asked about as if agents were running.
+- **Some runs keep the app from quitting.** Most backends finish a run and keep its outcome without the app, and a run under a 0.2.x supervisor is finished by it. A run on this machine, Tinker included, would outlive the app on a machine the user believes is free to shut down; a Vercel sandbox bills until its session ends and loses its log unless the engine stops it; an OpenResearch box releases itself, with any uncollected outcome, a bounded grace after the run ([experiments](experiments.md)). While one of these is pending, Quit becomes Force Quit: the window goes, each such run is asked to stop, and the app quits once all have answered or ten seconds have passed, asking any launched meanwhile to stop as well.
+- **Keeping it running:** on macOS the window hides, the page unloads and the engine runs windowless, with the Dock icon to bring it back; a fullscreen window leaves fullscreen first, because hiding it in place strands its Space. Windows and Linux have nothing that shows a hidden app, so the window minimizes instead.
+- **Quit:** agents stop.
 - **Windowless and idle:** the app quits after the idle wait of a headless `orx up` ([experiments](experiments.md)).
 - **Windowless, then a second launch, a link or a macOS Dock reopen:** the window returns on a fresh page load.
-- **Explicit quit, which only macOS has:** with unfinished runs it asks first, and they continue on their hosts for the next start to collect. System logout and shutdown never ask.
+- **System logout and shutdown never ask.**
 
 A window opened on another process's server just closes.
 
 ## The window and the page
 
-The page reaches the window through a small message bridge: zoom; on macOS and Windows, a titlebar the page draws; on macOS, the appearance and a native menu the page specifies. The window never runs commands on the page's behalf.
+The page reaches the window through a small message bridge: zoom; on macOS and Windows, a titlebar the page draws and the appearance; on macOS, a native menu the page specifies. The window never runs commands on the page's behalf.
+
+The sidebar is transparent over the window's material, the sidebar blur on macOS and Mica on Windows 11 22H2 and later. Linux and older Windows have none, and the page stays opaque.
 
 - `http:`, `https:` and `mailto:` pop-ups go to the system browser; any other scheme is dropped, because the browser would ask before launching another app and a direct open would not.
 - `openresearch:` links become in-page navigation, so the page's guards against losing unsaved work still apply. A published project's link carries only its slug, and the app downloads the file from its own API, so a link can never make it fetch from anywhere else.
@@ -63,7 +68,7 @@ How an update applies depends on the install (`src/updates.rs`, `src/updates/`, 
 
 **Replacement is always a rename.** A running process keeps its old file and code signature until it restarts; nothing is ever half-written underneath it.
 
-**An update never swaps the binary under a running `orx up`.** Each server holds a shared lock on its install for its whole life, and an updater needs it exclusively, because agents would otherwise get a different `orx` than the server running them. Under a running server a desktop install stages the verified release beside itself and a CLI install only records it. A terminal or headless server relaunches into it once idle; the desktop app's server only when its page asks ([dashboard](dashboard.md)).
+**An update never swaps the binary under a running `orx up`.** Each server holds a shared lock on its install for its whole life, and an updater needs it exclusively, because agents would otherwise get a different `orx` than the server running them. Under a running server a desktop install stages the verified release beside itself and a CLI install only records it. A terminal or headless server relaunches into it once idle; the desktop app's server only when its page asks ([dashboard](dashboard.md)). The page asks before a restart that would stop working agents, and lists them; runs carry on through it, since the engine catches up with them when it starts again ([experiments](experiments.md)).
 
 **Channels.** The desktop apps follow stable releases (`v1.2.3`) or canary builds (`canary-YYYYMMDD.N`). A build moves to a canary, or from a canary to stable, only when the target's history contains its own commit, so a switch never moves an install backward. Switching is refused while an installed update waits for a restart.
 

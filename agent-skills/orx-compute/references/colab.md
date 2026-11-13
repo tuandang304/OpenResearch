@@ -102,12 +102,11 @@ the GPU name and memory that Colab actually assigned.
 - Availability depends on the user's Colab plan. If Colab cannot assign the
   accelerator, the run fails at once with that reason; pick another flavor or
   retry later.
-- A detached `orx supervise` process records status and logs; do not kill it.
-  Cancelling the run releases the runtime.
-- The run goes on on Colab when this machine sleeps, loses its network, or
-  shuts down. Once `orx up` is running again, it picks the run up: the log
-  catches up from where it stopped, and the outputs and status arrive when it
-  ends. A run cancelled while this machine was off is released then.
+- A controller on this machine follows the runtime and records its status and
+  logs; do not kill it. Cancelling the run releases the runtime.
+- The run keeps going while `orx up` restarts, but it needs this machine:
+  shutting it down stops the controller, which releases the runtime and fails
+  the run.
 - Colab's own limits still apply whatever this machine does: a runtime lives at
   most 12 hours (24 on Colab Pro+), so keep `--timeout` under that and save
   checkpoints during long training so a cut-off run can continue from the last

@@ -61,7 +61,8 @@ orx exp run <expId> --backend kaggle --flavor tpu@alice --timeout 6h
 - GPUs and internet access need a phone-verified Kaggle account; Kaggle
   refuses the kernel otherwise, and the run fails with that reason.
 - The kernel may wait in Kaggle's queue before it starts; the log says so.
-- A detached `orx supervise` process records status and logs; do not kill it.
+- A controller on this machine follows the kernel and records its status and
+  logs; do not kill it.
   Cancelling the run stops following the kernel, but Kaggle keeps it running
   until it ends or reaches its timeout; the log links the kernel page where the
   user can stop it sooner.

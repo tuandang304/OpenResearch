@@ -45,4 +45,4 @@ free memory, and `launchFloorBytes`.
 - Finished runs older than each project's three newest local runs lose
   `repo/.venv` and `repo/.cache/uv`; logs, TensorBoard files, and other outputs stay.
 
-See [run monitoring](../SKILL.md#run-engine-setting).
+See [run monitoring](../SKILL.md#who-watches-a-run).

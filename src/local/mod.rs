@@ -18,6 +18,7 @@ pub mod browser_cookies;
 pub mod chat;
 pub mod claude;
 pub mod codex;
+pub mod controller_runs;
 pub mod datadir;
 pub(crate) mod deep_research;
 pub mod delegation;

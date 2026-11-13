@@ -53,7 +53,10 @@ impl Local {
         let dir = match &run.handle {
             Handle::Local { dir } | Handle::Tinker { dir } => dir,
             Handle::Legacy { descriptor }
-                if matches!(descriptor.kind.as_str(), "local_job" | "tinker_job") =>
+                if matches!(
+                    descriptor.kind.as_str(),
+                    "local_job" | "tinker_job" | "colab_job" | "kaggle_job"
+                ) =>
             {
                 descriptor
                     .job_id
@@ -84,6 +87,9 @@ impl Local {
         let _ = cancelled;
         let dir = self.directory(intent)?;
         let options: LaunchOptions = serde_json::from_value(intent.launch.options.clone())?;
+        let cancel_sh = options.cancel_sh.clone();
+        #[cfg(windows)]
+        let _ = &cancel_sh;
         fs::create_dir_all(&dir)?;
         #[cfg(unix)]
         {
@@ -187,12 +193,17 @@ impl Local {
                         run_sh: payload.clone(),
                         env: env.clone(),
                         source: None,
-                        cancel_sh: None,
+                        cancel_sh: cancel_sh.clone(),
                     },
                 )?;
             }
             if !dir.join("run.sh").try_exists()? {
                 orx_host::publish_bytes(&dir.join("run.sh"), payload.as_bytes())?;
+            }
+            if let Some(script) = &cancel_sh {
+                if !dir.join("cancel.sh").try_exists()? {
+                    orx_host::publish_bytes(&dir.join("cancel.sh"), script.as_bytes())?;
+                }
             }
             let binary = crate::engine::transport::local_binary(&self.root)?;
             if cancelled() {

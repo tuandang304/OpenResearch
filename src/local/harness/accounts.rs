@@ -498,13 +498,13 @@ fn credential_files(harness: &str, id: &str) -> Vec<PathBuf> {
                 legacy.join(".credentials.json"),
                 legacy.join(".claude.json"),
             ];
-            files.extend(dirs::home_dir().map(|home| home.join(".claude.json")));
+            files.extend(crate::config::home_dir().map(|home| home.join(".claude.json")));
             files
         }
         ("codex", Some(home)) => vec![home.join("auth.json")],
         ("codex", None) => vec![codex_home(NativeStore::Legacy).join("auth.json")],
         ("antigravity", Some(home)) => super::antigravity::agy_account_files_in(&home.join("home")),
-        ("antigravity", None) => dirs::home_dir()
+        ("antigravity", None) => crate::config::home_dir()
             .map(|home| super::antigravity::agy_account_files_in(&home))
             .unwrap_or_default(),
         _ => Vec::new(),
@@ -1213,7 +1213,7 @@ fn parse_claude_usage(body: &Value, account: &str) -> Vec<QuotaSnapshot> {
 async fn read_agy(account: &str) -> std::result::Result<Vec<QuotaSnapshot>, String> {
     let files = match account_home("antigravity", account) {
         Some(home) => super::antigravity::agy_account_files_in(&home.join("home")),
-        None => dirs::home_dir()
+        None => crate::config::home_dir()
             .map(|home| super::antigravity::agy_account_files_in(&home))
             .unwrap_or_default(),
     };

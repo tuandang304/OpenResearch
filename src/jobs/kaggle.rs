@@ -192,7 +192,7 @@ pub fn valid_username(name: &str) -> bool {
 /// The `kaggle` executable: PATH first, then pip/uv/pipx's `~/.local/bin`.
 pub fn find_cli() -> Option<PathBuf> {
     crate::local::shell_env::find_on_path("kaggle").or_else(|| {
-        dirs::home_dir().and_then(|home| {
+        crate::config::home_dir().and_then(|home| {
             crate::local::shell_env::find_in_dir(&home.join(".local/bin"), "kaggle")
         })
     })
@@ -392,7 +392,7 @@ fn account_env(home: &Path) -> Vec<(&'static str, String)> {
         ),
     ];
     if std::env::var_os("PYTHONUSERBASE").is_none() {
-        if let Some(real) = dirs::home_dir() {
+        if let Some(real) = crate::config::home_dir() {
             env.push((
                 "PYTHONUSERBASE",
                 real.join(".local").to_string_lossy().into_owned(),
@@ -559,7 +559,7 @@ pub async fn import_cli_account() -> Result<AccountStatus> {
 
 /// The CLI's own saved sign-in, if any (never its contents).
 pub fn cli_credentials() -> Option<(PathBuf, &'static str)> {
-    let real = dirs::home_dir()?;
+    let real = crate::config::home_dir()?;
     let mut dirs = vec![real.join(".kaggle")];
     if let Some(dir) = std::env::var_os("KAGGLE_CONFIG_DIR") {
         dirs.insert(0, PathBuf::from(dir));
@@ -1088,7 +1088,6 @@ pub struct RunSpec<'a> {
     pub username: &'a str,
     pub run_id: &'a str,
     pub flavor: &'a Flavor,
-    pub archive: &'a Path,
     pub run_command: &'a str,
     pub timeout_secs: u64,
     /// Synced secrets the run does not get: a kernel's source is stored on
@@ -1096,42 +1095,41 @@ pub struct RunSpec<'a> {
     pub skipped_env: Vec<String>,
 }
 
-/// Write the controller, kernel folder, and dataset folder into `dir`.
-pub fn write_run_files(dir: &Path, spec: &RunSpec<'_>) -> Result<()> {
-    let kernel_dir = dir.join(KERNEL_DIR);
-    let dataset_dir = dir.join(DATASET_DIR);
-    std::fs::create_dir_all(&kernel_dir)?;
-    std::fs::create_dir_all(&dataset_dir)?;
+/// The controller, kernel folder, and dataset metadata, as paths relative to
+/// the run dir and their contents. The source archive goes beside them as
+/// [`archive_path`].
+pub fn run_files(spec: &RunSpec<'_>) -> Result<Vec<(String, String)>> {
     let dataset = dataset_slug(spec.run_id);
-    std::fs::write(
-        dataset_dir.join("dataset-metadata.json"),
-        serde_json::to_vec_pretty(&json!({
-            "title": dataset,
-            "id": format!("{}/{dataset}", spec.username),
-            "licenses": [{"name": "CC0-1.0"}],
-        }))?,
-    )?;
-    // Unknown extension: Kaggle unpacks .zip/.tar uploads, which would lose
-    // the snapshot's own file modes.
-    let archive_copy = dataset_dir.join(ARCHIVE_FILE);
-    if std::fs::hard_link(spec.archive, &archive_copy).is_err() {
-        std::fs::copy(spec.archive, &archive_copy)
-            .map_err(|e| anyhow!("Could not stage the source snapshot: {e}"))?;
-    }
-    std::fs::write(
-        kernel_dir.join("kernel-metadata.json"),
-        serde_json::to_vec_pretty(&kernel_metadata(spec))?,
-    )?;
-    std::fs::write(
-        kernel_dir.join(DRIVER_FILE),
-        driver_source(
-            spec.run_command,
-            spec.timeout_secs,
-            spec.flavor.accelerator.kind,
+    Ok(vec![
+        (
+            format!("{DATASET_DIR}/dataset-metadata.json"),
+            serde_json::to_string_pretty(&json!({
+                "title": dataset,
+                "id": format!("{}/{dataset}", spec.username),
+                "licenses": [{"name": "CC0-1.0"}],
+            }))?,
         ),
-    )?;
-    std::fs::write(dir.join(CONTROLLER_FILE), controller_script(spec))?;
-    Ok(())
+        (
+            format!("{KERNEL_DIR}/kernel-metadata.json"),
+            serde_json::to_string_pretty(&kernel_metadata(spec))?,
+        ),
+        (
+            format!("{KERNEL_DIR}/{DRIVER_FILE}"),
+            driver_source(
+                spec.run_command,
+                spec.timeout_secs,
+                spec.flavor.accelerator.kind,
+            ),
+        ),
+        (CONTROLLER_FILE.to_string(), controller_script(spec)),
+    ])
+}
+
+/// Where the source snapshot goes in the run dir. An unknown extension:
+/// Kaggle unpacks .zip/.tar uploads, which would lose the snapshot's own file
+/// modes.
+pub fn archive_path() -> String {
+    format!("{DATASET_DIR}/{ARCHIVE_FILE}")
 }
 
 fn kernel_metadata(spec: &RunSpec<'_>) -> Value {
@@ -1625,7 +1623,6 @@ mod tests {
             username: "alice",
             run_id: "0123456789abcdef",
             flavor,
-            archive: Path::new("/data/source-snapshots/0123.tar"),
             run_command: "python train.py",
             timeout_secs: 3600,
             skipped_env: vec!["HF_TOKEN".into(), "BAD;KEY".into()],
@@ -1726,8 +1723,12 @@ exit 0
         let flavor = parse_flavor(Some("t4")).unwrap();
         let mut spec = sample_spec(&flavor);
         spec.cli = &cli;
-        spec.archive = &archive;
-        write_run_files(&run_dir, &spec).unwrap();
+        for (path, contents) in run_files(&spec).unwrap() {
+            let path = run_dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        std::fs::copy(&archive, run_dir.join(archive_path())).unwrap();
         assert!(run_dir.join(DATASET_DIR).join(ARCHIVE_FILE).is_file());
         let output = crate::process::command("bash")
             .arg(CONTROLLER_FILE)

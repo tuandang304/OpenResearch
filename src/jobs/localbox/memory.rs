@@ -23,12 +23,6 @@ impl MemorySnapshot {
         GIB.max(self.total_bytes / 20)
     }
 
-    /// Below this much RAM plus swap, the machine is about to stall or start
-    /// killing processes: 512 MiB, or 3% of a large machine.
-    pub fn critical_floor_bytes(&self) -> u64 {
-        (512 * MIB).max(self.total_bytes * 3 / 100)
-    }
-
     /// Why a local run should not start now, if it shouldn't.
     pub fn launch_refusal(&self) -> Option<String> {
         if self.total_bytes == 0 || self.available_bytes >= self.launch_floor_bytes() {
@@ -42,31 +36,6 @@ impl MemorySnapshot {
             fmt_bytes(self.total_bytes),
             fmt_bytes(self.launch_floor_bytes()),
         ))
-    }
-
-    /// RAM and swap are nearly exhausted.
-    pub fn is_critical(&self) -> bool {
-        self.total_bytes > 0
-            && self.available_bytes.saturating_add(self.swap_free_bytes)
-                < self.critical_floor_bytes()
-    }
-
-    pub fn describe(&self) -> String {
-        let mut text = format!(
-            "{} of {} RAM free",
-            fmt_bytes(self.available_bytes),
-            fmt_bytes(self.total_bytes)
-        );
-        if self.swap_total_bytes > 0 {
-            text.push_str(&format!(
-                ", {} of {} swap free",
-                fmt_bytes(self.swap_free_bytes),
-                fmt_bytes(self.swap_total_bytes)
-            ));
-        } else {
-            text.push_str(", no swap");
-        }
-        text
     }
 }
 
@@ -261,13 +230,6 @@ mod tests {
         // 5% of 64 GiB is 3.2 GiB.
         assert!(snapshot(64, 3000, 0).launch_refusal().is_some());
         assert!(snapshot(64, 4000, 0).launch_refusal().is_none());
-    }
-
-    #[test]
-    fn critical_counts_swap_as_headroom() {
-        assert!(snapshot(8, 300, 0).is_critical());
-        assert!(!snapshot(8, 300, 2048).is_critical());
-        assert!(!snapshot(8, 2048, 0).is_critical());
     }
 
     #[test]

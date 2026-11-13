@@ -25,10 +25,9 @@ use crate::store;
 
 #[path = "opencode_runtime.rs"]
 mod runtime;
-#[cfg(all(test, unix))]
-pub(crate) use runtime::resolve_binary_at;
 pub(crate) use runtime::{
-    prepare_database, resolve_binary, start_server, AgentEndpoint, Protocol, ResolvedBinary,
+    prepare_database, resolve_binary, resolve_binary_at, start_server, user_binary, AgentEndpoint,
+    Protocol, ResolvedBinary,
 };
 
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
@@ -48,7 +47,7 @@ pub(crate) struct ResolvedRuntime {
 /// `~/.opencode/bin`, which a stale npm-style `opencode` shim earlier on PATH
 /// otherwise hides.
 pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
-    let own = dirs::home_dir().map(|home| home.join(".opencode").join("bin"));
+    let own = crate::config::home_dir().map(|home| home.join(".opencode").join("bin"));
     // Resolved and de-duplicated: the native install is both on PATH and in its
     // drop directory, and probing that one binary twice costs a 15s timeout.
     crate::local::harness::unique_bins(
@@ -61,16 +60,16 @@ pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
 
 pub(crate) fn not_found() -> crate::error::Error {
     anyhow!(
-        "opencode not found (checked PATH and ~/.opencode/bin/opencode).\n\
-         Install it with: curl -fsSL https://opencode.ai/install | bash"
+        "opencode not found (checked PATH and ~/.opencode/bin/opencode). \
+         Install OpenCode from OpenResearch's coding agent settings."
     )
 }
 
-/// `opencode` on PATH, else the installer's default drop location.
+/// orx's own copy, else `opencode` on PATH, else the installer's default drop location.
 pub fn find_opencode() -> Result<PathBuf> {
-    opencode_candidates()
-        .into_iter()
-        .next()
+    crate::local::harness::managed::installed("opencode")
+        .map(|(bin, _)| bin)
+        .or_else(|| opencode_candidates().into_iter().next())
         .ok_or_else(not_found)
 }
 
@@ -1181,9 +1180,10 @@ mod tests {
             cmd.args(["-f", "/dev/null", "serve"])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
-            if let Some(db) = db {
-                cmd.env("OPENCODE_DB", db);
-            }
+            match db {
+                Some(db) => cmd.env("OPENCODE_DB", db),
+                None => cmd.env_remove("OPENCODE_DB"),
+            };
             cmd.spawn().unwrap()
         };
         let mut user = spawn(None);

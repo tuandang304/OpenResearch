@@ -182,6 +182,7 @@ mod tests {
             parent_id: parent.map(Into::into),
             base_native_session_id: None,
             result_native_session_id: (role == "assistant").then(|| native.into()),
+            result_native_message_id: None,
             native_harness: None,
         }
     }
@@ -221,6 +222,7 @@ mod tests {
                 project_id: "p".into(),
                 harness: "claude".into(),
                 native_session_id: Some("n1".into()),
+                native_fork_at: None,
                 title: None,
                 title_source: None,
                 model: None,

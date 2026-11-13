@@ -57,5 +57,5 @@ orx exp run <expId> --backend gcp --flavor n2-standard-16   # CPU only
 - "No zone had a free ..." means every nearby zone was out of stock: try again
   later, a different GPU, or another provider. "Quota exceeded" means the
   project needs more GPU quota, which only the user can request.
-- A detached `orx supervise` process starts the run, records its status and
-  logs, and deletes the VM; do not kill it.
+- A controller on this machine starts the run, records its status and logs,
+  and deletes the VM; do not kill it. Cancelling the run deletes the VM.

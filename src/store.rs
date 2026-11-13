@@ -169,23 +169,8 @@ pub(crate) fn acquire_data_dir_read_lock() -> Result<DataDirMoveLock> {
     acquire_data_dir_lock(data_dir_move_lock_path(), false)
 }
 
-/// Read an env var as a path, treating unset **and empty** the same (an empty
-/// `export ORX_DATA_DIR=` is a shell footgun that must not resolve to `""`).
-fn env_path(key: &str) -> Option<PathBuf> {
-    crate::local::shell_env::var(key)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-}
-
-/// `$ORX_DATA_DIR`. Under test only a fixture in the temp dir counts: one
-/// inherited from the developer's shell points at their real data.
 fn data_dir_override() -> Option<PathBuf> {
-    let dir = env_path("ORX_DATA_DIR")?;
-    #[cfg(test)]
-    if !dir.starts_with(std::env::temp_dir()) {
-        return None;
-    }
-    Some(dir)
+    crate::config::env_path("ORX_DATA_DIR")
 }
 
 /// `$XDG_DATA_HOME/openresearch` else `~/.local/share/openresearch` — the tail
@@ -194,8 +179,8 @@ fn xdg_default_data_dir() -> PathBuf {
     #[cfg(test)]
     let base = crate::config::test_home().join(".local").join("share");
     #[cfg(not(test))]
-    let base = env_path("XDG_DATA_HOME").unwrap_or_else(|| {
-        dirs::home_dir()
+    let base = crate::config::env_path("XDG_DATA_HOME").unwrap_or_else(|| {
+        crate::config::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".local")
             .join("share")
@@ -237,7 +222,7 @@ pub fn data_dir_source() -> DataDirSource {
     if crate::config::settings_data_dir().is_some() {
         return DataDirSource::Config;
     }
-    if env_path("XDG_DATA_HOME").is_some() {
+    if crate::config::env_path("XDG_DATA_HOME").is_some() {
         return DataDirSource::Xdg;
     }
     DataDirSource::Default
@@ -420,6 +405,7 @@ pub fn public_backend(value: &str, launch: Option<&LaunchSpec>) -> Option<serde_
                 ("sshContainer", options["container"].clone()),
                 ("context", options["context"].clone()),
                 ("timeoutSecs", options["timeout_seconds"].clone()),
+                ("url", options["url"].clone()),
                 ("cpusPerTask", serde_json::json!(cpus)),
                 ("mem", directives["mem"].clone()),
             ];
@@ -531,6 +517,66 @@ impl std::fmt::Display for RunStatus {
     }
 }
 
+/// What quitting `orx up` does to a pending run.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum AfterQuit {
+    /// Already finished; only its result has not reached a chat.
+    Reports,
+    /// Its machine or service finishes it and keeps the outcome.
+    Continues,
+    /// Runs on this machine, or only the engine stops its sandbox or collects its outcome, so the app won't quit.
+    NeedsApp,
+}
+
+/// A chat with a turn in flight.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingAgent {
+    pub project_id: String,
+    pub project: Option<String>,
+    pub session_id: String,
+    /// The chat a side chat branched from, which is where it opens.
+    pub side_parent_id: Option<String>,
+    pub harness: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingRun {
+    pub project_id: String,
+    pub project: Option<String>,
+    pub experiment_id: String,
+    pub run_id: String,
+    /// The chat its result goes to.
+    pub session_id: Option<String>,
+    /// The experiment's title, as the dashboard names it.
+    pub name: String,
+    /// The backend kind, such as `modal_job`.
+    pub backend: Option<String>,
+    pub after_quit: AfterQuit,
+}
+
+/// Chats with a turn in flight, and runs unfinished or with a result no chat has received.
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub(crate) struct PendingWork {
+    pub agents: Vec<PendingAgent>,
+    pub runs: Vec<PendingRun>,
+}
+
+impl PendingWork {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn blocks_quit(&self) -> bool {
+        self.runs
+            .iter()
+            .any(|run| run.after_quit == AfterQuit::NeedsApp)
+    }
+}
+
 /// Whether a stored run status string denotes a finished run. An unrecognized
 /// string is treated as non-terminal (the conservative choice: it keeps a run
 /// visible as active rather than silently dropping it from "in flight" views).
@@ -612,6 +658,20 @@ latest AS (
 )";
 
 pub(crate) const CHAT_TURN_LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Delete turn leases not renewed within the TTL, except `held`, the claim tokens of this
+/// process's running turns: a stall or sleep leaves them stale but their turns alive.
+fn expire_turn_leases(conn: &Connection, held: &[String]) -> Result<()> {
+    conn.execute(
+        "DELETE FROM chat_turn_leases
+         WHERE heartbeat_at < ?1 AND claim_token NOT IN (SELECT value FROM json_each(?2))",
+        params![
+            expired_before(CHAT_TURN_LEASE_TTL),
+            serde_json::to_string(held)?
+        ],
+    )?;
+    Ok(())
+}
 
 /// Heartbeats and claims older than this belong to an owner that is gone.
 fn expired_before(ttl: std::time::Duration) -> i64 {
@@ -1257,6 +1317,8 @@ impl Store {
             "ALTER TABLE chat_messages ADD COLUMN base_native_session_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN native_harness TEXT",
+            "ALTER TABLE chat_messages ADD COLUMN result_native_message_id TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN native_fork_at TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
@@ -1769,29 +1831,73 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    pub(crate) fn engine_runs_block_idle(&self) -> Result<bool> {
-        let mut statement = self.conn.prepare("SELECT status FROM runs")?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        for status in rows {
-            let status = status?;
+    /// What quitting would interrupt or leave unreported.
+    pub(crate) fn pending_work(&self) -> Result<PendingWork> {
+        let mut statement = self.conn.prepare(
+            "SELECT s.project_id, p.name, s.id, s.side_parent_session_id, s.harness, NULLIF(TRIM(s.title), '')
+             FROM chat_sessions s LEFT JOIN local_projects p ON p.id = s.project_id
+             WHERE EXISTS(SELECT 1 FROM chat_turns t WHERE t.session_id = s.id
+                          AND t.state IN ('preparing', 'retrying', 'running'))
+             ORDER BY s.updated_at DESC",
+        )?;
+        let agents = statement
+            .query_map([], |row| {
+                Ok(PendingAgent {
+                    project_id: row.get(0)?,
+                    project: row.get(1)?,
+                    session_id: row.get(2)?,
+                    side_parent_id: row.get(3)?,
+                    harness: row.get(4)?,
+                    title: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+
+        // A run under a detached supervisor is finished by it, whatever its backend.
+        let mut statement = self.conn.prepare(
+            "SELECT r.status, r.project_id, p.name, r.experiment_id, r.id,
+                    COALESCE(r.chat_session_id, e.chat_session_id),
+                    COALESCE(NULLIF(e.title, ''), e.slug, r.id),
+                    COALESCE(json_extract(r.launch_spec, '$.kind'),
+                             json_extract(r.backend_json, '$.handle.descriptor.kind'),
+                             json_extract(r.backend_json, '$.kind')),
+                    r.launch_spec IS NOT NULL
+                        AND json_extract(r.backend_json, '$.handle.type') IS NOT 'Legacy',
+                    EXISTS(SELECT 1 FROM run_notices n WHERE n.run_id = r.id
+                           AND n.delivered_at IS NULL AND n.retired_at IS NULL)
+             FROM runs r
+             LEFT JOIN local_experiments e ON e.id = r.experiment_id
+             LEFT JOIN local_projects p ON p.id = r.project_id
+             ORDER BY r.created_at",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut runs = Vec::new();
+        while let Some(row) = rows.next()? {
+            let status: String = row.get(0)?;
+            let backend: Option<String> = row.get(7)?;
+            let engine_owned: bool = row.get(8)?;
+            let unreported: bool = row.get(9)?;
             let phase = crate::engine::Phase::parse(&status)
                 .ok_or_else(|| anyhow!("Unknown run status: {status}"))?;
-            if !phase.is_terminal() {
-                return Ok(true);
-            }
+            let after_quit = match (phase.is_terminal(), backend.as_deref(), engine_owned) {
+                (true, _, _) if unreported => AfterQuit::Reports,
+                (true, _, _) => continue,
+                (false, Some("local_job" | "tinker_job"), _)
+                | (false, Some("vercel_job" | "openresearch_job"), true) => AfterQuit::NeedsApp,
+                (false, _, _) => AfterQuit::Continues,
+            };
+            runs.push(PendingRun {
+                project_id: row.get(1)?,
+                project: row.get(2)?,
+                experiment_id: row.get(3)?,
+                run_id: row.get(4)?,
+                session_id: row.get(5)?,
+                name: row.get(6)?,
+                backend,
+                after_quit,
+            });
         }
-        Ok(false)
-    }
-
-    pub(crate) fn engine_idle_blocked(&self) -> Result<bool> {
-        if self.engine_runs_block_idle()? {
-            return Ok(true);
-        }
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_notices WHERE delivered_at IS NULL AND retired_at IS NULL)
-                OR EXISTS(SELECT 1 FROM chat_turns WHERE state IN ('preparing','retrying','running'))",
-            [], |row| row.get(0),
-        )?)
+        Ok(PendingWork { agents, runs })
     }
 
     /// Runs or local processes that prevent moving their working directory.
@@ -2167,16 +2273,21 @@ impl Store {
         )?)
     }
 
-    pub fn claim_chat_turn(&self, chat_session_id: &str, token: &str) -> Result<bool> {
+    pub fn claim_chat_turn(
+        &self,
+        chat_session_id: &str,
+        token: &str,
+        held: &[String],
+    ) -> Result<bool> {
         self.clear_stale_data_dir_move_lease()?;
+        expire_turn_leases(&self.conn, held)?;
         self.conn.execute(
             "DELETE FROM chat_turn_leases
-             WHERE heartbeat_at < ?1
-                OR NOT EXISTS (
-                    SELECT 1 FROM chat_sessions
-                    WHERE chat_sessions.id = chat_turn_leases.chat_session_id
-                )",
-            params![expired_before(CHAT_TURN_LEASE_TTL)],
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM chat_sessions
+                 WHERE chat_sessions.id = chat_turn_leases.chat_session_id
+             )",
+            [],
         )?;
         let claimed = self.conn.execute(
             "INSERT OR IGNORE INTO chat_turn_leases
@@ -2206,11 +2317,8 @@ impl Store {
         Ok(())
     }
 
-    pub fn claim_data_dir_move(&self, token: &str) -> Result<bool> {
-        self.conn.execute(
-            "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![expired_before(CHAT_TURN_LEASE_TTL)],
-        )?;
+    pub fn claim_data_dir_move(&self, token: &str, held: &[String]) -> Result<bool> {
+        expire_turn_leases(&self.conn, held)?;
         self.clear_stale_data_dir_move_lease()?;
         let claimed = self.conn.execute(
             "INSERT OR IGNORE INTO data_dir_move_lease (id, claim_token, heartbeat_at)
@@ -2290,6 +2398,15 @@ impl Store {
     /// Update only the run's backend descriptor — for a supervisor learning
     /// more about its job mid-flight (e.g. the openresearch box's SSH
     /// endpoint) without clobbering status/markdown/cancel state.
+    /// The descriptor an orx 0.2 launch wrote beside the store in case SQLite refused it.
+    pub fn submission_handle(&self, run_id: &str) -> Result<Option<String>> {
+        match std::fs::read_to_string(self.run_artifact_path(SUBMISSION_HANDLE, run_id)) {
+            Ok(json) => Ok(Some(json)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn set_backend_json(&self, run_id: &str, backend_json: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE runs SET backend_json = ?2, updated_at = ?3 WHERE id = ?1",
@@ -3797,11 +3914,24 @@ impl Store {
     }
 
     /// `None` clears it, which a fork of the session's very first turn needs:
-    /// that turn ran with no harness session to resume from.
+    /// that turn ran with no harness session to resume from. Either way the
+    /// next start resumes it whole, not at a fork point.
     pub fn set_chat_session_native_id(&self, id: &str, native_id: Option<&str>) -> Result<()> {
+        self.set_chat_session_native_fork(id, native_id, None)
+    }
+
+    /// Points the session at the native session its next start resumes and,
+    /// for Claude, the message within it that start branches from.
+    pub fn set_chat_session_native_fork(
+        &self,
+        id: &str,
+        native_id: Option<&str>,
+        fork_at: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
-            "UPDATE chat_sessions SET native_session_id = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, native_id, now_ms()],
+            "UPDATE chat_sessions SET native_session_id = ?2, native_fork_at = ?3, updated_at = ?4
+             WHERE id = ?1",
+            params![id, native_id, fork_at, now_ms()],
         )?;
         Ok(())
     }
@@ -3811,6 +3941,7 @@ impl Store {
         id: &str,
         agent: &StoredAgentSelection,
         native_id: Option<&str>,
+        fork_at: Option<&str>,
         marker: &StoredChatMessage,
         plan_mode: bool,
     ) -> Result<()> {
@@ -3831,7 +3962,7 @@ impl Store {
              context_usage_json = NULL, active_leaf_id = ?8,
              plan_mode = ?9,
              plan_reset_pending = (?2 = 'codex' AND ?7 IS NOT NULL AND NOT ?9),
-             updated_at = ?10 WHERE id = ?1",
+             updated_at = ?10, native_fork_at = ?11 WHERE id = ?1",
             params![
                 id,
                 agent.harness,
@@ -3842,7 +3973,8 @@ impl Store {
                 native_id,
                 marker.id,
                 plan_mode,
-                now_ms()
+                now_ms(),
+                fork_at
             ],
         )?;
         tx.commit()?;
@@ -4669,23 +4801,24 @@ impl Store {
     pub fn reconcile_unfinished_chat_turns(&self) -> Result<Vec<StoredChatTurn>> {
         // Sub-agent usage outliving its parent turn: its native connection died with the server.
         self.finalize_usage_turns("codex-late:", "cancelled")?;
-        self.reconcile_unfinished_chat_turns_inner(true)
+        self.reconcile_unfinished_chat_turns_inner(true, &[])
     }
 
-    pub fn reconcile_expired_unfinished_chat_turns(&self) -> Result<Vec<StoredChatTurn>> {
-        self.reconcile_unfinished_chat_turns_inner(false)
+    pub fn reconcile_expired_unfinished_chat_turns(
+        &self,
+        held: &[String],
+    ) -> Result<Vec<StoredChatTurn>> {
+        self.reconcile_unfinished_chat_turns_inner(false, held)
     }
 
     fn reconcile_unfinished_chat_turns_inner(
         &self,
         include_existing_failures: bool,
+        held: &[String],
     ) -> Result<Vec<StoredChatTurn>> {
         let now = now_ms();
         let transaction = self.conn.unchecked_transaction()?;
-        transaction.execute(
-            "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
-            params![expired_before(CHAT_TURN_LEASE_TTL)],
-        )?;
+        expire_turn_leases(&transaction, held)?;
         let newly_reconciled = {
             let mut statement = transaction.prepare(
                 "SELECT id FROM chat_turns
@@ -4761,7 +4894,8 @@ impl Store {
         let mut stmt = self.conn.prepare(
             // rowid tiebreak: a user message and its reply can share a millisecond.
             "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                    base_native_session_id, result_native_session_id, completed_at, native_harness
+                    base_native_session_id, result_native_session_id, completed_at, native_harness,
+                    result_native_message_id
              FROM chat_messages
              WHERE session_id = ?1 AND created_at >= ?2 ORDER BY created_at ASC, rowid ASC",
         )?;
@@ -4777,6 +4911,7 @@ impl Store {
                 base_native_session_id: row.get(6)?,
                 result_native_session_id: row.get(7)?,
                 native_harness: row.get(9)?,
+                result_native_message_id: row.get(10)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -4810,7 +4945,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                        base_native_session_id, result_native_session_id, completed_at, native_harness
+                        base_native_session_id, result_native_session_id, completed_at, native_harness,
+                        result_native_message_id
                  FROM chat_messages WHERE id = ?1",
                 params![id],
                 |row| {
@@ -4825,6 +4961,7 @@ impl Store {
                         base_native_session_id: row.get(6)?,
                         result_native_session_id: row.get(7)?,
                         native_harness: row.get(9)?,
+                        result_native_message_id: row.get(10)?,
                     })
                 },
             )
@@ -4994,6 +5131,10 @@ pub struct StoredChatSession {
     pub project_id: String,
     pub harness: String,
     pub native_session_id: Option<String>,
+    /// Claude message within `native_session_id` the next start branches
+    /// from, as a new native session. Set by a fork switch, cleared by any
+    /// other write of the native id, the new session's first among them.
+    pub native_fork_at: Option<String>,
     pub title: Option<String>,
     /// Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
     /// (harness auto-title), `"user"` (explicitly chosen — a rename, or the
@@ -5083,6 +5224,9 @@ pub struct StoredChatMessage {
     /// Selecting a branch restores it, so the next message continues the branch
     /// on screen rather than whichever fork ran most recently.
     pub result_native_session_id: Option<String>,
+    /// Claude message this turn ended at within `result_native_session_id`,
+    /// where a fork of the branch past it branches the native session.
+    pub result_native_message_id: Option<String>,
     /// The harness that owns both native session ids on this message.
     pub native_harness: Option<String>,
 }
@@ -5094,15 +5238,18 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
         // the tree.
         "INSERT INTO chat_messages
                  (id, session_id, role, parts_json, created_at, parent_id,
-                  base_native_session_id, result_native_session_id, completed_at, native_harness)
+                  base_native_session_id, result_native_session_id, completed_at, native_harness,
+                  result_native_message_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                      COALESCE(?10, (SELECT harness FROM chat_sessions WHERE id = ?2
-                         AND (?7 IS NOT NULL OR ?8 IS NOT NULL))))
+                         AND (?7 IS NOT NULL OR ?8 IS NOT NULL))), ?11)
              ON CONFLICT(id) DO UPDATE SET
                  parts_json = excluded.parts_json,
                  completed_at = COALESCE(excluded.completed_at, completed_at),
                  result_native_session_id = COALESCE(
                      excluded.result_native_session_id, result_native_session_id),
+                 result_native_message_id = COALESCE(
+                     excluded.result_native_message_id, result_native_message_id),
                  native_harness = COALESCE(excluded.native_harness, native_harness)",
         params![
             m.id,
@@ -5114,7 +5261,8 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
             m.base_native_session_id,
             m.result_native_session_id,
             m.completed_at,
-            m.native_harness
+            m.native_harness,
+            m.result_native_message_id
         ],
     )?;
     Ok(())
@@ -5193,7 +5341,7 @@ fn row_to_chat_turn(
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
      created_at, updated_at, title_source, bootstrap_context, active_leaf_id, \
-     goal, autonomy, side_parent_session_id, side_parent_leaf_id";
+     goal, autonomy, side_parent_session_id, side_parent_leaf_id, native_fork_at";
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -5221,6 +5369,7 @@ fn row_to_chat_session(
         autonomy: row.get(19)?,
         side_parent_session_id: row.get(20)?,
         side_parent_leaf_id: row.get(21)?,
+        native_fork_at: row.get(22)?,
     })
 }
 
@@ -5325,6 +5474,17 @@ impl Store {
         self.conn.execute(
             "INSERT INTO engine_hosts (alias, root, state_json) VALUES (?1, ?2, ?3) ON CONFLICT(alias, root) DO UPDATE SET state_json = excluded.state_json",
             params![alias, root, json.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets every root's connection state and the auth state of a host no run uses.
+    pub(crate) fn forget_engine_host(&self, alias: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM engine_hosts WHERE alias = ?1", params![alias])?;
+        self.conn.execute(
+            "DELETE FROM engine_host_auth WHERE alias = ?1",
+            params![alias],
         )?;
         Ok(())
     }
@@ -7059,13 +7219,197 @@ mod tests {
     }
 
     #[test]
+    fn pending_runs_say_what_quitting_does_to_them() {
+        let dir = std::env::temp_dir().join(format!("orx-pending-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let engine = |kind: &str| Some(serde_json::json!({ "kind": kind }).to_string());
+        let handle = r#"{"kind":"engine","handle":{"type":"Local","dir":"/run"}}"#;
+        let runs = [
+            (
+                "a",
+                "running",
+                handle,
+                engine("local_job"),
+                AfterQuit::NeedsApp,
+            ),
+            (
+                "b",
+                "running",
+                handle,
+                engine("tinker_job"),
+                AfterQuit::NeedsApp,
+            ),
+            (
+                "c",
+                "starting",
+                handle,
+                engine("vercel_job"),
+                AfterQuit::NeedsApp,
+            ),
+            (
+                "d",
+                "running",
+                handle,
+                engine("openresearch_job"),
+                AfterQuit::NeedsApp,
+            ),
+            (
+                "e",
+                "submitting",
+                r#"{"kind":"engine"}"#,
+                engine("hf_job"),
+                AfterQuit::Continues,
+            ),
+            (
+                "f",
+                "running",
+                handle,
+                engine("ssh_job"),
+                AfterQuit::Continues,
+            ),
+            // Detached supervisors from 0.2.x outlive the app and finish these themselves.
+            (
+                "g",
+                "running",
+                r#"{"kind":"vercel_job","jobId":"box"}"#,
+                None,
+                AfterQuit::Continues,
+            ),
+            (
+                "h",
+                "running",
+                r#"{"kind":"engine","handle":{"type":"Legacy","descriptor":{"kind":"openresearch_job"}}}"#,
+                engine("openresearch_job"),
+                AfterQuit::Continues,
+            ),
+            (
+                "i",
+                "running",
+                r#"{"kind":"local_job","jobId":"1"}"#,
+                None,
+                AfterQuit::NeedsApp,
+            ),
+        ];
+        for (index, (id, status, backend, launch, _)) in runs.iter().enumerate() {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, launch_spec, created_at, updated_at)
+                     VALUES (?1, 'experiment', 'project', ?2, ?3, ?4, ?5, 1)",
+                    params![id, status, backend, launch, index as i64],
+                )
+                .unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES ('finished', 'experiment', 'project', 'done', '{\"kind\":\"engine\"}', 99, 1)",
+                [],
+            )
+            .unwrap();
+
+        let pending = store.pending_work().unwrap();
+        assert!(pending.agents.is_empty());
+        assert!(pending.blocks_quit());
+        let fates = pending
+            .runs
+            .into_iter()
+            .map(|run| (run.run_id, run.after_quit));
+        let expected = runs
+            .into_iter()
+            .map(|(id, .., fate)| (id.to_string(), fate));
+        assert!(fates.eq(expected));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pending_work_names_each_chat_and_run_and_where_it_opens() {
+        let dir = std::env::temp_dir().join(format!("orx-pending-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, repo_path, created_at, updated_at)
+                 VALUES ('project', 'Scaling laws', 'scaling', '', '', '/repo', 1, 1);
+                 INSERT INTO chat_sessions (id, project_id, harness, title, created_at, updated_at)
+                 VALUES ('chat', 'project', 'codex', 'Tune the schedule', 1, 1),
+                        ('side', 'project', 'claude-code', '  ', 1, 2),
+                        ('idle', 'project', 'codex', 'Done', 1, 3);
+                 UPDATE chat_sessions SET side_parent_session_id = 'chat' WHERE id = 'side';
+                 INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash,
+                                         prepared_input, settings_json, state, delivery_state, created_at, updated_at)
+                 VALUES ('t1', 'chat', 'a1', 'c1', 'h', '', '{}', 'running', 'pending', 1, 1),
+                        ('t2', 'chat', 'a2', 'c2', 'h', '', '{}', 'preparing', 'pending', 1, 1),
+                        ('t3', 'side', 'a3', 'c3', 'h', '', '{}', 'retrying', 'pending', 1, 1),
+                        ('t4', 'idle', 'a4', 'c4', 'h', '', '{}', 'completed', 'delivered', 1, 1);
+                 INSERT INTO local_experiments (id, project_id, slug, branch_name, title, run_command,
+                                                created_at, updated_at, chat_session_id)
+                 VALUES ('experiment', 'project', 'lr-sweep', 'b', '', 'python train.py', 1, 1, 'chat');
+                 INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES ('run', 'experiment', 'project', 'running', '{\"kind\":\"modal_job\"}', 1, 1);",
+            )
+            .unwrap();
+
+        let pending = store.pending_work().unwrap();
+        assert_eq!(
+            pending.agents,
+            [
+                PendingAgent {
+                    project_id: "project".into(),
+                    project: Some("Scaling laws".into()),
+                    session_id: "side".into(),
+                    side_parent_id: Some("chat".into()),
+                    harness: "claude-code".into(),
+                    title: None,
+                },
+                PendingAgent {
+                    project_id: "project".into(),
+                    project: Some("Scaling laws".into()),
+                    session_id: "chat".into(),
+                    side_parent_id: None,
+                    harness: "codex".into(),
+                    title: Some("Tune the schedule".into()),
+                },
+            ]
+        );
+        assert_eq!(
+            pending.runs,
+            [PendingRun {
+                project_id: "project".into(),
+                project: Some("Scaling laws".into()),
+                experiment_id: "experiment".into(),
+                run_id: "run".into(),
+                session_id: Some("chat".into()),
+                name: "lr-sweep".into(),
+                backend: Some("modal_job".into()),
+                after_quit: AfterQuit::Continues,
+            }]
+        );
+        assert!(!pending.blocks_quit());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_retired_notice_batch_does_not_block_idle_and_is_reported_on_its_run() {
         let dir = std::env::temp_dir().join(format!("orx-retired-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         store
+            .conn
+            .execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES ('run', 'experiment', 'project', 'done', '{\"kind\":\"engine\"}', 1, 1)",
+                [],
+            )
+            .unwrap();
+        store
             .insert_run_notice("run", "owner", TERMINAL, TERMINAL, "done", 1)
             .unwrap();
-        assert!(store.engine_idle_blocked().unwrap());
+        let pending = store.pending_work().unwrap();
+        assert_eq!(pending.runs[0].after_quit, AfterQuit::Reports);
+        assert!(!pending.blocks_quit());
         assert_eq!(store.run_notice_error("run").unwrap(), None);
         let batch = store.run_notice_batch_at("owner", 10).unwrap();
         store
@@ -7077,7 +7421,7 @@ mod tests {
                 20,
             )
             .unwrap();
-        assert!(!store.engine_idle_blocked().unwrap());
+        assert!(store.pending_work().unwrap().is_empty());
         assert_eq!(
             store.run_notice_error("run").unwrap().as_deref(),
             Some("harness removed")
@@ -8613,7 +8957,7 @@ mod tests {
         drop(staging);
 
         let moving = store.acquire_data_dir_move_lock().unwrap();
-        assert!(store.claim_data_dir_move("move").unwrap());
+        assert!(store.claim_data_dir_move("move", &[]).unwrap());
         refuse("being moved");
         store.release_data_dir_move("move").unwrap();
         drop(moving);
@@ -8687,6 +9031,7 @@ mod tests {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    result_native_message_id: None,
                     native_harness: None,
                 })
                 .unwrap();
@@ -8733,6 +9078,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                result_native_message_id: None,
                 native_harness: None,
             })
             .unwrap();
@@ -8746,7 +9092,7 @@ mod tests {
         std::fs::write(attachments.join("att-3__unsent.png"), "bytes").unwrap();
 
         let moving = store.acquire_data_dir_move_lock().unwrap();
-        assert!(store.claim_data_dir_move("move").unwrap());
+        assert!(store.claim_data_dir_move("move", &[]).unwrap());
         store.cleanup_orphaned_chat_attachments().unwrap();
         assert!(attachments.join("att-2__orphan.png").exists());
         store.release_data_dir_move("move").unwrap();
@@ -9151,6 +9497,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
+                result_native_message_id: None,
                 native_harness: None,
             })
             .unwrap();
@@ -9203,6 +9550,7 @@ mod tests {
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: Some("old-thread".into()),
+                result_native_message_id: None,
                 native_harness: None,
             })
             .unwrap();
@@ -9233,6 +9581,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         };
         assert_eq!(
@@ -9363,7 +9712,7 @@ mod tests {
         let mut turn = chat_turn_fixture("running", "client-running");
         turn.state = "running".into();
         store.admit_chat_turn(None, &turn).unwrap();
-        assert!(store.claim_chat_turn("chat_1", "owner").unwrap());
+        assert!(store.claim_chat_turn("chat_1", "owner", &[]).unwrap());
 
         assert!(store.reconcile_unfinished_chat_turns().unwrap().is_empty());
         assert_eq!(
@@ -9384,13 +9733,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .reconcile_expired_unfinished_chat_turns()
+                .reconcile_expired_unfinished_chat_turns(&[])
                 .unwrap()
                 .len(),
             1
         );
         assert!(store
-            .reconcile_expired_unfinished_chat_turns()
+            .reconcile_expired_unfinished_chat_turns(&[])
             .unwrap()
             .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -9413,6 +9762,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         };
         store.upsert_chat_message(&message).unwrap();
@@ -9458,6 +9808,7 @@ mod tests {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    result_native_message_id: None,
                     native_harness: None,
                 })
                 .unwrap();
@@ -9525,6 +9876,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         };
         store.admit_chat_turn(Some(&user), &turn).unwrap();
@@ -9615,6 +9967,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         };
         assert!(store
@@ -9663,6 +10016,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         };
         store.admit_chat_turn(Some(&user), &turn).unwrap();
@@ -9676,6 +10030,7 @@ mod tests {
             parent_id: Some(user.id.clone()),
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         };
         assert!(store
@@ -9869,6 +10224,7 @@ mod tests {
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
+            result_native_message_id: None,
             native_harness: None,
         };
         assert_eq!(
@@ -10050,6 +10406,7 @@ mod tests {
             project_id: "proj_1".into(),
             harness: "claude-code".into(),
             native_session_id: None,
+            native_fork_at: None,
             title: None,
             title_source: None,
             model: None,
@@ -10190,6 +10547,7 @@ mod tests {
                     completed_at: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    result_native_message_id: None,
                     native_harness: None,
                 })
                 .unwrap();
@@ -11185,23 +11543,23 @@ mod tests {
             .unwrap();
         let second = Store::open_at(dir.clone()).unwrap();
 
-        assert!(first.claim_chat_turn("chat_A", "token_A").unwrap());
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(first.claim_chat_turn("chat_A", "token_A", &[]).unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         assert!(!second.renew_chat_turn("chat_A", "token_B").unwrap());
-        assert!(!second.claim_data_dir_move("move_A").unwrap());
+        assert!(!second.claim_data_dir_move("move_A", &[]).unwrap());
         second.release_chat_turn("chat_A", "token_B").unwrap();
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         first.release_chat_turn("chat_A", "token_A").unwrap();
         let move_lock = first.acquire_data_dir_move_lock().unwrap();
-        assert!(first.claim_data_dir_move("move_A").unwrap());
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(first.claim_data_dir_move("move_A", &[]).unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         second.release_data_dir_move("move_B").unwrap();
-        assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(!second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
         drop(move_lock);
         let service_lock =
             acquire_data_dir_lock(first.data_dir_move_lock_path.clone(), false).unwrap();
         assert!(first.acquire_data_dir_move_lock().is_err());
-        assert!(second.claim_chat_turn("chat_A", "token_B").unwrap());
+        assert!(second.claim_chat_turn("chat_A", "token_B", &[]).unwrap());
 
         drop(service_lock);
         drop(second);
@@ -11447,6 +11805,7 @@ mod tests {
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
+                    result_native_message_id: None,
                     native_harness: None,
                 })
                 .unwrap();

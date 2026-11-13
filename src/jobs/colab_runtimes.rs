@@ -161,13 +161,16 @@ fn cli_session_names(home: &Path) -> HashMap<String, String> {
 
 /// Session name → (run id, status) for this store's Colab runs.
 fn colab_runs() -> HashMap<String, (String, String)> {
-    let Ok(runs) = crate::store::Store::open().and_then(|store| store.list_runs(1000)) else {
+    let Ok(store) = crate::store::Store::open() else {
+        return HashMap::new();
+    };
+    let Ok(runs) = store.list_runs(1000) else {
         return HashMap::new();
     };
     runs.into_iter()
         .filter(|run| {
-            serde_json::from_str::<Value>(&run.backend_json)
-                .is_ok_and(|backend| backend["kind"] == "colab_job")
+            crate::local::controller_runs::run_backend(&store, run)
+                .is_some_and(|backend| backend["kind"] == "colab_job")
         })
         .map(|run| (session_name(&run.id), (run.id, run.status)))
         .collect()
