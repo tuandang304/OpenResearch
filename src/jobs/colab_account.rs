@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -114,7 +114,9 @@ pub(super) async fn email(home: &Path) -> Result<String, String> {
 }
 
 type AccountCache = Mutex<HashMap<PathBuf, (Instant, Account)>>;
-type TokenCache = Mutex<HashMap<PathBuf, (Instant, String)>>;
+/// Expiry on the wall clock: `Instant` stops while the machine sleeps, so a
+/// token would outlive its real expiry after a suspend.
+type TokenCache = Mutex<HashMap<PathBuf, (SystemTime, String)>>;
 
 fn cache() -> &'static AccountCache {
     static CACHE: OnceLock<AccountCache> = OnceLock::new();
@@ -131,7 +133,10 @@ pub async fn account(home: &Path, force: bool) -> Option<Account> {
     if !token_file(home).is_file() {
         return None;
     }
-    if !force {
+    if force {
+        // A token Google already rejected would otherwise outlive every Refresh.
+        access_token_cache().lock().await.remove(home);
+    } else {
         if let Some((at, account)) = cache().lock().await.get(home) {
             if at.elapsed() < ACCOUNT_TTL {
                 return Some(account.clone());
@@ -339,7 +344,7 @@ pub(super) async fn get_json(
 /// A fresh access token from the CLI's refresh token, kept in memory only.
 pub(super) async fn access_token(home: &Path) -> Result<String, String> {
     if let Some((expires, token)) = access_token_cache().lock().await.get(home) {
-        if Instant::now() < *expires {
+        if SystemTime::now() < *expires {
             return Ok(token.clone());
         }
     }
@@ -391,7 +396,7 @@ pub(super) async fn access_token(home: &Path) -> Result<String, String> {
     access_token_cache().lock().await.insert(
         home.to_path_buf(),
         (
-            Instant::now() + Duration::from_secs(lifetime),
+            SystemTime::now() + Duration::from_secs(lifetime),
             token.clone(),
         ),
     );
