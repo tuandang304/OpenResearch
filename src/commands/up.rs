@@ -59,7 +59,6 @@ mod harness_setup;
 mod network;
 mod research_tools;
 mod search;
-mod sleep_mode;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {

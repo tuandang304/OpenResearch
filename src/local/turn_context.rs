@@ -1,12 +1,10 @@
 //! Context blocks that ride every turn: the goal, the copilot autonomy level,
-//! the sleep-mode rules, and the strategy in force.
+//! and the reply language.
 //!
 //! A harness that keeps native history (Claude Code `--resume`, Codex threads,
 //! OpenCode sessions) keeps every copy of such a block for the rest of the
 //! session, so a block repeated verbatim each turn grows the context by its
-//! full size every turn and is re-read on every request after it. Overnight
-//! sleep mode is the worst case: dozens of hidden turns each carried ~1.5k
-//! tokens of rules and strategy the agent already had.
+//! full size every turn and is re-read on every request after it.
 //!
 //! A block is therefore sent in full once, then as a one-line reference while
 //! the native session still holds that exact text: any of the last
@@ -252,7 +250,7 @@ mod tests {
             store
                 .upsert_chat_message(&message("a1", "assistant", Some("u1"), "n1"))
                 .unwrap();
-            // A hidden turn (sleep nudge, run wake-up) after it.
+            // A hidden turn (a run wake-up) after it.
             store
                 .admit_chat_turn(None, &turn("t2", None, "a2", "[orx] check-in"))
                 .unwrap();

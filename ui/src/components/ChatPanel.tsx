@@ -105,7 +105,6 @@ import {
   Lightbulb,
   MessageSquareQuote,
   MessagesSquare,
-  MoonStar,
   MoreHorizontal,
   Paperclip,
   Pencil,
@@ -213,7 +212,6 @@ import { ChatImageScope, Md } from "./Md";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
-import { SleepModeDialog, chatSleepQuery, sleepLabel } from "./SleepModeDialog";
 import { useComposerFocus } from "./useComposerFocus";
 import { ExperimentRunBanner } from "./ExperimentRunBanner";
 import { SETTINGS_NAV, harnessSetupPath } from "./settingsNav";
@@ -5690,11 +5688,6 @@ export function ChatPanel({
   }
 
   const openSession = sessions.find((s) => s.id === activeId);
-  const { data: sleepStatus } = useQuery({
-    ...chatSleepQuery(workspace, openSession?.id ?? ""),
-    enabled: !!openSession,
-  });
-  const [sleepDialogOpen, setSleepDialogOpen] = useState(false);
   const assistantLabel = openSession ? harnessLabel(openSession.harness, openSession.harnessName) : m.chat_the_agent();
 
   // The selection the composer displays and edits:
@@ -8407,8 +8400,6 @@ export function ChatPanel({
                   onSelectReasoning={setReasoningLevel}
                   autonomy={openSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
-                  sleepDetail={sleepLabel(sleepStatus)}
-                  onOpenSleep={openSession ? () => setSleepDialogOpen(true) : undefined}
                   disabled={switchingAgent}
                   lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
                   openRequest={modelPickerRequest}
@@ -8419,21 +8410,6 @@ export function ChatPanel({
                   }}
                 />
                 <ContextMeter usage={openSession?.contextUsage} busy={busy} onCompact={openSession ? () => void compactSession() : undefined} />
-                {sleepStatus && !sleepStatus.state.finished && (
-                  <IconButton
-                    type="button"
-                    size="small"
-                    className="sleep-mode-indicator"
-                    data-tip={`${m.sleep_mode_title()} · ${sleepLabel(sleepStatus)}`}
-                    aria-label={m.sleep_mode_title()}
-                    onClick={() => setSleepDialogOpen(true)}
-                  >
-                    <MoonStar size={14} aria-hidden="true" />
-                  </IconButton>
-                )}
-                {sleepDialogOpen && openSession && (
-                  <SleepModeDialog sessionId={openSession.id} onClose={() => setSleepDialogOpen(false)} />
-                )}
               </div>
             </div>
           </div>

@@ -286,8 +286,6 @@ export function ModelPicker({
   onSelectReasoning,
   autonomy,
   onSelectAutonomy,
-  sleepDetail,
-  onOpenSleep,
   lockHarness = false,
   disabled = false,
   openRequest = 0,
@@ -308,9 +306,6 @@ export function ModelPicker({
   onSelectReasoning?: (id: string) => void;
   autonomy?: Autonomy;
   onSelectAutonomy?: (autonomy: Autonomy) => void;
-  /** Sleep mode's state for the open session; the row opens its dialog. */
-  sleepDetail?: string;
-  onOpenSleep?: () => void;
   lockHarness?: boolean;
   disabled?: boolean;
   openRequest?: number;
@@ -803,13 +798,6 @@ export function ModelPicker({
                         ))}
                       </Menu.RadioGroup>
                     </Menu.Group>
-                  )}
-                  {onOpenSleep && (
-                    <Menu.Item className={SETTINGS_ROW} aria-haspopup="dialog" onClick={onOpenSleep}>
-                      <span className="flex-1">{m.sleep_mode_title()}</span>
-                      {sleepDetail && <span className="max-w-36 truncate text-sm text-muted">{sleepDetail}</span>}
-                      <ChevronRight size={14} className="shrink-0 text-muted" />
-                    </Menu.Item>
                   )}
                 </Menu.Popup>
               </Menu.Positioner>

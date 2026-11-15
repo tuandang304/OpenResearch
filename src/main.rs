@@ -83,12 +83,6 @@ enum Command {
     /// Operate on one local project.
     Project(ProjectArgs),
 
-    /// Let a chat research unattended (overnight) under a hard GPU budget.
-    Sleep(commands::sleep::SleepArgs),
-
-    /// The versioned way of working that sleep mode improves from run results.
-    Strategy(commands::strategy::StrategyArgs),
-
     /// List a project's runs.
     Runs(RunsArgs),
 
@@ -1496,8 +1490,6 @@ fn command_name(command: &Command) -> &'static str {
         Command::Projects(_) => "projects",
         Command::Orgs(_) => "orgs",
         Command::Project(_) => "project",
-        Command::Sleep(_) => "sleep",
-        Command::Strategy(_) => "strategy",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
         Command::Tensorboard(_) => "tensorboard",
@@ -1553,8 +1545,6 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Projects(args) => commands::projects::run(args).await,
         Command::Orgs(args) => commands::orgs::run(args).await,
         Command::Project(args) => commands::project::run(args).await,
-        Command::Sleep(args) => commands::sleep::run(args).await,
-        Command::Strategy(args) => commands::strategy::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
         Command::Tensorboard(args) => commands::tensorboard::run(args).await,

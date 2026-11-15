@@ -100,27 +100,7 @@ impl Api {
         crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
         args.backend.get_or_insert_with(|| "local".into());
         super::require_caller_settings(&args, &super::absolute_config_dir()).await?;
-        let sleep = crate::local::sleep::admit_run(&project, &args).await?;
-        let id = self.commands.run(args, admission).await?;
-        if let Some(sleep) = sleep {
-            let run = self.run(&id)?;
-            let store = Store::open()?;
-            store.record_sleep_charge(
-                &sleep.session_id,
-                &id,
-                sleep.usd_per_hour,
-                run.created_at,
-            )?;
-            // Self-improvement: credit the run to the strategy its turn ran under.
-            if let Some(plan) = store.get_sleep(&sleep.session_id)? {
-                if let Err(err) =
-                    crate::local::strategy::attribute_run(&store, &plan, &id, run.created_at)
-                {
-                    eprintln!("orx up: strategy: {err}");
-                }
-            }
-        }
-        Ok(id)
+        self.commands.run(args, admission).await
     }
 
     fn run(&self, id: &str) -> Result<StoredRun> {
