@@ -187,7 +187,10 @@ export function createProjectPersistence(
           .fetchQuery(getProjectUiStateQuery(projectId))
           .then((saved) => {
             if (!live || !isCurrentScope(lifetimeScope)) return;
-            projectCache.set(projectId, saved ?? emptyProjectWorkspace());
+            // Folder trees start closed each time the app opens, so the folders an earlier run left open are not restored.
+            projectCache.set(projectId, saved
+              ? { ...saved, tasks: Object.fromEntries(Object.entries(saved.tasks).map(([key, task]) => [key, { ...task, expanded: {} }])) }
+              : emptyProjectWorkspace());
             setLoadedProject(projectId);
           })
           .catch((error: unknown) => {
