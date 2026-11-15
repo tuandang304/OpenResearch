@@ -95,6 +95,9 @@ enum Command {
     /// Summarize the metrics runs logged to Trackio: local, a Hugging Face Space, or a server.
     Metrics(MetricsArgs),
 
+    /// Rank a project's measured runs against its baseline (the Results tab).
+    Results(commands::results::ResultsArgs),
+
     /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
     CreateExperiment(CreateExperimentArgs),
@@ -1494,6 +1497,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Logs(_) => "logs",
         Command::Tensorboard(_) => "tensorboard",
         Command::Metrics(_) => "metrics",
+        Command::Results(_) => "results",
         Command::CreateExperiment(_) => "create-experiment",
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
@@ -1549,6 +1553,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Logs(args) => commands::logs::run(args).await,
         Command::Tensorboard(args) => commands::tensorboard::run(args).await,
         Command::Metrics(args) => commands::metrics::run(args).await,
+        Command::Results(args) => commands::results::run(args),
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,

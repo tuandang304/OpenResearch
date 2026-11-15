@@ -84,6 +84,13 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 |---|---|
 | `orx logs <runId>` | Show the local log path, size, and short preview; inspect the file for full evidence. |
 
+### Results against the baseline — module `orx-results`
+| Command | What it does |
+|---|---|
+| `orx exp metrics <expId> --run <runId> --file metrics.json` | Record a finished run's final measurements. Do it for every successful run, from its log; the output compares the run with the baseline. |
+| `orx results view <projectId> [--json]` | Rank the project's measured runs against its baseline, with warnings. The user sees the same in the Results tab. |
+| `orx results set <projectId> [--baseline-run <runId> \| --baseline-file <json> --baseline-name "<n>" \| --baseline-root] [--primary <metric>] [--lower-is-better <metric>]` | Change the baseline, ranking metric or a metric's direction, only when the user asks. |
+
 ### Create and run experiments (write) — modules `orx-create`, `orx-compute`, `orx-git`
 | Command | What it does |
 |---|---|

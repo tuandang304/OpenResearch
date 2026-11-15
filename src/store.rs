@@ -10,6 +10,7 @@
 
 mod acp;
 pub(crate) mod harness_accounts;
+pub(crate) mod results;
 pub(crate) mod run_metrics;
 pub(crate) mod search;
 mod telemetry;
@@ -6337,8 +6338,11 @@ impl Store {
         };
         let view = crate::plane::Run::from_store(self, run)?;
         let status = view.display_status();
+        let record = crate::local::results::notice_hint(self, run)?
+            .map(|hint| format!("\n{hint}"))
+            .unwrap_or_default();
         Ok(format!(
-            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\nReason: {reason}\n\nRecent log:\n{tail}",
+            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\nReason: {reason}{record}\n\nRecent log:\n{tail}",
             run.id, status,
         ))
     }

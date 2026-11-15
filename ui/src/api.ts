@@ -3265,7 +3265,7 @@ export function createApi(
     harnessAccountLoginPath,
     handoffChatSession,
     ...createForkComputeApi(get, post),
-    ...createResearchApi(get, post),
+    ...createResearchApi(get, post, put),
   };
 
   return {
