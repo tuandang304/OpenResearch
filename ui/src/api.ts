@@ -1883,7 +1883,7 @@ export interface PublicProject {
 /** Where a shared project comes from: a picked file, a file on this machine, or a published link. */
 export type SharedSource = File | string | { link: string };
 
-// --- fork: harness routing, quotas, sleep mode, compute prices ------------------
+// --- fork: harness routing, quotas, compute prices ------------------
 
 /** Continue a turn on another harness when its own runs out of usage. An empty
  * `order` tries every other chat harness in registry order. */
@@ -2026,94 +2026,6 @@ export interface HarnessAccountPatch {
   paused?: boolean;
   limits?: HarnessPoolLimit[];
   clearBlock?: boolean;
-}
-
-export interface SleepMeasured {
-  runId: string;
-  value: number;
-}
-
-/** A chat's unattended (overnight) plan with its GPU ledger and progress; see `orx sleep`. */
-export interface SleepStatus {
-  sessionId: string;
-  projectId: string;
-  startedAt: number;
-  chatPrompts: boolean;
-  plan: {
-    gpuBudgetUsd: number;
-    goal?: string;
-    notes?: string;
-    askFirst?: boolean;
-    until?: number;
-    objective?: {
-      metric: string;
-      direction: "max" | "min";
-      improvePct?: number;
-      baselineValue?: number;
-    };
-    keepAwake: boolean;
-    selfImprove: boolean;
-  };
-  state: {
-    finished?: { reason: string; detail: string; at: number };
-    assessment?: { verdict: string; note: string; revisedImprovePct?: number };
-    kickedOff?: boolean;
-    briefingAsked?: boolean;
-    briefed?: boolean;
-    understanding?: string;
-    researchRounds?: number;
-    interrupts?: number;
-  };
-  budget: { limitUsd: number; spentUsd: number; leftUsd: number; burnUsdPerHour: number };
-  progress: {
-    baseline: SleepMeasured | null;
-    best: SleepMeasured | null;
-    improvementPct: number | null;
-    targetPct: number | null;
-    met: boolean;
-    runsSinceBest: number;
-  } | null;
-  /** Self-improvement: the strategy version in force and the one on trial; see `orx strategy`. */
-  strategy: SleepStrategy | null;
-}
-
-export interface StrategyStats {
-  launched: number;
-  wins: number;
-  losses: number;
-  pending: number;
-  spendUsd: number;
-}
-
-export interface StrategyVersion {
-  version: number;
-  parent: number | null;
-  status: string;
-  author: string;
-  rationale: string;
-  decision: string | null;
-  stats: StrategyStats | null;
-}
-
-export interface SleepStrategy {
-  selfImprove: boolean;
-  measurable: boolean;
-  incumbent: StrategyVersion;
-  candidate: (StrategyVersion & { control: StrategyStats | null }) | null;
-  events: { at: number; kind: string; version: number; detail: string }[];
-}
-
-export interface SleepRequest {
-  budgetUsd: number;
-  hours: number | null;
-  goal: string | null;
-  notes: string | null;
-  askFirst: boolean;
-  metric: string | null;
-  direction: "max" | "min";
-  targetPct: number | null;
-  baselineValue: number | null;
-  selfImprove: boolean;
 }
 
 // Fork-owned compute settings (Colab, GCP, Kaggle).
@@ -3337,23 +3249,6 @@ export function createApi(
       (r) => r.session,
     );
 
-  const getChatSleep = (sessionId: string, signal?: AbortSignal) =>
-    get<{ sleep: SleepStatus | null }>(`/api/chat/sessions/${sessionId}/sleep`, signal).then((r) => r.sleep);
-
-  const startChatSleep = (sessionId: string, request: SleepRequest) =>
-    put<{ sleep: SleepStatus | null }>(`/api/chat/sessions/${sessionId}/sleep`, request).then((r) => r.sleep);
-
-  const stopChatSleep = (sessionId: string) =>
-    post<{ sleep: SleepStatus | null }>(`/api/chat/sessions/${sessionId}/sleep/stop`, {}).then((r) => r.sleep);
-
-  const decideChatSleepStrategy = (sessionId: string, action: "promote" | "reject" | "rollback") =>
-    post<{ sleep: SleepStatus | null }>(`/api/chat/sessions/${sessionId}/sleep/strategy`, { action }).then((r) => r.sleep);
-
-  const turnOffChatSleep = (sessionId: string) =>
-    writeResponse(`/api/chat/sessions/${sessionId}/sleep`, { method: "DELETE" })
-      .then((r) => json<{ sleep: SleepStatus | null }>(r))
-      .then((r) => r.sleep);
-
   const forkApi = {
     getComputeRoutingSettings,
     getComputePrices,
@@ -3369,11 +3264,6 @@ export function createApi(
     removeHarnessAccount,
     harnessAccountLoginPath,
     handoffChatSession,
-    getChatSleep,
-    startChatSleep,
-    stopChatSleep,
-    decideChatSleepStrategy,
-    turnOffChatSleep,
     ...createForkComputeApi(get, post),
     ...createResearchApi(get, post),
   };

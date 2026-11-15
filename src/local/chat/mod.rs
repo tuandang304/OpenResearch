@@ -6452,12 +6452,9 @@ impl ChatHost {
                 prepare_project_slash_worktree(&project, &message.text, &session.id).await;
             }
         }
-        // Sleep mode replaces the autonomy level: nobody is there to ask.
         let delivered = Delivered::load(&store, &session);
-        let sleep_context =
-            super::sleep::turn_context(&store, &session.id, &delivered).or_else(|| {
-                Autonomy::from_stored(session.autonomy.as_deref()).turn_context_once(&delivered)
-            });
+        let autonomy_context =
+            Autonomy::from_stored(session.autonomy.as_deref()).turn_context_once(&delivered);
         // A command keeps its leading `/`, and what orx writes keeps its
         // leading `[orx]`; any other message carries the ref an agent cites it by.
         let message_ref = user_msg
@@ -6490,7 +6487,7 @@ impl ChatHost {
                 &delivered,
                 super::turn_context::reply_language(),
                 session.goal.as_deref(),
-                sleep_context.as_deref(),
+                autonomy_context.as_deref(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
@@ -6867,13 +6864,7 @@ impl ChatHost {
                 });
             }
         }
-        let store = Store::open().ok()?;
-        let mut policy = store.ui_state().ok()?.harness_failover;
-        // Nobody is there to switch harnesses by hand while sleep mode runs.
-        if !policy.enabled && store.get_sleep(&ctx.session_id).ok().flatten().is_some() {
-            policy.enabled = true;
-        }
-        drop(store);
+        let policy = Store::open().ok()?.ui_state().ok()?.harness_failover;
         // Then a model in another of the harness's quota pools (Antigravity's
         // Gemini models and its Claude/GPT models are metered apart).
         if policy.enabled && accounts::pools(&ctx.harness).len() > 1 {
@@ -10400,7 +10391,6 @@ pub async fn keep_turn_leases(
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
     data_dir_gate: Arc<tokio::sync::Mutex<()>>,
 ) {
-    let mut last_sleep_tick = Instant::now() - SLEEP_TICK;
     loop {
         // Also the turn leases' heartbeat, so it keeps pace with their TTL.
         tokio::time::sleep(crate::config::paced(Duration::from_secs(3))).await;
@@ -10418,139 +10408,7 @@ pub async fn keep_turn_leases(
         {
             eprintln!("orx up: news watcher: {err}");
         }
-        if last_sleep_tick.elapsed() >= SLEEP_TICK {
-            last_sleep_tick = Instant::now();
-            if let Err(err) = process_sleep_sessions(&chat).await {
-                eprintln!("orx up: sleep mode: {err}");
-            }
-        }
     }
-}
-
-const SLEEP_TICK: Duration = Duration::from_secs(30);
-
-/// One watchdog pass over every sleep-mode chat: enforce the GPU budget,
-/// finish plans, interrupt hung turns, and wake idle chats. See
-/// [`super::sleep`].
-async fn process_sleep_sessions(chat: &Arc<ChatHost>) -> Result<()> {
-    use super::sleep::{self, Action, Budget, Observation};
-    use super::strategy;
-    let sleeps = Store::open()?.list_sleeps()?;
-    sleep::keep_awake::set(
-        sleeps
-            .iter()
-            .any(|s| s.plan.keep_awake && s.state.finished.is_none()),
-    );
-    for stored in sleeps {
-        let session_id = stored.session_id.clone();
-        let busy = chat.is_busy(&session_id).await;
-        let now = now_ms();
-        // The store is not `Send`, so each step opens its own.
-        let (charges, actions, mut state) = {
-            let store = Store::open()?;
-            let charges = store.sleep_charges(&session_id)?;
-            let runs = store.list_runs_by_project(&stored.project_id)?;
-            let active_runs = runs
-                .iter()
-                .filter(|run| !crate::local::is_terminal(&run.status))
-                .count();
-            // Self-improvement: decide the open strategy trial on the runs so far.
-            match strategy::advance(&store, &stored, active_runs, now) {
-                Ok(Some(decision)) => eprintln!("orx up: strategy: {decision}"),
-                Ok(None) => {}
-                Err(err) => eprintln!("orx up: strategy: {err}"),
-            }
-            let observation = Observation {
-                now,
-                busy,
-                total_runs: runs.len(),
-                active_runs,
-                budget: Some(Budget::of(&stored.plan, &charges, now)),
-                progress: sleep::progress_from_store(&store, &stored)?,
-                retrospective: strategy::retrospective_due(&store, &stored, now).unwrap_or_else(
-                    |err| {
-                        eprintln!("orx up: strategy: {err}");
-                        None
-                    },
-                ),
-            };
-            let mut state = stored.state.clone();
-            let plan = strategy::effective_plan(&store, &stored);
-            let actions = sleep::tick(&plan, &mut state, &observation);
-            (charges, actions, state)
-        };
-        for action in actions {
-            match action {
-                Action::CancelPaidRuns(reason) => {
-                    let store = Store::open()?;
-                    for charge in charges
-                        .iter()
-                        .filter(|c| c.usd_per_hour > 0.0 && !crate::local::is_terminal(&c.status))
-                    {
-                        if let Err(err) = crate::commands::exp::request_legacy_run_cancel(
-                            &store,
-                            &charge.run_id,
-                            &reason,
-                        ) {
-                            eprintln!("orx up: sleep mode: cancel {}: {err}", charge.run_id);
-                        }
-                    }
-                }
-                Action::Interrupt => {
-                    let _ = chat.interrupt(&session_id).await;
-                }
-                Action::Nudge(text) => {
-                    let delivered = match TurnGuard::claim_idle(
-                        chat,
-                        &session_id,
-                        TurnState::Reserved { turn_id: None },
-                    )
-                    .await
-                    {
-                        Some(guard) => matches!(
-                            chat.send_hidden_message(&session_id, text, guard).await,
-                            Ok(TurnSubmission::Started(_))
-                        ),
-                        None => false,
-                    };
-                    if !delivered {
-                        // Retry later, backing off, instead of losing the nudge.
-                        state = stored.state.clone();
-                        state.nudges = state.nudges.saturating_add(1);
-                        state.idle_since = Some(now);
-                    }
-                }
-            }
-        }
-        if let (None, Some(finish)) = (&stored.state.finished, &state.finished) {
-            eprintln!(
-                "orx up: sleep mode {session_id} finished: {}",
-                finish.detail
-            );
-        }
-        if state != stored.state {
-            let store = Store::open()?;
-            // `orx sleep assess|stop|start` may have written meanwhile; theirs win.
-            if let Some(latest) = store.get_sleep(&session_id)? {
-                if latest.created_at == stored.created_at {
-                    if latest.state.assessment != stored.state.assessment {
-                        state.assessment = latest.state.assessment;
-                    }
-                    if latest.state.understanding != stored.state.understanding {
-                        state.understanding = latest.state.understanding;
-                        state.briefed = latest.state.briefed;
-                        state.kicked_off = latest.state.kicked_off;
-                    }
-                    if latest.state.finished != stored.state.finished {
-                        state.finished = latest.state.finished;
-                        state.finish_notified = latest.state.finish_notified;
-                    }
-                    store.set_sleep_state(&session_id, &state)?;
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// A turn whose lease another claim reaped stops here and is recorded as cut

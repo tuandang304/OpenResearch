@@ -12,8 +12,6 @@ mod acp;
 pub(crate) mod harness_accounts;
 pub(crate) mod run_metrics;
 pub(crate) mod search;
-pub(crate) mod sleep;
-pub(crate) mod strategy;
 mod telemetry;
 pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 
