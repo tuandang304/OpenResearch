@@ -159,6 +159,7 @@ pub enum HomeView {
     Files,
     Artifacts,
     Terminal,
+    Results,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

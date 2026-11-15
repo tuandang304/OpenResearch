@@ -3375,7 +3375,7 @@ export function createApi(
     decideChatSleepStrategy,
     turnOffChatSleep,
     ...createForkComputeApi(get, post),
-    ...createResearchApi(get, post),
+    ...createResearchApi(get, post, put),
   };
 
   return {

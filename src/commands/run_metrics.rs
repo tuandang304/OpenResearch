@@ -40,6 +40,10 @@ pub fn run(store: &Store, args: MetricsArgs) -> Result<()> {
         }
         let data: RunMetrics = serde_json::from_slice(&bytes)?;
         store.put_run_metrics(&args.run, &data, args.replace)?;
+        let report = crate::local::results::report(store, &run.project_id)?;
+        if let Some(line) = crate::local::results::run_comparison(&report, &args.run) {
+            eprintln!("{line}");
+        }
     }
     println!(
         "{}",

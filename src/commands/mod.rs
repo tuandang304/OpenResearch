@@ -42,6 +42,7 @@ pub mod plan_gate;
 pub mod project;
 pub mod projects;
 pub mod remote_host;
+pub mod results;
 pub(crate) mod run_metrics;
 pub mod runs;
 pub mod serve;

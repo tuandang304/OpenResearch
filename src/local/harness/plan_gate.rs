@@ -316,7 +316,7 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
                 )
         }
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
-        "project" => matches!(subcommand(&mut rest), Some("view")),
+        "project" | "results" => matches!(subcommand(&mut rest), Some("view")),
         "exp" => match subcommand(&mut rest) {
             // Pure reads.
             Some("status" | "wait") => true,
