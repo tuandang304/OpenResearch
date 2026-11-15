@@ -93,8 +93,7 @@ function DirRow({
   onRename?: (path: string, name: string) => void;
   onCancelRename?: () => void;
 }) {
-  const defaultOpen = depth === 0;
-  const isOpen = toggled.has(path) ? !defaultOpen : defaultOpen;
+  const isOpen = toggled.has(path);
   return (
     <>
       <button

@@ -824,6 +824,8 @@ const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 const NO_MESSAGES: ChatMessage[] = [];
 const EMPTY_SESSIONS: ChatSession[] = [];
+// Sidebar projects start folded each time the app opens; ones the user opens stay open until it closes.
+const openedSidebarProjects = new Map<string, readonly string[]>();
 type DelegateRow = { session: ChatSession; status: DelegateStatus };
 const EMPTY_DELEGATES: DelegateRow[] = [];
 const EMPTY_RECOVERY_OVERRIDES = {};
@@ -5273,19 +5275,13 @@ export function ChatPanel({
   });
   const machineSuffix = runtime.kind === "ssh" ? `:${encodeURIComponent(runtime.session.host)}` : "";
   const pinnedProjectsKey = `sidebar-pinned-projects${machineSuffix}`;
-  const collapsedProjectsKey = `sidebar-collapsed-projects${machineSuffix}`;
   const [pinnedProjects, setPinnedProjects] = useState<string[]>(() => {
     try {
       const stored: unknown = JSON.parse(localStorage.getItem(pinnedProjectsKey) ?? "[]");
       return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
     } catch { return []; }
   });
-  const [collapsedProjects, setCollapsedProjects] = useState<string[]>(() => {
-    try {
-      const stored: unknown = JSON.parse(localStorage.getItem(collapsedProjectsKey) ?? "[]");
-      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
-    } catch { return []; }
-  });
+  const [openedProjects, setOpenedProjects] = useState<readonly string[]>(() => openedSidebarProjects.get(machineSuffix) ?? []);
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [sidebarExpandedAll, setSidebarExpandedAll] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
@@ -7330,9 +7326,12 @@ export function ChatPanel({
     let visible = matching.slice(0, chatLimit);
     const selected = matching.find((session) => session.id === activeId);
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
-    const collapsed = collapsedProjects.includes(project.id);
+    const collapsed = !openedProjects.includes(project.id);
     sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
-    if (collapsed) return;
+    if (collapsed) {
+      if (selected) sidebarRows.push({ kind: "chat", project, session: selected });
+      return;
+    }
     visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
     if (matching.length > 6) sidebarRows.push({ kind: "more", project });
     if (!visible.length && (sidebarGrouping === "projects" || query.isPending || query.error)) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => { void query.refetch(); } });
@@ -7520,9 +7519,9 @@ export function ChatPanel({
                       collapsed={row.collapsed}
                       busy={row.busy}
                       onToggleCollapsed={() => {
-                        const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
-                        setCollapsedProjects(next);
-                        try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
+                        const next = openedProjects.includes(project.id) ? openedProjects.filter((id) => id !== project.id) : [...openedProjects, project.id];
+                        setOpenedProjects(next);
+                        openedSidebarProjects.set(machineSuffix, next);
                       }}
                       pinned={pinnedProjects.includes(project.id)}
                       onPin={() => {
