@@ -157,7 +157,7 @@ Homes (`src/local/native_store.rs`) let an agent behave as the user set it up wh
 | OpenCode | session database | configuration, read in place |
 | Antigravity, ACP agents | nothing | home and session store |
 
-Links are reconciled when an agent starts, and before every Codex turn even on a running process. Claude Code and Codex chats from the user's own CLI can be adopted (`src/local/native_chats.rs`): they keep resolving to the user's native store, and orx's copy of recent history is for display only.
+Links are reconciled when an agent starts, and before every Codex turn even on a running process. Claude Code saves its sign-in by replacing the file, so a token a chat refreshes lands in orx's home; the dashboard hands it back to the user's home within seconds, and when both copies changed the one that expires later wins, since the other's refresh token is spent. Claude Code and Codex chats from the user's own CLI can be adopted (`src/local/native_chats.rs`): they keep resolving to the user's native store, and orx's copy of recent history is for display only.
 
 Claude Code and Codex profiles keep separate sign-ins in private homes under
 `agents/profiles`, recorded in `agent-profiles.json`. They share the user's
@@ -200,6 +200,8 @@ The bridge endpoint grants permissions, so it takes a per-child token that each 
 
 Where an agent offers a hook or plugin, it stamps each shell command with the issuing model, so a run records which model launched it (`src/commands/invocation_gate.rs`).
 
+Experiments run only through `orx exp run`, so the playbook says so every turn, and Claude Code's shell hook denies a command that clearly launches compute around orx (a scheduler or provider job submission, or the project's own run command typed directly) with the `orx` command to use instead (`src/local/harness/launch_gate.rs`). Agents without a hook get only the playbook.
+
 ## Turns survive restarts
 
 A turn is a row with a state and a **delivery state**: its prompt was never sent, rejected, accepted, or of unknown fate. A running turn holds a per-chat lease with a heartbeat, which keeps one turn per chat and exposes a turn whose process died ([storage](storage.md)).
@@ -219,7 +221,7 @@ Queued messages are persisted before they are acknowledged and run in order as e
 
 Every agent whose harness takes an MCP server gets `orx mcp` (`src/commands/mcp.rs`, tools in `src/commands/up/agent_tools.rs`). It speaks stdio, the one transport every harness accepts, and relays to the owning dashboard, which knows the calling chat by a token derived from a key that lives only in that dashboard's process.
 
-Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versioned model, and orx picks a route unless the agent names one: the vendor's own agent first, then flat-rate plans, direct APIs, and resellers last. Every agent and provider spells a model differently, so routes join on a canonical id derived from each spelling (`src/local/model_routes.rs`). A model the user turns off in Settings, or just its free tier, offers delegates no route.
+Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versioned model, and orx picks a route unless the agent names one: the vendor's own agent first, then flat-rate plans, direct APIs, and resellers last. Every agent and provider spells a model differently, so routes join on a canonical id derived from each spelling (`src/local/model_routes.rs`). A model the user turns off in Settings, or just its free tier, offers delegates no route. With sub-agent limits on, `models` lists and `delegate` accepts only routes on an allowed harness and allowed model, and the harness's fixed effort replaces the one asked for (`src/local/delegation.rs`).
 
 **A delegate is a side chat of the chat that started it,** in the same worktree, unless it asks for its own. Either way it stays out of the sidebar. It starts with only its task, runs with a permission mode no broader than its delegator's, and records who delegated to it, which counts its depth. A harness with no permission modes takes a delegate only from a chat that may do anything. Stopping a chat stops every delegate below it. A chat an agent starts without hearing from it is no delegate and stands as the user's; an agent does this only when the user asks for a top-level chat. A retry finds the chat the first attempt started, by an id derived from the request.
 

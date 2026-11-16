@@ -30,6 +30,43 @@ fn rewrite(payload: &Value, identity: &InvocationIdentity) -> Result<Value> {
     Ok(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":input}}))
 }
 
+fn deny(reason: &str) -> Value {
+    json!({"hookSpecificOutput":{
+        "hookEventName":"PreToolUse",
+        "permissionDecision":"deny",
+        "permissionDecisionReason":reason,
+    }})
+}
+
+/// The fixed run commands of the chat's project. Best effort: without them the
+/// gate still catches scheduler and provider launches.
+fn run_commands(store: &Store) -> Vec<String> {
+    let lookup = || -> Result<Vec<String>> {
+        let Some(session) = crate::local::chat::launching_chat_session() else {
+            return Ok(Vec::new());
+        };
+        let Some(session) = store.get_chat_session(&session)? else {
+            return Ok(Vec::new());
+        };
+        let mut commands: Vec<String> = store
+            .list_experiments_by_project(&session.project_id)?
+            .into_iter()
+            .map(|experiment| experiment.run_command)
+            .collect();
+        if let Some(project) = store.get_local_project(&session.project_id)? {
+            commands.extend(project.run_command);
+        }
+        commands.retain(|command| !command.trim().is_empty());
+        commands.sort();
+        commands.dedup();
+        Ok(commands)
+    };
+    lookup().unwrap_or_else(|error| {
+        eprintln!("orx invocation-gate: cannot read the project's run commands: {error}");
+        Vec::new()
+    })
+}
+
 pub async fn run() -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
@@ -37,11 +74,21 @@ pub async fn run() -> Result<()> {
     if payload.get("tool_name").and_then(Value::as_str) != Some("Bash") {
         return Ok(());
     }
+    let store = Store::open()?;
+    if let Some(reason) = payload
+        .pointer("/tool_input/command")
+        .and_then(Value::as_str)
+        .and_then(|command| {
+            crate::local::harness::launch_gate::bypass_reason(command, &run_commands(&store))
+        })
+    {
+        println!("{}", deny(&reason));
+        return Ok(());
+    }
     let call_id = payload
         .get("tool_use_id")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("Missing native tool-use identity"))?;
-    let store = Store::open()?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         if let Some(identity) = store.native_invocation_identity("claude-code", call_id)? {
