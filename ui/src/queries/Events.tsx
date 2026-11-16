@@ -91,6 +91,9 @@ export function QueryEvents() {
       // Artifact previews poll their HEAD only as a slow fallback; this event is the live signal.
       invalidateFamilies(["fileVersion"], scope, (query) => typeof query.queryKey[3] === "string" && query.queryKey[3].startsWith(artifactUrlPrefix(projectId)));
     },
+    onUsageChanged() {
+      invalidateFamilies(["getUsage"], scope);
+    },
     onReconnect() {
       if (!isCurrentScope(scope)) return;
       void repairLiveQueries();

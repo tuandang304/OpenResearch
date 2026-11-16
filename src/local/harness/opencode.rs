@@ -394,6 +394,7 @@ impl Harness for OpenCode {
     }
 
     async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        let _in_use = super::managed::OPENCODE_IN_USE.read().await;
         selected_generation_model(request.model)?;
         opencode_one_shot(&crate::local::opencode::resolve_binary().await?, request).await
     }
@@ -1595,6 +1596,7 @@ async fn opencode_pre_accept_setup(
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+    let _in_use = super::managed::OPENCODE_IN_USE.read().await;
     // Native permission and question requests die with their turn. Clear any
     // crash/restart leftovers before a new live request can be surfaced.
     ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
@@ -1792,6 +1794,14 @@ fn opencode_native_usage(tokens: &Value) -> crate::store::TokenUsage {
     }
 }
 
+/// The dollars OpenCode reports a step or message cost.
+fn opencode_cost(value: &Value) -> Option<crate::store::Cost> {
+    value
+        .get("cost")
+        .and_then(Value::as_f64)
+        .and_then(|dollars| crate::store::Cost::of(dollars, "USD"))
+}
+
 fn opencode_used_tokens(tokens: Option<&Value>) -> Option<u64> {
     let tokens = tokens?;
     let field = |v: &Value, name: &str| v.get(name).and_then(Value::as_u64).unwrap_or(0);
@@ -1916,6 +1926,7 @@ fn handle_event(
                             Some(model),
                             Some(provider),
                             crate::store::TokenUsage::default(),
+                            None,
                         );
                     }
                     ctx.native_message_models.insert(
@@ -1939,6 +1950,7 @@ fn handle_event(
                     ctx.report_usage(ContextUsage {
                         used_tokens: used,
                         context_window: None,
+                        ..Default::default()
                     });
                 }
             }
@@ -1966,6 +1978,7 @@ fn handle_event(
                         identity.map(|i| i.model.as_str()),
                         identity.and_then(|i| i.provider.as_deref()),
                         opencode_native_usage(tokens),
+                        opencode_cost(part),
                     );
                 }
             }
@@ -2843,6 +2856,17 @@ opencode/unknown
         assert_eq!(usage.output_tokens, Some(20));
         assert_eq!(usage.reasoning_tokens, Some(5));
         assert_eq!(usage.total(), Some(120));
+    }
+
+    #[test]
+    fn step_and_message_costs_are_dollars_and_absence_is_unreported() {
+        let step = json!({"type": "step-finish", "cost": 0.0123, "tokens": {"input": 1}});
+        let cost = opencode_cost(&step).unwrap();
+        assert_eq!((cost.micros, cost.currency.as_str()), (12_300, "USD"));
+        // A free model reports zero, which is a price; no field is no price.
+        assert_eq!(opencode_cost(&json!({"cost": 0})).unwrap().micros, 0);
+        assert!(opencode_cost(&json!({"tokens": {}})).is_none());
+        assert!(opencode_cost(&json!({"cost": -1})).is_none());
     }
 
     #[test]
