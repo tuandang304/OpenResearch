@@ -57,7 +57,10 @@ Work that `orx` owns goes through `orx`, never around it:
   any general web search.
 
 When an `orx` command fails, read its error and fix the cause or tell the
-user; do not switch to an outside tool that does the same job.
+user; do not switch to an outside tool that does the same job. If `orx exp
+run` or the run it starts fails because of orx itself, tell the user and stop:
+never write a launcher script or drive a provider CLI to run the job anyway,
+since that run never appears in Experiments or Results.
 
 `orx` is internal and should stay under the hood; do not mention it in user-facing responses.
 

@@ -270,6 +270,8 @@ pub async fn run_antigravity() -> Result<()> {
         && chat_asks_before_tools()
     {
         json!({"decision": "deny", "reason": "[orx] This chat asks before running tools, and your subagents cannot ask. Use orx's `delegate` tool to hand the task to another chat, or do it yourself."})
+    } else if let Some(reason) = launch_bypass(&payload) {
+        json!({"decision": "deny", "reason": reason})
     } else {
         let mut decision = json!({"decision": "allow"});
         if let Some(overwrite) = invocation_overwrite(&input) {
@@ -279,6 +281,26 @@ pub async fn run_antigravity() -> Result<()> {
     };
     println!("{output}");
     Ok(())
+}
+
+/// agy's shell call that launches compute around orx, as Claude Code's `orx invocation-gate` denies it.
+fn launch_bypass(payload: &Value) -> Option<String> {
+    if payload.pointer("/toolCall/name")? != "run_command" {
+        return None;
+    }
+    let command = payload.pointer("/toolCall/args/CommandLine")?.as_str()?;
+    let cwd = payload
+        .pointer("/toolCall/args/Cwd")
+        .and_then(Value::as_str)
+        .map(std::path::Path::new);
+    let run_commands = match crate::store::Store::open() {
+        Ok(store) => crate::commands::invocation_gate::run_commands(&store),
+        Err(error) => {
+            eprintln!("orx antigravity-gate: cannot open the store for run commands: {error}");
+            Vec::new()
+        }
+    };
+    crate::local::harness::launch_gate::bypass_reason(command, &run_commands, cwd)
 }
 
 fn chat_asks_before_tools() -> bool {
@@ -694,6 +716,17 @@ mod antigravity_tests {
             .to_string();
         assert!(command.contains("gemini-3.8-flash-high") && command.ends_with("; orx exp run e"));
         assert_eq!(invocation_overwrite(&payload("view_file")), None);
+    }
+
+    #[test]
+    fn agy_shell_launches_around_orx_are_denied() {
+        let call = |command: &str| json!({"modelName": "gemini-3.8-flash-high", "toolCall": {"name": "run_command", "args": {"CommandLine": command, "Cwd": "/w"}}});
+        let reason = launch_bypass(&call("nohup kaggle kernels push -p kernel/ &")).unwrap();
+        assert!(reason.contains("orx exp run"));
+        assert_eq!(launch_bypass(&call("orx exp run e")), None);
+        let read =
+            json!({"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/w/sbatch"}}});
+        assert_eq!(launch_bypass(&read), None);
     }
 
     #[test]

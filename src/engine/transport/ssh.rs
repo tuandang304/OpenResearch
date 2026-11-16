@@ -460,10 +460,12 @@ pub(crate) fn local_binary(root: &Path) -> Result<PathBuf> {
     #[cfg(not(test))]
     let directory: Option<PathBuf> = None;
     let mut native = None;
-    if cfg!(debug_assertions)
-        && directory.is_none()
-        && std::env::var_os("ORX_HOST_BIN_DIR").is_none()
-    {
+    // A build without an embedded host for this machine (any `cargo build`) runs the
+    // `orx-host` cargo builds beside it.
+    let embedded = EMBEDDED_HOSTS.iter().any(|(host_os, host_arch, _, _)| {
+        host_os.eq_ignore_ascii_case(os) && *host_arch == std::env::consts::ARCH
+    });
+    if !embedded && directory.is_none() && std::env::var_os("ORX_HOST_BIN_DIR").is_none() {
         let executable = std::env::current_exe()?;
         if let Some(parent) = executable.parent() {
             let candidate = parent.join("orx-host");
@@ -520,7 +522,7 @@ pub(super) fn binary(directory: Option<&Path>, os: &str, arch: &str) -> Result<B
         let (_, _, sha, bytes) = EMBEDDED_HOSTS
             .iter()
             .find(|(host_os, host_arch, _, _)| *host_os == os && *host_arch == arch)
-            .ok_or_else(|| anyhow!(Unsupported(format!("No orx-host for {os}-{arch}. Release builds embed hosts; for development, run node scripts/build-host.mjs and set ORX_HOST_BIN_DIR to its output directory"))))?;
+            .ok_or_else(|| anyhow!(Unsupported(format!("This orx build has no orx-host for {os}-{arch}, so it cannot start runs. Build one beside orx with `cargo build --release -p orx-host` (`cargo build -p orx-host` for a debug build) and start orx again, or set ORX_HOST_BIN_DIR to the output of `node scripts/build-host.mjs`. Agents: tell the user; do not launch the job another way."))))?;
         return Ok(Binary {
             sha: (*sha).into(),
             bytes: bytes.to_vec(),

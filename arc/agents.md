@@ -200,7 +200,7 @@ The bridge endpoint grants permissions, so it takes a per-child token that each 
 
 Where an agent offers a hook or plugin, it stamps each shell command with the issuing model, so a run records which model launched it (`src/commands/invocation_gate.rs`).
 
-Experiments run only through `orx exp run`, so the playbook says so every turn, and Claude Code's shell hook denies a command that clearly launches compute around orx (a scheduler or provider job submission, or the project's own run command typed directly) with the `orx` command to use instead (`src/local/harness/launch_gate.rs`). Agents without a hook get only the playbook.
+Experiments run only through `orx exp run`, so the playbook says so every turn, and the shell hooks of Claude Code and Antigravity deny a command that clearly launches compute around orx (a scheduler or provider job submission, the project's own run command typed directly, or a local script that submits such a job) with the `orx` command to use instead (`src/local/harness/launch_gate.rs`). Agents without a hook get only the playbook.
 
 ## Turns survive restarts
 
