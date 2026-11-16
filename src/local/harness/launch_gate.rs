@@ -7,10 +7,13 @@
 //! invocation-gate`) asks [`bypass_reason`] about each Bash call and denies the
 //! ones that clearly bypass orx, with a reason naming the `orx` command to use.
 //!
-//! Only clear launches are denied: a scheduler or provider job submission, or
-//! the project's own run command typed as a shell command. Everything else,
+//! Only clear launches are denied: a scheduler or provider job submission, the
+//! project's own run command typed as a shell command, or a local script that
+//! submits such a job (an agent's home-made launcher). Everything else,
 //! including `orx compute configure slurm --sbatch-arg=…` and ordinary scripts,
 //! passes untouched.
+
+use std::path::{Path, PathBuf};
 
 /// Programs whose only job is to submit work to a cluster scheduler.
 const SCHEDULERS: &[&str] = &["sbatch", "srun", "salloc", "qsub", "bsub"];
@@ -37,10 +40,13 @@ const WRAPPERS: &[&str] = &[
 /// A run command that is only one of these says nothing about the experiment.
 const BARE_PROGRAMS: &[&str] = &["python", "python3", "bash", "sh", "uv", "node", "make"];
 
+/// Scripts larger than this are not read; a launcher is a few kilobytes.
+const SCRIPT_LIMIT: u64 = 256 * 1024;
+
 /// Why `command` must go through `orx exp run` instead, or `None` when it may run.
 /// `run_commands` are the project's fixed run commands (project default and per
-/// experiment).
-pub fn bypass_reason(command: &str, run_commands: &[String]) -> Option<String> {
+/// experiment); `cwd` resolves a relative script path.
+pub fn bypass_reason(command: &str, run_commands: &[String], cwd: Option<&Path>) -> Option<String> {
     let run_prefixes: Vec<Vec<String>> = run_commands
         .iter()
         .filter_map(|run| launch_tokens(run))
@@ -89,8 +95,92 @@ pub fn bypass_reason(command: &str, run_commands: &[String]) -> Option<String> {
                     .into(),
             );
         }
+        if let Some((script, launch)) = script_path(&tokens, cwd)
+            .and_then(|script| script_launch(&script).map(|launch| (script, launch)))
+        {
+            return Some(format!(
+                "Blocked: `{}` submits compute outside orx (`{launch}`), so the run has no \
+                 recorded commit, never appears in Experiments or Results, and its result never \
+                 reaches this chat. Launch it with `orx exp run <experimentId>` on the configured \
+                 backend (`orx compute status`). If `orx exp run` itself fails, tell the user \
+                 what failed instead of building a launcher. Load the orx-compute skill first.",
+                script.display()
+            ));
+        }
     }
     None
+}
+
+/// The local script file a simple command runs: the first operand of a shell
+/// (`bash x.sh`, `source x.sh`) or the program itself when it is a path.
+fn script_path(tokens: &[&str], cwd: Option<&Path>) -> Option<PathBuf> {
+    let first = *tokens.first()?;
+    let name = first.rsplit('/').next().unwrap_or(first);
+    let candidate = if matches!(name, "bash" | "sh" | "zsh" | "dash" | "source" | ".") {
+        let operand = tokens[1..].iter().find(|t| !t.starts_with('-'))?;
+        if tokens[1..]
+            .iter()
+            .take_while(|t| t.starts_with('-'))
+            .any(|t| t.contains('c'))
+        {
+            return None;
+        }
+        operand
+    } else if first.contains('/') {
+        first
+    } else {
+        return None;
+    };
+    let candidate = candidate.trim_matches(['\'', '"']);
+    if candidate.contains('$') {
+        return None;
+    }
+    let path = match candidate.strip_prefix("~/") {
+        Some(rest) => crate::config::home_dir()?.join(rest),
+        None => PathBuf::from(candidate),
+    };
+    let path = if path.is_relative() {
+        cwd?.join(path)
+    } else {
+        path
+    };
+    let metadata = std::fs::metadata(&path).ok()?;
+    (metadata.is_file() && metadata.len() <= SCRIPT_LIMIT).then_some(path)
+}
+
+/// The scheduler or provider launch a script makes, judged by its words rather
+/// than its lines, since launchers wrap the CLI in variables and functions.
+fn script_launch(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let words: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .flat_map(|line| {
+            line.split(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '"' | '\'' | '=' | '(' | ')' | ';' | '|' | '&' | '`' | '{' | '}'
+                    )
+            })
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let program = |word: &str| word.rsplit('/').next().unwrap_or(word).to_string();
+    if let Some(scheduler) = words
+        .iter()
+        .map(|word| program(word))
+        .find(|word| SCHEDULERS.contains(&word.as_str()))
+    {
+        return Some(scheduler);
+    }
+    PROVIDER_LAUNCHES
+        .iter()
+        .find(|launch| {
+            words.iter().any(|word| program(word) == launch[0])
+                && contains_tokens(&words, &launch[1..])
+        })
+        .map(|launch| launch.join(" "))
 }
 
 /// The tokens that identify a run command: its last shell segment (the part
@@ -117,12 +207,18 @@ fn merge_redirects(command: &str) -> String {
 }
 
 /// The simple commands of a shell line: split on `;`, `&&`, `||`, `|`, `&` and
-/// newlines. Not quote-aware; a separator inside quotes only splits a segment
+/// newlines, without subshell parentheses. Not quote-aware; a separator inside quotes only splits a segment
 /// that then matches nothing.
 fn segments(command: &str) -> impl Iterator<Item = &str> {
     command
         .split(['\n', ';', '|', '&'])
-        .map(str::trim)
+        // A subshell's parentheses or a group's braces wrap the command, not name it.
+        .map(|segment| {
+            segment
+                .trim()
+                .trim_start_matches(['(', '{', ' '])
+                .trim_end_matches([')', '}', ' '])
+        })
         .filter(|segment| !segment.is_empty())
 }
 
@@ -185,6 +281,12 @@ fn contains_tokens(haystack: &[&str], needle: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    fn scratch() -> PathBuf {
+        let dir = crate::config::test_root().join(format!("launch-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn run(cmd: &str) -> Vec<String> {
         vec![cmd.to_string()]
     }
@@ -201,7 +303,7 @@ mod tests {
             "ray job submit -- python train.py",
             "hf jobs run pytorch/pytorch python train.py",
         ] {
-            let reason = bypass_reason(command, &[]).unwrap_or_else(|| panic!("{command}"));
+            let reason = bypass_reason(command, &[], None).unwrap_or_else(|| panic!("{command}"));
             assert!(reason.contains("orx exp run"), "{command}: {reason}");
         }
     }
@@ -216,14 +318,14 @@ mod tests {
             "timeout 60 uv run --locked python train.py --config configs/base.yaml",
             "ssh gpu-box 'cd repo && uv run --locked python train.py --config configs/base.yaml'",
         ] {
-            assert!(bypass_reason(command, &runs).is_some(), "{command}");
+            assert!(bypass_reason(command, &runs, None).is_some(), "{command}");
         }
     }
 
     #[test]
     fn run_command_setup_and_redirects_do_not_hide_it() {
         let runs = run("cd src && python train.py > out.log 2>&1");
-        assert!(bypass_reason("python train.py --epochs 1", &runs).is_some());
+        assert!(bypass_reason("python train.py --epochs 1", &runs, None).is_some());
     }
 
     #[test]
@@ -242,16 +344,70 @@ mod tests {
             "modal token new",
             "cat train.py",
         ] {
-            assert_eq!(bypass_reason(command, &runs), None, "{command}");
+            assert_eq!(bypass_reason(command, &runs, None), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_home_made_launcher_script_is_denied() {
+        let dir = scratch();
+        std::fs::create_dir(dir.join("infra")).unwrap();
+        let launcher = dir.join("infra/kaggle_run.sh");
+        std::fs::write(
+            &launcher,
+            "#!/usr/bin/env bash\n# runs bash run.sh as a Kaggle kernel\n\
+             K=$HOME/.local/share/uv/tools/kaggle/bin/kaggle\n\
+             kg() { HOME=$H $K \"$@\" 2>&1; }\n\
+             retry 6 \"successfully pushed\" kernels push -p \"$W/k\"\n",
+        )
+        .unwrap();
+        let slurm = dir.join("submit.sh");
+        std::fs::write(
+            &slurm,
+            "set -e\nJOB=$(/usr/bin/sbatch --parsable job.sbatch)\n",
+        )
+        .unwrap();
+        let absolute = launcher.display().to_string();
+        for command in [
+            format!("{absolute} acct r1 0ea1d6c"),
+            format!(
+                "(EXTRA_ENV=\"A=1\" setsid nohup bash {absolute} acct r5 9eb2ebc > out 2>&1 &)"
+            ),
+            "bash infra/kaggle_run.sh acct r1 abc".to_string(),
+            "./infra/kaggle_run.sh acct r1 abc".to_string(),
+            "sh submit.sh".to_string(),
+        ] {
+            let reason =
+                bypass_reason(&command, &[], Some(&dir)).unwrap_or_else(|| panic!("{command}"));
+            assert!(reason.contains("orx exp run"), "{command}: {reason}");
+        }
+    }
+
+    #[test]
+    fn ordinary_scripts_pass() {
+        let dir = scratch();
+        std::fs::write(
+            dir.join("plot.sh"),
+            "# not sbatch, not kaggle kernels push\npython plot.py\nkaggle kernels status me/k\n\
+             orx compute configure slurm --sbatch-arg=--gres=gpu:1\n",
+        )
+        .unwrap();
+        for command in [
+            "bash plot.sh",
+            "./plot.sh",
+            "bash missing.sh",
+            "bash $R/launcher.sh",
+        ] {
+            assert_eq!(bypass_reason(command, &[], Some(&dir)), None, "{command}");
         }
     }
 
     #[test]
     fn a_bare_interpreter_run_command_matches_nothing() {
         assert_eq!(
-            bypass_reason("python scripts/plot.py", &run("python")),
+            bypass_reason("python scripts/plot.py", &run("python"), None),
             None
         );
-        assert_eq!(bypass_reason("make test", &run("make")), None);
+        assert_eq!(bypass_reason("make test", &run("make"), None), None);
     }
 }

@@ -74,7 +74,7 @@ How an update applies depends on the install (`src/updates.rs`, `src/updates/`, 
 
 ## The build channel
 
-A build is **production** only when it is an official release or canary built in the project's own GitHub Actions; every other build is **development**. `build.rs` enforces this and requires production builds to embed `orx-host`. Only production builds send telemetry and install released binaries on remote machines. A locally built desktop app never replaces itself with a release.
+A build is **production** only when it is an official release or canary built in the project's own GitHub Actions; every other build is **development**. `build.rs` enforces this and requires production builds to embed `orx-host`; a development build runs local runs with the `orx-host` cargo built beside it. Only production builds send telemetry and install released binaries on remote machines. A locally built desktop app never replaces itself with a release.
 
 ## How a version ships
 

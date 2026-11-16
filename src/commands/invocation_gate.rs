@@ -40,7 +40,7 @@ fn deny(reason: &str) -> Value {
 
 /// The fixed run commands of the chat's project. Best effort: without them the
 /// gate still catches scheduler and provider launches.
-fn run_commands(store: &Store) -> Vec<String> {
+pub(crate) fn run_commands(store: &Store) -> Vec<String> {
     let lookup = || -> Result<Vec<String>> {
         let Some(session) = crate::local::chat::launching_chat_session() else {
             return Ok(Vec::new());
@@ -75,11 +75,15 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
     let store = Store::open()?;
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(std::path::Path::new);
     if let Some(reason) = payload
         .pointer("/tool_input/command")
         .and_then(Value::as_str)
         .and_then(|command| {
-            crate::local::harness::launch_gate::bypass_reason(command, &run_commands(&store))
+            crate::local::harness::launch_gate::bypass_reason(command, &run_commands(&store), cwd)
         })
     {
         println!("{}", deny(&reason));
