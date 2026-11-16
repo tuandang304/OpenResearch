@@ -328,6 +328,8 @@
   "settings_page_agent_models": "Ajan modelleri",
   "settings_nested_subagents": "İç içe alt ajanlara izin ver",
   "settings_nested_subagents_description": "Alt ajanların kendi alt ajanlarını başlatmasına izin verin. Ajanlar bunu her görev için yine de değiştirebilir.",
+  "settings_subagent_full_access": "Alt ajanlara tam erişim ver",
+  "settings_subagent_full_access_description": "Alt ajanlar onay istemeden çalışır, böylece siz yokken devredilen iş durmaz. Kapalı: bir alt ajan, onu başlatan sohbetten fazlasını yapamaz.",
   "settings_models": "Modeller",
   "settings_models_description": "Kapattığınız modeller model seçiciden çıkar ve ajanlar onlara görev devredemez. Bölümlerin sırasını değiştirmek için laboratuvarları sürükleyin.",
   "settings_models_off": "{count} kapalı",

@@ -328,6 +328,8 @@
   "settings_page_agent_models": "Agent models",
   "settings_nested_subagents": "Allow nested sub-agents",
   "settings_nested_subagents_description": "Let sub-agents start sub-agents of their own. Agents can still change this for each task.",
+  "settings_subagent_full_access": "Give sub-agents full access",
+  "settings_subagent_full_access_description": "Sub-agents run without asking for approval, so delegated work doesn't stop while you're away. Off: a sub-agent may do no more than the chat that started it.",
   "settings_models": "Models",
   "settings_models_description": "Models you turn off leave the model picker, and agents can't delegate to them. Drag labs to reorder its sections.",
   "settings_models_off": "{count} off",

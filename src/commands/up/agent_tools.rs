@@ -461,7 +461,11 @@ async fn delegate(state: &AppState, caller: &StoredChatSession, args: &Value) ->
         .project_lifecycle
         .admit(&caller.project_id)
         .ok_or_else(|| anyhow!("This project is being deleted."))?;
-    let permission = delegation::delegate_permission(caller, &route.harness)?;
+    let permission = delegation::delegate_permission(
+        caller,
+        &route.harness,
+        store.ui_state()?.delegate_full_access,
+    )?;
     let title = optional_text(args, "title").map(str::to_string);
     let child = delegation::delegate_session(
         id,

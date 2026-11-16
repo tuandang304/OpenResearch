@@ -391,7 +391,7 @@ function AgentsTab({ remote }: { remote: boolean }) {
       <h2>{m.settings_page_harnesses()}</h2>
       <AgentList remote={remote} />
       <ForkHarnessCards />
-      <NestedDelegationRow />
+      <SubagentRows />
       <ModelSettings heading={<h3 className={cn(SECTION_CLASS_NAME, "mt-8")}>{m.settings_models()}</h3>} />
     </>
   );
@@ -1108,23 +1108,37 @@ function FreeModelsRow({ expandable = true, models, locked, install, onChange }:
   );
 }
 
-function NestedDelegationRow() {
+function SubagentRows() {
   const workspace = useWorkspace();
   const { data: uiState } = useQuery(workspace.queries.getUiStateQuery());
   if (!uiState) return null;
   return (
-    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
-      <div>
-        <div className="project-default-title text-base font-medium">{m.settings_nested_subagents()}</div>
-        <p>{m.settings_nested_subagents_description()}</p>
+    <>
+      <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+        <div>
+          <div className="project-default-title text-base font-medium">{m.settings_subagent_full_access()}</div>
+          <p>{m.settings_subagent_full_access_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={uiState.delegateFullAccess}
+          aria-label={m.settings_subagent_full_access()}
+          onClick={() => mutUpdateUiState.run(workspace, { delegateFullAccess: !uiState.delegateFullAccess })}
+        />
       </div>
-      <Switch
-        type="button"
-        checked={uiState.nestedDelegation}
-        aria-label={m.settings_nested_subagents()}
-        onClick={() => mutUpdateUiState.run(workspace, { nestedDelegation: !uiState.nestedDelegation })}
-      />
-    </div>
+      <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+        <div>
+          <div className="project-default-title text-base font-medium">{m.settings_nested_subagents()}</div>
+          <p>{m.settings_nested_subagents_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={uiState.nestedDelegation}
+          aria-label={m.settings_nested_subagents()}
+          onClick={() => mutUpdateUiState.run(workspace, { nestedDelegation: !uiState.nestedDelegation })}
+        />
+      </div>
+    </>
   );
 }
 

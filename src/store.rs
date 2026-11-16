@@ -1432,6 +1432,7 @@ impl Store {
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_micros INTEGER",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_currency TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN recorded_at INTEGER",
+            "ALTER TABLE ui_state ADD COLUMN delegate_full_access INTEGER NOT NULL DEFAULT 1",
         ] {
             let _ = schema.execute(ddl, []);
         }
@@ -1696,7 +1697,7 @@ impl Store {
                     preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
                     collapsed_model_sections, model_sightings, hidden_agents,
-                    harness_failover_json
+                    harness_failover_json, delegate_full_access
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -1735,6 +1736,7 @@ impl Store {
                         row.get::<_, Option<String>>(18)?.as_deref(),
                     ),
                     nested_delegation: row.get(9)?,
+                    delegate_full_access: row.get(19)?,
                     opencode_free_models: row.get(10)?,
                     favorite_models: list(12)?,
                     hidden_models: list(13)?,
@@ -1791,6 +1793,14 @@ impl Store {
         self.conn.execute(
             "UPDATE ui_state SET tour_completed = ?1 WHERE id = 1",
             params![completed],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_delegate_full_access(&self, allowed: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET delegate_full_access = ?1 WHERE id = 1",
+            params![allowed],
         )?;
         Ok(())
     }
@@ -5357,6 +5367,9 @@ pub struct StoredUiState {
     /// Whether delegates may delegate in turn unless a `delegate` call says
     /// otherwise. Off: only chats the user started delegate.
     pub nested_delegation: bool,
+    /// Whether delegates start in their harness's broadest permission mode
+    /// rather than one no broader than their delegator's.
+    pub delegate_full_access: bool,
     /// Whether OpenCode's free models are offered beside the user's own.
     pub opencode_free_models: bool,
     /// The model families the picker lists first, by the key the picker gives each.
@@ -9707,6 +9720,7 @@ mod tests {
                 preferred_autonomy: None,
                 harness_failover: Default::default(),
                 nested_delegation: false,
+                delegate_full_access: true,
                 opencode_free_models: true,
                 favorite_models: Vec::new(),
                 hidden_models: Vec::new(),
@@ -9765,6 +9779,7 @@ mod tests {
                 preferred_autonomy: Some(Autonomy::Copilot),
                 harness_failover: failover,
                 nested_delegation: false,
+                delegate_full_access: true,
                 opencode_free_models: true,
                 favorite_models: vec!["claude opus".into(), "gpt sol".into()],
                 hidden_models: vec!["gpt-6".into(), "deepseek-r1:free".into()],

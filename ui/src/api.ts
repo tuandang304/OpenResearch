@@ -189,6 +189,8 @@ export interface UiState {
   preferredAutonomy: Autonomy | null;
   /** Whether sub-agents may start their own unless a delegation says otherwise. */
   nestedDelegation: boolean;
+  /** Whether sub-agents start in their agent's broadest permission mode instead of one no broader than their delegator's. */
+  delegateFullAccess: boolean;
   harnessFailover: HarnessFailover;
   /** Whether OpenCode's free models are offered beside the user's own. */
   opencodeFreeModels: boolean;
@@ -2280,6 +2282,7 @@ export function createApi(
     preferredAgent?: AgentSelection;
     preferredAutonomy?: Autonomy;
     nestedDelegation?: boolean;
+    delegateFullAccess?: boolean;
     harnessFailover?: HarnessFailover;
     opencodeFreeModels?: boolean;
     favoriteModels?: string[];
