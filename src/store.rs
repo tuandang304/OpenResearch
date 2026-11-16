@@ -9,10 +9,10 @@
 //! `~/.local/share/openresearch`.
 
 mod acp;
+mod costs;
 pub(crate) mod harness_accounts;
 pub(crate) mod results;
 pub(crate) mod run_metrics;
-mod costs;
 pub(crate) mod search;
 mod telemetry;
 pub(crate) use costs::{BilledRun, Per, Quote};
