@@ -335,7 +335,9 @@ async function composer(props, usage = report({ plans: [claudeMax] })) {
 test("the composer's ring is context; its menu shows context, the reserve before compacting and Compact", async () => {
   const { trigger, compacted, requests } = await composer({ usage: { usedTokens: 112_000, contextWindow: 200_000, compactAt: 167_000 } }, report({ plans: [claudeMax], chat: { agent: [{ micros: 6_840_000, currency: "USD" }], compute: null } }));
   assert.ok(trigger().querySelector("svg circle"));
-  assert.equal(trigger().textContent, "", "a plan with room and a subscription's spend stay in the menu");
+  assert.equal(trigger().textContent, "40% left", "the chat's plan shows its tightest window; a subscription's spend stays in the menu");
+  assert.doesNotMatch(trigger().querySelector("span").className, /text-accent/, "a plan with room isn't tinted");
+  assert.match(trigger().getAttribute("aria-label"), /Claude Ultra: 40% left · Fable weekly/);
 
   await click(trigger());
   assert.deepEqual(requests.filter((request) => request.includes("/api/usage")), ["GET /api/usage?chat=chat-1", "GET /api/usage?chat=chat-1"], "opening refetches, never forcing a re-read");

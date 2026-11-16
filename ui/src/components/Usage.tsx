@@ -17,7 +17,7 @@ import { harnessMark } from "./pickerAgents";
 import { Button, showAlert, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
-/** A window at or under this much left is low: amber, and its "left" rides on the composer's trigger. */
+/** A window at or under this much left is low: amber, on the composer's trigger and in the menus. */
 export const LOW_PERCENT = 20;
 const CRITICAL_PERCENT = 5;
 

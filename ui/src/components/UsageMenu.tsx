@@ -10,7 +10,7 @@ import { useWorkspace } from "../workspace";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { Button } from "./ui";
 import { cn } from "./ui/cn";
-import { fmtEstimate, fmtMoney, fmtPercent, leftTone, lowestWindow, LOW_PERCENT, PLAN_GRID, PlanRows, Ring, UsageGauge, usePlanAgent, useUpdateAgent } from "./Usage";
+import { fmtEstimate, fmtMoney, fmtPercent, leftTone, lowestWindow, LOW_PERCENT, PLAN_GRID, PlanRows, planSummary, Ring, UsageGauge, usePlanAgent, useUpdateAgent } from "./Usage";
 
 /** Amber at 80% of the context window, red at 95%. */
 function contextTone(percent: number) {
@@ -22,7 +22,7 @@ function contextTone(percent: number) {
 const RUNNING_REFETCH_MS = 10_000;
 
 /**
- * The composer's usage: a ring for the chat's context, then at most one text (its plan running low, or what a
+ * The composer's usage: a ring for the chat's context, then at most one text (what its plan has left, or what a
  * pay-per-token chat has cost); its menu holds the context, the plan of the chat's account and what this chat cost.
  */
 export function UsageMenu({ usage, busy, harness, profile, sessionId, remote, onCompact }: {
@@ -65,9 +65,10 @@ export function UsageMenu({ usage, busy, harness, profile, sessionId, remote, on
   if (used <= 0 && !plan && !cost && !compute) return null;
 
   const low = plan && lowestWindow(plan);
-  const after = low && low.remainingPercent <= LOW_PERCENT
-    ? { text: m.usage_percent_left({ percent: fmtPercent(low.remainingPercent) }), tone: leftTone(low.remainingPercent).text }
-    : cost ? { text: cost, tone: "" } : null;
+  // The chat's plan always shows what its tightest window has left, tinted only once it runs low.
+  const after = low
+    ? { text: m.usage_percent_left({ percent: fmtPercent(low.remainingPercent) }), tone: low.remainingPercent <= LOW_PERCENT ? leftTone(low.remainingPercent).text : "", label: planSummary(plan, planAgent(plan)) }
+    : cost ? { text: cost, tone: "", label: cost } : null;
   const compactAt = contextWindow && usage?.compactAt && usage.compactAt < contextWindow ? usage.compactAt : null;
   const plural = (count: number) => new Intl.PluralRules(getLocale()).select(count) === "one";
   const runs = compute && (plural(compute.runs) ? m.usage_chat_compute_one : m.usage_chat_compute_other)({ count: compute.runs });
@@ -127,7 +128,7 @@ export function UsageMenu({ usage, busy, harness, profile, sessionId, remote, on
       <Popover.Trigger
         type="button"
         data-usage-trigger
-        aria-label={after ? `${m.usage_menu()} · ${after.text}` : m.usage_menu()}
+        aria-label={after ? `${m.usage_menu()} · ${after.label}` : m.usage_menu()}
         className="composer-bare inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-sm tabular-nums text-subtext transition-[background,color] duration-150 ease-standard hover:bg-hover-muted hover:text-text data-popup-open:bg-hover-muted data-popup-open:text-text"
       >
         {contextPercent !== null
