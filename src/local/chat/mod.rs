@@ -1148,7 +1148,7 @@ fn save_images(images: &[ImageAttachment]) -> Result<Vec<SavedAttachment>> {
 /// How much of the model's context window a session has consumed, measured off
 /// the most recent API request the harness reported. Latest report wins (not
 /// cumulative), so auto-compaction naturally drops the number.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {
     /// Tokens occupying the context window after the most recent API request
@@ -1157,6 +1157,10 @@ pub struct ContextUsage {
     /// Total context window of the model, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// Tokens at which the agent compacts on its own; absent when it doesn't
+    /// say or has auto-compaction off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3716,35 +3720,24 @@ impl TurnGuard {
             return;
         }
         self.armed = false;
-        let (removed, drain_queued) = {
+        let claude = self.host.claude.live(&self.session_id).await;
+        let next = {
             let mut turns = self.host.turns.lock().await;
-            if matches!(
+            if !matches!(
                 turns.get(&self.session_id),
                 Some(TurnState::Reserved { .. } | TurnState::Switching)
             ) {
-                let drain_queued = self.host.drains_queue(&self.session_id);
-                if drain_queued {
-                    turns.insert(self.session_id.clone(), TurnState::Draining);
-                } else {
-                    self.host.release_durable_turn(&self.session_id);
-                    turns.remove(&self.session_id);
-                }
-                (true, drain_queued)
-            } else {
-                (false, false)
+                return;
             }
+            let drains = self.host.drains_queue(&self.session_id);
+            self.host
+                .pass_slot(&mut turns, &self.session_id, drains, claude.as_deref())
         };
-        if removed {
-            self.host.emit(
-                "chat.busy",
-                json!({ "sessionId": &self.session_id, "busy": drain_queued }),
-            );
-            if drain_queued {
-                self.host.drain_queue(&self.session_id).await;
-            } else {
-                self.host.record_held_continuation(&self.session_id);
-            }
-        }
+        self.host.emit(
+            "chat.busy",
+            json!({ "sessionId": &self.session_id, "busy": next != SlotHolder::None }),
+        );
+        self.host.start_slot_holder(&self.session_id, next).await;
     }
 }
 
@@ -3755,38 +3748,18 @@ impl Drop for TurnGuard {
         }
         let host = self.host.clone();
         let session_id = self.session_id.clone();
-        tokio::spawn(async move {
-            let (removed, drain_queued) = {
-                let mut turns = host.turns.lock().await;
-                if matches!(
-                    turns.get(&session_id),
-                    Some(TurnState::Reserved { .. } | TurnState::Switching)
-                ) {
-                    let drain_queued = host.drains_queue(&session_id);
-                    if drain_queued {
-                        turns.insert(session_id.clone(), TurnState::Draining);
-                    } else {
-                        host.release_durable_turn(&session_id);
-                        turns.remove(&session_id);
-                    }
-                    (true, drain_queued)
-                } else {
-                    (false, false)
-                }
-            };
-            if removed {
-                host.emit(
-                    "chat.busy",
-                    json!({ "sessionId": &session_id, "busy": drain_queued }),
-                );
-                if drain_queued {
-                    host.drain_queue(&session_id).await;
-                } else {
-                    host.record_held_continuation(&session_id);
-                }
-            }
-        });
+        tokio::spawn(async move { TurnGuard::adopt(&host, &session_id).release().await });
     }
+}
+
+/// Who takes a turn slot as its turn gives it up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SlotHolder {
+    /// The next queued user message.
+    Queue,
+    /// What the chat's Claude child began on its own while the slot was taken.
+    HeldReply,
+    None,
 }
 
 /// RAII registration of a turn's steering sink. An aborted turn's guard can
@@ -4239,9 +4212,22 @@ impl ChatHost {
     }
 
     pub async fn interrupt_all(self: &Arc<Self>) {
-        for session_id in self.busy_sessions().await {
-            let _ = self.interrupt(&session_id).await;
-        }
+        let sessions = self.busy_sessions().await;
+        futures::future::join_all(sessions.iter().map(|session_id| self.interrupt(session_id)))
+            .await;
+    }
+
+    /// Stop every active turn for server shutdown without marking it cancelled,
+    /// so lease reconciliation on the next startup still offers Continue/Retry.
+    /// Stops run together so shutdown waits on the slowest agent, not the sum.
+    pub async fn stop_for_shutdown(self: &Arc<Self>) {
+        let sessions = self.busy_sessions().await;
+        let stops = sessions.iter().map(|session_id| async move {
+            if let Err(error) = self.stop_turn(session_id, StopMode::Shutdown).await {
+                eprintln!("orx up: failed to stop turn {session_id} for shutdown: {error}");
+            }
+        });
+        futures::future::join_all(stops).await;
     }
 
     pub async fn is_busy(&self, session_id: &str) -> bool {
@@ -7054,7 +7040,8 @@ impl ChatHost {
         } else {
             None
         };
-        let reserved_queue = {
+        let claude = self.claude.live(session_id).await;
+        let next = {
             let refreshed = self.refresh_persisted_queue(session_id).is_ok();
             let mut turns = self.turns.lock().await;
             let matches = match (turns.get(session_id), message_id) {
@@ -7067,28 +7054,21 @@ impl ChatHost {
             if !matches {
                 return;
             }
-            let reserved_queue = message_id.is_some() && refreshed && self.drains_queue(session_id);
-            if reserved_queue {
-                turns.insert(session_id.to_string(), TurnState::Draining);
-            } else {
-                self.release_durable_turn(session_id);
-                turns.remove(session_id);
-            }
-            reserved_queue
+            let drains = message_id.is_some() && refreshed && self.drains_queue(session_id);
+            self.pass_slot(&mut turns, session_id, drains, claude.as_deref())
         };
+        let busy = next != SlotHolder::None;
         if let Some(session) = session {
             self.emit(
                 "chat.session",
-                json!({ "session": session_json(&session, reserved_queue) }),
+                json!({ "session": session_json(&session, busy) }),
             );
         }
         self.emit(
             "chat.busy",
-            json!({ "sessionId": session_id, "busy": reserved_queue }),
+            json!({ "sessionId": session_id, "busy": busy }),
         );
-        if !reserved_queue {
-            self.record_held_continuation(session_id);
-        }
+        self.start_slot_holder(session_id, next).await;
     }
 
     async fn finish_interruption(self: &Arc<Self>, session_id: &str) {
@@ -7098,7 +7078,7 @@ impl ChatHost {
     /// Records what a resident Claude child wrote on its own after its turn
     /// ended, such as its reply once a background task finished, as a turn with
     /// no user message. While the chat is busy the lines wait: its next Claude
-    /// turn folds them in, or the freed slot records them here.
+    /// turn folds them in, or the slot passes to them as its turn ends.
     pub(crate) async fn record_continuation(self: &Arc<Self>, session_id: &str) {
         let Some(mut guard) = TurnGuard::claim(self, session_id, None).await else {
             return;
@@ -7107,7 +7087,11 @@ impl ChatHost {
             guard.release().await;
             return;
         }
+        self.record_claimed_continuation(session_id, guard).await;
+    }
 
+    /// Records the segment `claim_continuation` marked, in the slot `guard` holds.
+    async fn record_claimed_continuation(self: &Arc<Self>, session_id: &str, guard: TurnGuard) {
         let request = SendTurnRequest {
             messages: Vec::new(),
             prepared_input: Some(String::new()),
@@ -7130,15 +7114,63 @@ impl ChatHost {
         }
     }
 
-    /// Starts recording a segment the chat's Claude child began while its slot
-    /// was taken; call once the slot is free.
+    /// Gives up a turn slot under the turn map's lock: to the next queued
+    /// message when `drains`, else to a segment the chat's `claude` child began
+    /// on its own meanwhile, claiming it, else frees it. Claiming before the slot
+    /// reads as free leaves no later check to take it from whoever claims next.
+    fn pass_slot(
+        &self,
+        turns: &mut HashMap<String, TurnState>,
+        session_id: &str,
+        drains: bool,
+        claude: Option<&crate::local::claude::ClaudeClient>,
+    ) -> SlotHolder {
+        let admitting = !self.exiting.load(std::sync::atomic::Ordering::SeqCst)
+            && !self.deleting_sessions.lock().unwrap().contains(session_id);
+        let next = if drains {
+            SlotHolder::Queue
+        } else if admitting
+            && claude.is_some_and(crate::local::claude::ClaudeClient::claim_continuation)
+        {
+            SlotHolder::HeldReply
+        } else {
+            SlotHolder::None
+        };
+        match next {
+            SlotHolder::Queue => {
+                turns.insert(session_id.to_string(), TurnState::Draining);
+            }
+            SlotHolder::HeldReply => {
+                turns.insert(
+                    session_id.to_string(),
+                    TurnState::Reserved { turn_id: None },
+                );
+            }
+            SlotHolder::None => {
+                self.release_durable_turn(session_id);
+                turns.remove(session_id);
+            }
+        }
+        next
+    }
+
+    async fn start_slot_holder(self: &Arc<Self>, session_id: &str, next: SlotHolder) {
+        match next {
+            SlotHolder::Queue => self.drain_queue(session_id).await,
+            SlotHolder::HeldReply => self.record_held_continuation(session_id),
+            SlotHolder::None => {}
+        }
+    }
+
+    /// Records the segment [`Self::pass_slot`] passed the slot to. Not
+    /// async: the recording turn's own release leads back here, and the
+    /// compiler cannot prove such a cycle of futures `Send`.
     fn record_held_continuation(self: &Arc<Self>, session_id: &str) {
         let chat = self.clone();
         let session_id = session_id.to_string();
         tokio::spawn(async move {
-            if chat.claude.has_continuation(&session_id).await {
-                chat.record_continuation(&session_id).await;
-            }
+            let guard = TurnGuard::adopt(&chat, &session_id);
+            chat.record_claimed_continuation(&session_id, guard).await;
         });
     }
 
@@ -7147,12 +7179,11 @@ impl ChatHost {
     /// stops generating. Returns whether a turn (or a reservation) was
     /// actually aborted — `false` means the session was already idle.
     pub async fn interrupt(self: &Arc<Self>, session_id: &str) -> Result<bool> {
-        self.stop_turn(session_id, true).await
+        self.stop_turn(session_id, StopMode::Cancel).await
     }
 
-    /// `cancel` records the turn as stopped on purpose; without it the stored
-    /// turn is left for lease reconciliation, which offers a way to continue.
-    async fn stop_turn(self: &Arc<Self>, session_id: &str, cancel: bool) -> Result<bool> {
+    async fn stop_turn(self: &Arc<Self>, session_id: &str, mode: StopMode) -> Result<bool> {
+        let cancel = mode == StopMode::Cancel;
         let active = {
             let mut turns = self.turns.lock().await;
             let Some(state) = turns.get_mut(session_id) else {
@@ -7226,10 +7257,14 @@ impl ChatHost {
                 }
                 None
             };
-            let interrupted_items = tokio::time::timeout(Duration::from_secs(10), native_shutdown)
-                .await
-                .ok()
-                .flatten();
+            let interrupted_items = if mode == StopMode::Shutdown {
+                None
+            } else {
+                tokio::time::timeout(Duration::from_secs(10), native_shutdown)
+                    .await
+                    .ok()
+                    .flatten()
+            };
             if let Some(active) = active {
                 let _ = active.handle.await;
                 let _ = Store::open().and_then(|store| {
@@ -8813,7 +8848,12 @@ impl TurnCtx {
         &self,
         prefix: &str,
         native_scope: &str,
-        samples: &[(String, Option<String>, crate::store::TokenUsage)],
+        samples: &[(
+            String,
+            Option<String>,
+            crate::store::TokenUsage,
+            Option<crate::store::Cost>,
+        )],
     ) {
         if !self.durable {
             return;
@@ -8840,16 +8880,23 @@ impl TurnCtx {
         self.attempt_count
     }
 
+    /// Records a sample that may sum several requests, so the price list never applies a
+    /// context tier to it.
     pub(crate) fn record_native_usage(
         &self,
         sample_id: &str,
         model: Option<&str>,
         provider: Option<&str>,
         usage: crate::store::TokenUsage,
+        cost: Option<crate::store::Cost>,
     ) {
         if !self.durable {
             return;
         }
+        let cost = match &cost {
+            Some(cost) => crate::store::SampleCost::Reported(cost),
+            None => crate::store::SampleCost::Unreported { one_request: false },
+        };
         if let Err(error) = Store::open().and_then(|store| {
             store.record_usage_sample(
                 &self.usage_execution_id,
@@ -8858,6 +8905,7 @@ impl TurnCtx {
                 model,
                 provider,
                 &usage,
+                cost,
             )
         }) {
             eprintln!("orx up: could not persist native token usage: {error}");
@@ -9518,16 +9566,38 @@ impl TurnCtx {
 
     /// Record the latest context-window usage a harness reported and stream it
     /// live over `chat.usage`. Merging: a report that omits `context_window`
-    /// inherits the previously-known value (an `assistant` event carries the
-    /// token count but not the window; the `result` event fills the window).
+    /// or `compact_at` inherits the previously-known value (an `assistant`
+    /// event carries the token count but not the window; the `result` event
+    /// fills the window).
     pub fn report_usage(&mut self, mut usage: ContextUsage) {
         if let Some(prev) = &self.context_usage {
             if usage.context_window.is_none() {
                 usage.context_window = prev.context_window;
             }
-            if prev == &usage {
-                return;
+            if usage.compact_at.is_none() {
+                usage.compact_at = prev.compact_at;
             }
+        }
+        self.publish_usage(usage);
+    }
+
+    /// Record where the agent compacts on its own, or that it no longer does,
+    /// which a merging `report_usage` can't say.
+    pub fn report_compact_at(&mut self, compact_at: Option<u64>) {
+        let Some(usage) = &self.context_usage else {
+            return;
+        };
+        if usage.compact_at != compact_at {
+            self.publish_usage(ContextUsage {
+                compact_at,
+                ..usage.clone()
+            });
+        }
+    }
+
+    fn publish_usage(&mut self, usage: ContextUsage) {
+        if self.context_usage.as_ref() == Some(&usage) {
+            return;
         }
         if self.durable {
             let _ = Store::open().and_then(|store| {
@@ -10411,12 +10481,23 @@ pub async fn keep_turn_leases(
     }
 }
 
+/// How [`ChatHost::stop_turn`] leaves a turn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopMode {
+    /// Stopped on purpose: the stored turn is recorded as interrupted.
+    Cancel,
+    /// Cut short: the stored turn is left for lease reconciliation, which offers Continue.
+    LeaseLost,
+    /// Cut short like `LeaseLost`, without waiting on the agent: shutdown kills it next.
+    Shutdown,
+}
+
 /// A turn whose lease another claim reaped stops here and is recorded as cut
 /// short, with a way to continue.
 async fn stop_turns_whose_lease_was_lost(chat: &Arc<ChatHost>) {
     let lost = chat.renew_turn_leases();
     for session_id in &lost {
-        let _ = chat.stop_turn(session_id, false).await;
+        let _ = chat.stop_turn(session_id, StopMode::LeaseLost).await;
     }
     if lost.is_empty() {
         return;
@@ -11768,21 +11849,25 @@ mod bridge_tests {
         ctx.report_usage(ContextUsage {
             used_tokens: 42,
             context_window: Some(100),
+            ..Default::default()
         });
         assert_eq!(events.try_recv().unwrap().0, "chat.usage");
         ctx.report_usage(ContextUsage {
             used_tokens: 42,
             context_window: None,
+            ..Default::default()
         });
         assert!(events.try_recv().is_err());
         ctx.report_usage(ContextUsage {
             used_tokens: 43,
             context_window: None,
+            ..Default::default()
         });
         assert_eq!(events.try_recv().unwrap().1["usage"]["contextWindow"], 100);
         ctx.report_usage(ContextUsage {
             used_tokens: 43,
             context_window: Some(200),
+            ..Default::default()
         });
         assert_eq!(events.try_recv().unwrap().1["usage"]["contextWindow"], 200);
     }
@@ -13394,6 +13479,7 @@ mod bridge_tests {
         let usage = ContextUsage {
             used_tokens: 100,
             context_window: None,
+            ..Default::default()
         };
         // Only usedTokens survives; the None window is skipped.
         assert_eq!(
@@ -14531,7 +14617,6 @@ for line in sys.stdin:
     /// fork waits until it owes no reply, then stops it for the next turn.
     #[cfg(unix)]
     #[test]
-    #[ignore = "races a dropped TurnGuard's held-continuation check; re-enable with its fix"]
     fn switching_forks_stops_an_idle_claude_child_and_waits_for_a_busy_one() {
         use crate::local::claude::tests::{chat_echo_worker, emit, ready_host, serve_turn};
 
@@ -15049,6 +15134,142 @@ done
                 assert_eq!(stored.recovery_action.as_deref(), Some("continue"));
                 assert!(!host.is_busy(&session_id).await);
             }
+        });
+    }
+
+    #[test]
+    fn stop_for_shutdown_stops_active_and_retrying_turns_while_preserving_continue_recovery() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let store = Store::open().unwrap();
+            let host = Arc::new(ChatHost::new(
+                Arc::new(crate::local::opencode::AgentHost::new(None)),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let session_id = "retrying-chat";
+            session(&store, session_id);
+            assert!(host.claim_durable_turn(session_id));
+            let turn = crate::store::StoredChatTurn {
+                id: "turn-retrying".into(),
+                session_id: session_id.into(),
+                user_message_id: None,
+                assistant_message_id: "answer-retrying".into(),
+                client_turn_id: "client-retrying".into(),
+                request_hash: "task".into(),
+                prepared_input: "task".into(),
+                settings_json: "{}".into(),
+                state: "retrying".into(),
+                delivery_state: "accepted".into(),
+                attempt_count: 2,
+                next_retry_at: Some(now_ms() + 42_354_000),
+                error_kind: None,
+                error_message: None,
+                recovery_action: None,
+                recovered_by_turn_id: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            };
+            store.admit_chat_turn(None, &turn).unwrap();
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: turn.assistant_message_id.clone(),
+                    session_id: session_id.into(),
+                    role: "assistant".into(),
+                    parts_json: serde_json::to_string(&vec![
+                        WirePart::text("text-1", "Partial answer."),
+                        WirePart::tool("turn-retry", "retry", "running", None),
+                    ])
+                    .unwrap(),
+                    created_at: now_ms(),
+                    completed_at: None,
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: None,
+                })
+                .unwrap();
+            host.turns.lock().await.insert(
+                session_id.into(),
+                TurnState::Active(ActiveTurn {
+                    handle: tokio::spawn(std::future::pending()),
+                    message_id: turn.assistant_message_id.clone(),
+                    turn_id: turn.id.clone(),
+                }),
+            );
+
+            host.stop_admitting();
+            host.stop_for_shutdown().await;
+            host.release_turn_leases();
+
+            assert!(!host.is_busy(session_id).await);
+            assert!(!store.chat_turn_leased(session_id).unwrap());
+
+            reconcile_unfinished_turns(&store).unwrap();
+            let stored = store.get_chat_turn(session_id, &turn.id).unwrap().unwrap();
+            assert_eq!(stored.state, "failed");
+            assert_eq!(stored.recovery_action.as_deref(), Some("continue"));
+            let message = store
+                .get_chat_message(&turn.assistant_message_id)
+                .unwrap()
+                .unwrap();
+            let wire = stored_to_wire(&message);
+            assert!(!wire.parts.iter().any(|part| part.id == "turn-retry"));
+            assert!(wire.parts.iter().any(|part| part.id == "turn-recovery"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_stops_leave_the_agent_to_host_shutdown_but_lost_leases_interrupt_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let aborts = Arc::new(AtomicUsize::new(0));
+            let counted = aborts.clone();
+            let app = axum::Router::new().route(
+                "/session/native/abort",
+                axum::routing::post(move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    async { axum::Json(json!(true)) }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+            let fixture = crate::local::git::TemporaryDirectory::new("orx-shutdown-stop").unwrap();
+            let opencode = crate::local::opencode::AgentHost::new(None);
+            opencode.serve_for_test("chat", port, fixture.path()).await;
+            let host = Arc::new(ChatHost::new(
+                Arc::new(opencode),
+                Arc::new(crate::local::codex::CodexHost::new()),
+                Arc::new(crate::local::claude::ClaudeHost::new()),
+            ));
+            let store = Store::open().unwrap();
+            session_on(&store, "chat", "opencode");
+            store
+                .set_chat_session_native_id("chat", Some("native"))
+                .unwrap();
+
+            for (mode, expected) in [(StopMode::Shutdown, 0), (StopMode::LeaseLost, 1)] {
+                host.turns.lock().await.insert(
+                    "chat".into(),
+                    TurnState::Active(ActiveTurn {
+                        handle: tokio::spawn(std::future::pending()),
+                        message_id: "answer".into(),
+                        turn_id: "turn".into(),
+                    }),
+                );
+                assert!(host.stop_turn("chat", mode).await.unwrap());
+                assert_eq!(aborts.load(Ordering::SeqCst), expected);
+            }
+            server.abort();
         });
     }
 

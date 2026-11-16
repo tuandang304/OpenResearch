@@ -266,6 +266,7 @@ async fn merge_projection(
             latest_usage = Some(ContextUsage {
                 used_tokens: used,
                 context_window: None,
+                ..Default::default()
             });
         }
         latest_retry = message.get("retry").filter(|retry| !retry.is_null());
@@ -342,6 +343,7 @@ fn record_message_usage(ctx: &TurnCtx, message: &Value, recorded: &mut HashSet<S
             .filter(|_| completed)
             .map(opencode_native_usage)
             .unwrap_or_default(),
+        opencode_cost(message).filter(|_| completed),
     );
 }
 
@@ -822,7 +824,6 @@ pub(super) async fn detect(
         let (mut child, endpoint) = crate::local::opencode::start_server(&binary, cmd).await?;
         let result = discover_models(&endpoint).await;
         let _ = child.kill().await;
-        let _ = child.wait().await;
         result
     })
     .await;
@@ -1043,7 +1044,6 @@ pub(super) async fn generate(
         .map_err(|_| anyhow!("timed out after {}s", timeout.as_secs()))
         .and_then(|result| result);
         let _ = child.kill().await;
-        let _ = child.wait().await;
         result
     })
     .await?

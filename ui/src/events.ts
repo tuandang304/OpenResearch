@@ -86,6 +86,8 @@ export interface OrxEventHandlers {
   onReconnect?: () => void;
   /** The project's artifacts changed on disk — refetch the listing. */
   onArtifacts?: (projectId: string) => void;
+  /** A re-read of the machine's plans finished. */
+  onUsageChanged?: () => void;
 }
 
 type EntityObservers = Pick<OrxEventHandlers, "onRun" | "onRunLog" | "onReconnect">;
@@ -113,6 +115,28 @@ export function createEvents(client: WorkspaceClient) {
     listeners.add(fn);
     return () => {
       listeners.delete(fn);
+    };
+  }
+
+  // Pending until taken, since a hidden machine's app subscribes only once it is shown again.
+  let computeViewPending = false;
+  const computeViewListeners = new Set<() => void>();
+
+  function requestComputeView() {
+    computeViewPending = true;
+    computeViewListeners.forEach((fn) => fn());
+  }
+
+  function takeComputeView(): boolean {
+    const pending = computeViewPending;
+    computeViewPending = false;
+    return pending;
+  }
+
+  function onComputeViewRequest(fn: () => void): () => void {
+    computeViewListeners.add(fn);
+    return () => {
+      computeViewListeners.delete(fn);
     };
   }
 
@@ -404,6 +428,7 @@ export function createEvents(client: WorkspaceClient) {
           if (d?.harness && d.authState) emitHarnessAuth(d);
         });
         es.addEventListener("harness.catalog", () => emitHarnessCatalog());
+        es.addEventListener("usage.changed", () => ref.current.onUsageChanged?.());
         es.addEventListener("datadir.move.progress", (e) => {
           const d = parse<{ phase: string; copiedBytes: number; totalBytes: number }>(
             e as MessageEvent,
@@ -465,6 +490,9 @@ export function createEvents(client: WorkspaceClient) {
     pendingHostConnect,
     takeHostConnect,
     onHostConnectRequest,
+    requestComputeView,
+    takeComputeView,
+    onComputeViewRequest,
     onEngineHost,
     onRunLog,
     onChatEvent,

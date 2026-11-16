@@ -27,6 +27,23 @@ through its CLI; profiles check theirs in parallel in the second pass. Adding,
 renaming or removing an account, provider or endpoint re-checks only the agent
 it changes.
 
+**Plan limits come from the agents themselves.** For each Claude Code and Codex
+sign-in that may be on a subscription, the user's own and each profile's, one
+request answers: Claude's `get_usage` control request on a throwaway child in
+that account's home, Codex's `account/rateLimits/read` on a chat's running
+app-server for that account, else a throwaway one, since two processes
+refreshing one ChatGPT token can sign the user out (`src/local/usage.rs`).
+`orx up` keeps one snapshot per account in memory. `/api/usage` serves them at
+once, re-reads in the background any older than a minute, one read per account
+at a time, and announces the result with `usage.changed`; `POST
+/api/usage/refresh` re-reads them all. An account now signed in as someone else
+drops its snapshot. A running chat whose
+agent says its limits moved re-reads its account. A failed read keeps the last
+values beside the reason; an API key or a sign-out has no plan. A Codex reset is spent
+the same way, through `account/rateLimitResetCredit/consume` with the
+dashboard's key for that click, so a retry never spends two, and then
+re-reads that account.
+
 **orx keeps the built-in agents current.** Installing one from the
 dashboard downloads the vendor's release into orx's cache, checked against the
 checksum the vendor publishes, when available, and leaves the user's `PATH`
@@ -39,6 +56,8 @@ account is skipped until a sign-in shows it in use; one whose sign-in could
 not be checked is still kept current. New OpenCode installs
 use major 2; an existing major 1 still runs chats and offers an explicit upgrade
 or OpenResearch's own copy before provider changes.
+OpenResearch places a new OpenCode copy only while no chat or compaction is
+mid-turn, and stops the idle OpenCode servers first so none keeps the old binary.
 Agents orx starts run with Claude Code's updater off, so only this check
 changes an install. Cursor, Antigravity and ACP presets also use cached vendor
 releases; their updates replace orx's copy without invoking vendor installers.
@@ -204,7 +223,7 @@ Every agent whose harness takes an MCP server gets `orx mcp` (`src/commands/mcp.
 
 Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versioned model, and orx picks a route unless the agent names one: the vendor's own agent first, then flat-rate plans, direct APIs, and resellers last. Every agent and provider spells a model differently, so routes join on a canonical id derived from each spelling (`src/local/model_routes.rs`). A model the user turns off in Settings, or just its free tier, offers delegates no route. With sub-agent limits on, `models` lists and `delegate` accepts only routes on an allowed harness and allowed model, and the harness's fixed effort replaces the one asked for (`src/local/delegation.rs`).
 
-**A delegate is a side chat of the chat that started it,** in the same worktree, unless it asks for its own and stands as an ordinary chat. It starts with only its task, runs with a permission mode no broader than its delegator's, and records who delegated to it, which counts its depth. A harness with no permission modes takes a delegate only from a chat that may do anything. Stopping a chat stops every delegate below it. A chat an agent starts without hearing from it is no delegate and stands as the user's. A retry finds the chat the first attempt started, by an id derived from the request.
+**A delegate is a side chat of the chat that started it,** in the same worktree, unless it asks for its own. Either way it stays out of the sidebar. It starts with only its task, runs with a permission mode no broader than its delegator's, and records who delegated to it, which counts its depth. A harness with no permission modes takes a delegate only from a chat that may do anything. Stopping a chat stops every delegate below it. A chat an agent starts without hearing from it is no delegate and stands as the user's; an agent does this only when the user asks for a top-level chat. A retry finds the chat the first attempt started, by an id derived from the request.
 
 **Any chat can subscribe to any other** (`src/local/chat/news.rs`), hearing each finished turn and each question of its target. Pending news arrives in one visible turn once the subscriber is idle, or inside a turn through `wait`, and delivery claims prevent duplicates. A turn that ends while its own delegates work is not an answer yet. A turn that only answered the subscriber's own news is no news to it, or two chats subscribed to each other would wake each other forever. Run results travel separately, in hidden turns ([experiments](experiments.md)).
 

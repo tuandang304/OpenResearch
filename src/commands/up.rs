@@ -59,6 +59,7 @@ mod harness_setup;
 mod network;
 mod research_tools;
 mod search;
+mod usage;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -143,7 +144,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         engine.clone(),
         clock.clone(),
         crate::store::data_dir(),
-        crate::config::ssh_config(),
+        Some(crate::config::ssh_config()),
     );
     let instance = uuid::Uuid::new_v4().to_string();
     let project_lifecycle = Arc::new(ProjectLifecycle::default());
@@ -381,6 +382,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.chat.stop_admitting();
     if explicit_stop {
         state.chat.interrupt_all().await;
+    } else {
+        state.chat.stop_for_shutdown().await;
     }
     state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;
@@ -862,6 +865,16 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
+        .route("/api/settings/ssh/hosts", post(add_compute_host))
+        .route(
+            "/api/settings/ssh/hosts/{host}",
+            axum::routing::delete(remove_compute_host),
+        )
+        .route("/api/remote/hosts", get(remote_hosts).post(add_remote_host))
+        .route(
+            "/api/remote/hosts/{host}",
+            axum::routing::delete(remove_remote_host),
+        )
         .route(
             "/api/remote/sessions",
             get(remote_sessions).post(create_remote_session),
@@ -917,6 +930,9 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route("/api/usage", get(usage::usage))
+        .route("/api/usage/refresh", post(usage::refresh))
+        .route("/api/usage/reset", post(usage::reset))
         .route("/api/agents/{key}", axum::routing::patch(edit_agent))
         .route("/api/agent-profiles", post(create_agent_profile))
         .route(
@@ -1747,11 +1763,12 @@ async fn list_project_activity(State(state): State<AppState>) -> ApiResult {
         let store = Store::open()?;
         let mut active_agents = HashMap::<String, usize>::new();
         for (session_id, project_id) in store.list_chat_session_project_ids()? {
-            // Side chats stay out of project agent counts.
+            // Side chats and delegates stay out of project agent counts.
             if busy.contains(&session_id)
                 && store
                     .get_chat_session(&session_id)?
                     .is_some_and(|session| session.side_parent_session_id.is_none())
+                && store.delegation(&session_id)?.parent.is_none()
             {
                 *active_agents.entry(project_id).or_default() += 1;
             }
@@ -3663,7 +3680,7 @@ async fn session_worktree(Path(id): Path<String>) -> ApiResult {
 }
 
 /// Cap on file bytes served to the viewer (mirrors openresearch.sh).
-const FILE_READ_LIMIT: u64 = 512_000;
+const FILE_READ_LIMIT: u64 = 512 * 1024;
 
 /// Resolve which on-disk checkout answers a file/code request for a project.
 ///
@@ -5648,7 +5665,10 @@ fn spawn_agent_updates(state: AppState) {
         // Startup detection's probes go first.
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
-            update_agents(&state, harness_setup::keep_current).await;
+            update_agents(&state, |harness| {
+                harness_setup::keep_current(harness, &state.agent)
+            })
+            .await;
             tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
         }
     });
@@ -8054,7 +8074,7 @@ async fn create_remote_session(
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host).await?;
+    require_saved_remote(&host).await?;
     let (created, session) = state
         .remote_sessions
         .create(host, req.ui_preferences, None)
@@ -10432,6 +10452,7 @@ async fn send_chat_message(
         .get_local_project(&session.project_id)?
         .ok_or_else(|| not_found("project"))?;
     let harness = session.harness;
+    let autonomy = local::autonomy::Autonomy::from_stored(session.autonomy.as_deref());
     let slash_skills = local::chat::builtin_slash_skill_names(&project, &req.text);
     let text = req.text.trim().to_string();
     let annotations = req
@@ -10505,7 +10526,7 @@ async fn send_chat_message(
         (json!({ "ok": true, "turn": result }), capture)
     };
     if capture_message {
-        crate::telemetry::capture_chat_message_sent(&harness);
+        crate::telemetry::capture_chat_message_sent(&harness, autonomy);
         for skill in slash_skills {
             crate::telemetry::capture_skill_invoked(skill, "slash", Some(&harness));
         }
@@ -10594,7 +10615,8 @@ async fn fork_chat_turn(
             .get_local_project(&session.project_id)?
             .ok_or_else(|| not_found("project"))?;
         let skills = local::chat::builtin_slash_skill_names(&project, text);
-        Some((session.harness, skills))
+        let autonomy = local::autonomy::Autonomy::from_stored(session.autonomy.as_deref());
+        Some((session.harness, autonomy, skills))
     } else {
         None
     };
@@ -10609,8 +10631,8 @@ async fn fork_chat_turn(
         .await
         .map_err(bad_request)?;
     if started {
-        if let Some((harness, skills)) = invocation {
-            crate::telemetry::capture_chat_message_sent(&harness);
+        if let Some((harness, autonomy, skills)) = invocation {
+            crate::telemetry::capture_chat_message_sent(&harness, autonomy);
             for skill in skills {
                 crate::telemetry::capture_skill_invoked(skill, "slash", Some(&harness));
             }
@@ -13262,6 +13284,8 @@ mod tests {
             "/api/settings/data-dir/move",
             "/api/update/apply",
             "/api/ssh/connect",
+            "/api/usage/refresh",
+            "/api/usage/reset",
             "/api/not-a-route",
         ];
         for path in routes {
@@ -13286,6 +13310,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_reset_names_why_it_cannot_start() {
+        let address = serve(router(test_state(), None, up_remote::Reach::Loopback)).await;
+        let reset = |body: Value| post_to(address, "/api/usage/reset", Some(body));
+
+        let unknown = reset(json!({"profile": "codex-nobody", "attempt": "a"})).await;
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        let error: Value = unknown.json().await.unwrap();
+        assert!(
+            error["error"].as_str().unwrap().contains("Codex account"),
+            "{error}"
+        );
+        let keyless = reset(json!({"attempt": " "})).await;
+        assert_eq!(keyless.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

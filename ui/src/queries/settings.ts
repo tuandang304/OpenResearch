@@ -184,6 +184,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 2_000,
   });
 
+  const listRemoteHostsQuery = () => queryOptions({
+    queryKey: workspaceKey("listRemoteHosts"),
+    queryFn: ({ signal }) => api.listRemoteHosts(signal),
+    staleTime: 30_000,
+  });
+
   const listRemoteSessionsQuery = () => queryOptions({
     queryKey: workspaceKey("listRemoteSessions"),
     queryFn: ({ signal }) => api.listRemoteSessions(signal),
@@ -194,6 +200,15 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     queryKey: workspaceKey("getUpdateStatus"),
     queryFn: ({ signal, client, queryKey }) => readLiveSnapshot(client, queryKey, () => api.getUpdateStatus(signal)),
     staleTime: 30_000,
+  });
+
+  /** Plans, spend and, with `chat`, that chat's compute; null from an `orx up` without the route. */
+  const getUsageQuery = (chat: string | null = null) => queryOptions({
+    queryKey: workspaceKey("getUsage", chat),
+    queryFn: ({ signal }) => api.getUsage(chat, signal),
+    staleTime: 60_000,
+    // Paused while the window is hidden; the server re-reads plans only past a minute old.
+    refetchInterval: 5 * 60_000,
   });
 
   const getPendingWorkQuery = () => queryOptions({
@@ -411,8 +426,10 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     getSshConfigQuery,
     getSshMasterStatusQuery,
     getRuntimeQuery,
+    listRemoteHostsQuery,
     listRemoteSessionsQuery,
     getUpdateStatusQuery,
+    getUsageQuery,
     getPendingWorkQuery,
     getBuildNotesQuery,
     getLitSourcesQuery,
@@ -566,6 +583,16 @@ export const mutSetComputeDefault = mutations.define({
   },
   key: ({ args: [ws, { projectId }] }) => [ws.identity, "compute-default", projectId ?? ""],
   describe: "change where new runs go",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+/** The re-read's result arrives as `usage.changed`, which refetches every usage query. */
+export const mutRefreshUsage = mutations.define({
+  id: "usage/refresh",
+  mutate: (ws: Workspace) => ws.api.refreshUsage(),
+  optimistic: () => {},
+  describe: "refresh usage",
   describeResult: null,
   refetchOnSuccess: false,
 });
@@ -770,6 +797,57 @@ export const mutSaveSshHost = mutations.define({
   },
   key: ({ args: [ws, host] }) => [ws.identity, "ssh-host", host],
   describe: "save the host's settings",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutAddComputeHost = mutations.define({
+  id: "settings/ssh-host-add",
+  async mutate(ws: Workspace, command: string) {
+    const host = await ws.api.addComputeHost(command);
+    await ws.queryClient.invalidateQueries(ws.queries.getSshSettingsQuery());
+    return host;
+  },
+  optimistic: () => {},
+  describe: "add the host",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutRemoveComputeHost = mutations.define({
+  id: "settings/ssh-host-remove",
+  async mutate(ws: Workspace, host: string) {
+    await ws.api.removeComputeHost(host);
+    await ws.queryClient.invalidateQueries(ws.queries.getSshSettingsQuery());
+  },
+  optimistic: () => {},
+  key: ({ args: [ws, host] }) => [ws.identity, "ssh-host", host],
+  describe: "remove the host",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutAddRemoteHost = mutations.define({
+  id: "remote/host-add",
+  async mutate(ws: Workspace, command: string) {
+    const host = await ws.api.addRemoteHost(command);
+    await ws.queryClient.invalidateQueries(ws.queries.listRemoteHostsQuery());
+    return host;
+  },
+  optimistic: () => {},
+  describe: "add the remote",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutRemoveRemoteHost = mutations.define({
+  id: "remote/host-remove",
+  mutate: (ws: Workspace, host: string) => ws.api.removeRemoteHost(host),
+  optimistic({ helpers, args: [ws, host] }) {
+    helpers(ws.queryClient).arrayRemove(ws.queries.listRemoteHostsQuery(), (entry) => entry.host === host);
+  },
+  key: ({ args: [ws, host] }) => [ws.identity, "remote-host", host],
+  describe: "remove the remote",
   describeResult: null,
   refetchOnSuccess: false,
 });

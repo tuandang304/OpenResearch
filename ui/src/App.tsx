@@ -288,7 +288,7 @@ const errorText = (error: unknown) => ltr(error instanceof Error ? error.message
 export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo; projectId: string; pane?: Pane }) {
   useIdlePreload();
   const { id: elementId } = useContext(WorkspaceDomContext);
-  const { onHostConnectRequest } = useWorkspace().events;
+  const { onHostConnectRequest, onComputeViewRequest, takeComputeView } = useWorkspace().events;
 
   const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
 
@@ -1695,6 +1695,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     selectMainView(view);
   };
   useEffect(() => onHostConnectRequest(() => selectMainView("compute")), [selectMainView]);
+  const focusOpenedViewRef = useRef(focusOpenedView);
+  focusOpenedViewRef.current = focusOpenedView;
+  useEffect(() => {
+    const take = () => {
+      if (takeComputeView()) focusOpenedViewRef.current("compute");
+    };
+    take();
+    return onComputeViewRequest(take);
+  }, [onComputeViewRequest, takeComputeView]);
 
   const focusedRegion = useSyncExternalStore(subscribeCommandRegion, commandRegion);
   useHotkey(appHotkeys["tab.close"], () => {

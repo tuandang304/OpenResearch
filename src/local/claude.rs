@@ -339,6 +339,15 @@ pub struct ClaudeClient {
 }
 
 impl ClaudeClient {
+    /// Marks the held segment as being recorded by a turn that will call
+    /// [`ClaudeHost::take_continuation`]; false when there is none to record.
+    pub(crate) fn claim_continuation(&self) -> bool {
+        let mut turn = self.turn.lock().unwrap();
+        let claimable = turn.sender.is_none() && turn.unclaimed.is_some() && !turn.recording;
+        turn.recording |= claimable;
+        claimable
+    }
+
     /// The config this child is currently running under.
     pub fn config(&self) -> SpawnConfig {
         self.config.lock().unwrap().clone()
@@ -361,7 +370,7 @@ impl ClaudeClient {
     /// Send a control request and await its `control_response`. `Ok(Err(msg))`
     /// is a *child-reported* failure, `Err(..)` a transport failure (child gone
     /// / timeout).
-    async fn control_request(&self, request: Value) -> Result<Result<Value, String>> {
+    pub(crate) async fn control_request(&self, request: Value) -> Result<Result<Value, String>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request_id = format!("req_{id}");
         let (tx, rx) = oneshot::channel();
@@ -1466,6 +1475,7 @@ impl ClaudeHost {
 
     /// Whether the session's child holds a segment it started on its own that
     /// no turn is starting to record.
+    #[cfg(test)]
     pub async fn has_continuation(&self, session_id: &str) -> bool {
         let live = self.inner.lock().await.get(session_id).cloned();
         live.is_some_and(|client| {
@@ -1474,16 +1484,17 @@ impl ClaudeHost {
         })
     }
 
-    /// Marks the held segment as being recorded by a turn that will call
-    /// [`Self::take_continuation`]; false when there is none to record.
+    /// The session's live child, for a caller that claims its held segment
+    /// under a lock of its own.
+    pub(crate) async fn live(&self, session_id: &str) -> Option<Arc<ClaudeClient>> {
+        self.inner.lock().await.get(session_id).cloned()
+    }
+
+    /// [`ClaudeClient::claim_continuation`] on the session's live child.
     pub async fn claim_continuation(&self, session_id: &str) -> bool {
-        let Some(live) = self.inner.lock().await.get(session_id).cloned() else {
-            return false;
-        };
-        let mut turn = live.turn.lock().unwrap();
-        let claimable = turn.sender.is_none() && turn.unclaimed.is_some() && !turn.recording;
-        turn.recording |= claimable;
-        claimable
+        self.live(session_id)
+            .await
+            .is_some_and(|client| client.claim_continuation())
     }
 
     /// Route the held segment, and what the child writes after it, to a new

@@ -717,6 +717,8 @@ export interface DataDirValidation {
 export interface SshHost {
   container?: string | null;
   host: string;
+  /** Saved in OpenResearch rather than read from ~/.ssh/config. */
+  saved?: boolean;
   hostname?: string;
   user?: string;
   port?: string;
@@ -996,7 +998,7 @@ export interface FileTextBody {
   truncated: boolean;
 }
 
-export const FILE_PREVIEW_BYTES = 512_000;
+export const FILE_PREVIEW_BYTES = 512 * 1024;
 
 /** Decode a raw response only when it is valid, NUL-free UTF-8. */
 const decodeFileText = (bytes: ArrayBuffer, truncated: boolean): FileTextBody => {
@@ -1559,6 +1561,101 @@ export interface ChatMessage {
 export interface ContextUsage {
   usedTokens: number;
   contextWindow?: number;
+  /** Tokens at which the agent compacts on its own; absent when it doesn't say or has auto-compaction off. */
+  compactAt?: number;
+}
+
+/** `GET /api/usage`: the machine's agent plans and the last seven days of OpenResearch's spend. */
+export interface UsageReport {
+  /** null until the first read of this machine's sign-ins finishes; [] when none is on a plan. */
+  plans: PlanUsage[] | null;
+  /** The last seven days in the machine's local time, oldest first, as `YYYY-MM-DD`; today last. */
+  days: string[];
+  agents: AgentSpend[];
+  compute: BackendSpend[];
+  /** The chat `?chat=` asked about. */
+  chat?: ChatSpend;
+}
+
+export interface ChatSpend {
+  /** What the chat's agent has cost, per currency, largest first. */
+  agent: Money[];
+  /** Runs the chat launched on backends that cost money. */
+  compute: ChatCompute | null;
+}
+
+/** Millionths of `currency` (ISO 4217). */
+export interface Money {
+  micros: number;
+  currency: string;
+}
+
+export interface PlanUsage {
+  harness: "claude-code" | "codex";
+  /** The agent profile's id; absent for the user's own sign-in. */
+  profile?: string;
+  plan: string | null;
+  account: string | null;
+  windows: PlanWindow[];
+  credits?: { balance: string | null; unlimited: boolean };
+  extraUsage?: { usedMicros: number; limitMicros: number | null; currency: string };
+  /** Codex resets that refill the limits now, only when one is available. */
+  resets?: PlanResets;
+  readAt: string | null;
+  /** Why the latest read failed; `windows` then hold the values from `readAt`. */
+  error?: { kind: "unsupported"; version: string } | { kind: "failed"; message: string };
+}
+
+export interface PlanResets {
+  available: number;
+  /** The available ones the provider lists, which may be fewer than `available`; null when it gives only the count. */
+  credits: ResetCredit[] | null;
+}
+
+export interface ResetCredit {
+  id: string;
+  title: string | null;
+  description: string | null;
+  expiresAt: string | null;
+}
+
+/** What `POST /api/usage/reset` did; on `reset` and `alreadyRedeemed` the limits are refilled. */
+export type ResetOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
+
+export interface PlanWindow {
+  /** The window's length in minutes: 300 is "5-hour", 10080 is "Weekly". */
+  minutes: number | null;
+  /** The model a per-model window covers, as the provider names it; null for plan-wide windows. */
+  model: string | null;
+  /** What is left, 0 to 100. */
+  remainingPercent: number;
+  resetsAt: string | null;
+}
+
+export interface AgentSpend {
+  harness: string;
+  currency: string;
+  /** Millionths of `currency` per day in `UsageReport.days`, of what has a price. */
+  dayMicros: number[];
+  /** Days with tokens that neither the agent nor the price list put a price on. */
+  unpriced: number;
+}
+
+export interface BackendSpend {
+  /** The run backend's kind, such as `modal_job`. */
+  backend: string;
+  currency: string;
+  dayMicros: number[];
+  /** Runs on this backend whose price couldn't be read. */
+  unpriced: number;
+}
+
+export interface ChatCompute {
+  runs: number;
+  costMicros: number;
+  currency: string;
+  running: boolean;
+  unpriced: number;
 }
 
 export interface ChatSession {
@@ -1735,20 +1832,6 @@ export function fmtDuration(ms: number): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return m.duration_hours_minutes({ hours: fmtNumber(hours), minutes: fmtNumber(minutes % 60) });
   return m.duration_days_hours({ days: fmtNumber(Math.floor(hours / 24)), hours: fmtNumber(hours % 24) });
-}
-
-/** Compact byte size, e.g. "512 B", "2.0 KB", "5.3 MB". Mirrors the backend's
- * `store::human_bytes`. */
-export function fmtBytes(n: number): string {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = n;
-  let u = 0;
-  while (v >= 1024 && u < units.length - 1) {
-    v /= 1024;
-    u += 1;
-  }
-  const number = new Intl.NumberFormat(getLocale(), { maximumFractionDigits: u === 0 ? 0 : 1, minimumFractionDigits: u === 0 ? 0 : 1 });
-  return `${number.format(u === 0 ? n : v)} ${units[u]}`;
 }
 
 /** Compact token count, e.g. 62300 → "62k", 1_200_000 → "1.2M", 940 → "940". */
@@ -2338,7 +2421,7 @@ export function createApi(
 
   /** One file from the project — a branch's committed copy when `ref` is given,
    * else a chat session's worktree, else the hub clone — capped server-side
-   * (~512 KB). */
+   * (512 KiB). */
   const getProjectFile = (projectId: string, path: string, opts: CheckoutRef = {}, signal?: AbortSignal) =>
     get<ProjectFile>(
       `/api/projects/${projectId}/file?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
@@ -2346,7 +2429,7 @@ export function createApi(
     );
 
   /** One file by absolute path — the escape hatch for a file an agent references
-   * that lives outside the checkout and artifacts. Server-side capped (~512 KB);
+   * that lives outside the checkout and artifacts. Server-side capped (512 KiB);
    * loopback-only, so it reads whatever the user running `orx up` can read. */
   const getAbsoluteFile = (path: string, signal?: AbortSignal) =>
     get<AbsoluteFile>(`/api/files/abs?path=${encodeURIComponent(path)}`, signal);
@@ -2547,6 +2630,17 @@ export function createApi(
 
   const getUpdateStatus = (signal?: AbortSignal) => get<UpdateStatus>("/api/update", signal);
 
+  /** The machine's usage, or null from an `orx up` older than the route. */
+  const getUsage = (chat: string | null, signal?: AbortSignal) =>
+    fetch(chat ? `/api/usage?${new URLSearchParams({ chat })}` : "/api/usage", { signal }).then((r) => r.status === 404 ? null : json<UsageReport>(r));
+
+  /** Starts a re-read of the machine's plans; `usage.changed` announces its end. */
+  const refreshUsage = () => post<{ ok: boolean }>("/api/usage/refresh").then(() => undefined);
+
+  /** Spends one of a Codex plan's resets; `attempt` is one confirmed click's key, sent again on a retry so it never spends two. */
+  const resetUsage = (body: { profile?: string; creditId?: string; attempt: string }) =>
+    post<{ outcome: ResetOutcome }>("/api/usage/reset", body).then((r) => r.outcome);
+
   const getPendingWork = (signal?: AbortSignal) => get<PendingWork>("/api/pending-work", signal);
 
   const getBuildNotes = (signal?: AbortSignal) => get<BuildNotes | null>("/api/update/notes", signal);
@@ -2619,6 +2713,26 @@ export function createApi(
 
   const saveSshConfig = (content: string, previousContent: string) =>
     put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
+
+  /** Saves a host from what the user typed: an alias, `user@host[:port]` or an `ssh …` command. */
+  const addComputeHost = (command: string) =>
+    post<{ host: string }>("/api/settings/ssh/hosts", { command }).then((r) => r.host);
+
+  const removeComputeHost = (host: string) =>
+    writeResponse(`/api/settings/ssh/hosts/${encodeURIComponent(host)}`, { method: "DELETE" }).then((r) =>
+      json<{ ok: boolean }>(r),
+    );
+
+  const listRemoteHosts = (signal?: AbortSignal) =>
+    get<{ hosts: SshHost[] }>("/api/remote/hosts", signal).then((r) => r.hosts);
+
+  const addRemoteHost = (command: string) =>
+    post<{ host: string }>("/api/remote/hosts", { command }).then((r) => r.host);
+
+  const removeRemoteHost = (host: string) =>
+    writeResponse(`/api/remote/hosts/${encodeURIComponent(host)}`, { method: "DELETE" }).then((r) =>
+      json<{ ok: boolean }>(r),
+    );
 
   const getSshMasterStatus = (host: string, signal?: AbortSignal) =>
     get<{ running: boolean | null }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
@@ -3340,6 +3454,9 @@ export function createApi(
     getTinkerSettings,
     saveTinkerKey,
     getUpdateStatus,
+    getUsage,
+    refreshUsage,
+    resetUsage,
     getPendingWork,
     getBuildNotes,
     applyUpdate,
@@ -3368,6 +3485,11 @@ export function createApi(
     getSshConfig,
     saveSshConfig,
     getSshMasterStatus,
+    addComputeHost,
+    removeComputeHost,
+    listRemoteHosts,
+    addRemoteHost,
+    removeRemoteHost,
     getRuntime,
     listRemoteSessions,
     createRemoteSession,
