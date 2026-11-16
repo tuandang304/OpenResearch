@@ -328,6 +328,8 @@
   "settings_page_agent_models": "智能体模型",
   "settings_nested_subagents": "允许嵌套子智能体",
   "settings_nested_subagents_description": "允许子智能体启动自己的子智能体。智能体仍可针对每个任务更改此设置。",
+  "settings_subagent_full_access": "授予子智能体完全权限",
+  "settings_subagent_full_access_description": "子智能体无需请求批准即可运行，因此你不在时委派的工作也不会停下。关闭时：子智能体能做的不超过启动它的对话。",
   "settings_models": "模型",
   "settings_models_description": "关闭的模型会从模型选择器中移除，智能体也无法把任务委派给它们。拖动实验室可调整分区顺序。",
   "settings_models_off": "已关闭 {count} 个",

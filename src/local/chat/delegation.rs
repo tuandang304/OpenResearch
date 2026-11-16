@@ -118,10 +118,20 @@ pub fn within_reach(caller: &StoredChatSession, target: &StoredChatSession) -> b
 }
 
 /// The broadest mode the delegate's harness offers that is no broader than
-/// the delegator's. Plan narrows to asking: a delegate is sent to do its task.
-/// A delegator whose modes orx cannot read gets a delegate that asks.
-pub fn delegate_permission(parent: &StoredChatSession, harness_id: &str) -> Result<Option<String>> {
-    let ceiling = permission_rank(parent).unwrap_or(0);
+/// the delegator's, or the broadest it offers at all when the user gives
+/// delegates full access, so none stops to wait for an approval. Plan narrows
+/// to asking: a delegate is sent to do its task. A delegator whose modes orx
+/// cannot read gets a delegate that asks.
+pub fn delegate_permission(
+    parent: &StoredChatSession,
+    harness_id: &str,
+    full_access: bool,
+) -> Result<Option<String>> {
+    let ceiling = if full_access {
+        mode_rank(PermissionMode::Bypass)
+    } else {
+        permission_rank(parent).unwrap_or(0)
+    };
     let child =
         harness::chat_harness(harness_id).ok_or_else(|| anyhow!("unknown agent {harness_id}"))?;
     let choices = child.options().permission_modes;
@@ -773,7 +783,19 @@ mod tests {
             ("codex", "full-access", "claude-code", "bypassPermissions"),
             ("opencode", "default", "claude-code", "manual"),
         ] {
-            let got = delegate_permission(&chat(parent, mode), child).unwrap();
+            let got = delegate_permission(&chat(parent, mode), child, false).unwrap();
+            assert_eq!(got.as_deref(), Some(expected), "{parent} {mode} → {child}");
+        }
+    }
+
+    #[test]
+    fn a_delegate_with_full_access_never_waits_for_an_approval() {
+        for (parent, mode, child, expected) in [
+            ("claude-code", "auto", "antigravity", "bypass"),
+            ("claude-code", "plan", "codex", "full-access"),
+            ("opencode", "default", "claude-code", "bypassPermissions"),
+        ] {
+            let got = delegate_permission(&chat(parent, mode), child, true).unwrap();
             assert_eq!(got.as_deref(), Some(expected), "{parent} {mode} → {child}");
         }
     }

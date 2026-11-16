@@ -328,6 +328,8 @@
   "settings_page_agent_models": "Modelos de los agentes",
   "settings_nested_subagents": "Permitir subagentes anidados",
   "settings_nested_subagents_description": "Permite que los subagentes inicien sus propios subagentes. Los agentes pueden cambiarlo en cada tarea.",
+  "settings_subagent_full_access": "Dar acceso total a los subagentes",
+  "settings_subagent_full_access_description": "Los subagentes se ejecutan sin pedir aprobación, así el trabajo delegado no se detiene mientras no estás. Desactivado: un subagente no puede hacer más que el chat que lo inició.",
   "settings_models": "Modelos",
   "settings_models_description": "Los modelos que desactives salen del selector de modelos y los agentes no pueden delegarles tareas. Arrastra los laboratorios para reordenar sus secciones.",
   "settings_models_off": "{count} desactivados",

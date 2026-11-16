@@ -328,6 +328,8 @@
   "settings_page_agent_models": "Modele agentów",
   "settings_nested_subagents": "Zezwalaj na zagnieżdżone podagenty",
   "settings_nested_subagents_description": "Pozwala podagentom uruchamiać własne podagenty. Agenci nadal mogą to zmienić dla każdego zadania.",
+  "settings_subagent_full_access": "Daj podagentom pełny dostęp",
+  "settings_subagent_full_access_description": "Podagenci działają bez proszenia o zgodę, więc zlecona praca nie staje, gdy cię nie ma. Wyłączone: podagent nie może zrobić więcej niż czat, który go uruchomił.",
   "settings_models": "Modele",
   "settings_models_description": "Wyłączone modele znikają z wyboru modelu, a agenci nie mogą im zlecać zadań. Przeciągnij laboratoria, aby zmienić kolejność sekcji.",
   "settings_models_off": "wyłączone: {count}",

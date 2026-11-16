@@ -6795,6 +6795,7 @@ struct SetUiStateReq {
     preferred_autonomy: Option<Autonomy>,
     harness_failover: Option<local::harness::HarnessFailover>,
     nested_delegation: Option<bool>,
+    delegate_full_access: Option<bool>,
     opencode_free_models: Option<bool>,
     favorite_models: Option<Vec<String>>,
     hidden_models: Option<Vec<String>>,
@@ -6943,6 +6944,9 @@ async fn set_ui_state(
         }
         if let Some(allowed) = req.nested_delegation {
             store.set_nested_delegation(allowed)?;
+        }
+        if let Some(allowed) = req.delegate_full_access {
+            store.set_delegate_full_access(allowed)?;
         }
         if let Some(offered) = req.opencode_free_models {
             store.set_opencode_free_models(offered)?;
@@ -11449,6 +11453,7 @@ mod tests {
             harness_failover: Default::default(),
             preferred_autonomy: Some(Autonomy::Copilot),
             nested_delegation: false,
+            delegate_full_access: true,
             opencode_free_models: true,
             favorite_models: Vec::new(),
             hidden_models: Vec::new(),
@@ -11489,6 +11494,7 @@ mod tests {
             preferred_autonomy: None,
             preferred_agent: None,
             nested_delegation: false,
+            delegate_full_access: true,
             opencode_free_models: true,
             favorite_models: Vec::new(),
             hidden_models: Vec::new(),
@@ -11545,6 +11551,7 @@ mod tests {
             preferred_autonomy: None,
             harness_failover: Default::default(),
             nested_delegation: false,
+            delegate_full_access: true,
             opencode_free_models: true,
             favorite_models: Vec::new(),
             hidden_models: Vec::new(),
@@ -11812,6 +11819,7 @@ mod tests {
                 preferred_autonomy: None,
                 harness_failover: None,
                 nested_delegation: None,
+                delegate_full_access: None,
                 opencode_free_models: None,
                 favorite_models: None,
                 hidden_models: None,

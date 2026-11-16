@@ -330,6 +330,8 @@
   "settings_page_agent_models": "Mô hình của agent",
   "settings_nested_subagents": "Cho phép sub-agent lồng nhau",
   "settings_nested_subagents_description": "Cho phép sub-agent tự khởi tạo sub-agent của riêng chúng. Agent vẫn có thể đổi thiết lập này cho từng tác vụ.",
+  "settings_subagent_full_access": "Cho sub-agent toàn quyền",
+  "settings_subagent_full_access_description": "Sub-agent chạy mà không cần xin phê duyệt, nên việc được giao không bị dừng khi bạn vắng mặt. Tắt: sub-agent không được làm nhiều hơn chat đã khởi tạo nó.",
   "settings_models": "Model",
   "settings_models_description": "Model bạn tắt sẽ biến mất khỏi bộ chọn model và agent không thể giao việc cho chúng. Kéo các hãng để sắp xếp lại các mục.",
   "settings_models_off": "{count} đã tắt",

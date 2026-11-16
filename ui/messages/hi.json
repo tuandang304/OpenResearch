@@ -328,6 +328,8 @@
   "settings_page_agent_models": "एजेंट मॉडल",
   "settings_nested_subagents": "नेस्टेड सब-एजेंट की अनुमति दें",
   "settings_nested_subagents_description": "सब-एजेंट को अपने सब-एजेंट शुरू करने दें। एजेंट हर काम के लिए इसे अब भी बदल सकते हैं।",
+  "settings_subagent_full_access": "सब-एजेंट को पूरी पहुँच दें",
+  "settings_subagent_full_access_description": "सब-एजेंट मंज़ूरी माँगे बिना चलते हैं, ताकि आपकी गैरमौजूदगी में सौंपा गया काम न रुके। बंद होने पर: सब-एजेंट उसे शुरू करने वाली चैट से ज़्यादा नहीं कर सकता।",
   "settings_models": "मॉडल",
   "settings_models_description": "जिन मॉडलों को आप बंद करते हैं, वे मॉडल पिकर से हट जाते हैं और एजेंट उन्हें काम नहीं सौंप सकते। इसके सेक्शन का क्रम बदलने के लिए लैब को खींचें।",
   "settings_models_off": "{count} बंद",

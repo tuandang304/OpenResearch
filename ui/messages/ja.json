@@ -328,6 +328,8 @@
   "settings_page_agent_models": "エージェントのモデル",
   "settings_nested_subagents": "ネストしたサブエージェントを許可",
   "settings_nested_subagents_description": "サブエージェントが独自のサブエージェントを開始できるようにします。エージェントはタスクごとにこの設定を変更できます。",
+  "settings_subagent_full_access": "サブエージェントにフルアクセスを許可",
+  "settings_subagent_full_access_description": "サブエージェントは承認を求めずに実行されるため、不在中も委任した作業が止まりません。オフ: サブエージェントは開始したチャット以上の操作はできません。",
   "settings_models": "モデル",
   "settings_models_description": "オフにしたモデルはモデル選択から外れ、エージェントもそのモデルに作業を任せられなくなります。ラボをドラッグするとセクションの順番を変えられます。",
   "settings_models_off": "{count} 件オフ",
