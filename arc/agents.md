@@ -138,7 +138,7 @@ Homes (`src/local/native_store.rs`) let an agent behave as the user set it up wh
 | OpenCode | session database | configuration, read in place |
 | Antigravity, ACP agents | nothing | home and session store |
 
-Links are reconciled when an agent starts, and before every Codex turn even on a running process. Claude Code and Codex chats from the user's own CLI can be adopted (`src/local/native_chats.rs`): they keep resolving to the user's native store, and orx's copy of recent history is for display only.
+Links are reconciled when an agent starts, and before every Codex turn even on a running process. Claude Code saves its sign-in by replacing the file, so a token a chat refreshes lands in orx's home; the dashboard hands it back to the user's home within seconds, and when both copies changed the one that expires later wins, since the other's refresh token is spent. Claude Code and Codex chats from the user's own CLI can be adopted (`src/local/native_chats.rs`): they keep resolving to the user's native store, and orx's copy of recent history is for display only.
 
 Claude Code and Codex profiles keep separate sign-ins in private homes under
 `agents/profiles`, recorded in `agent-profiles.json`. They share the user's
