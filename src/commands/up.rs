@@ -5777,8 +5777,19 @@ fn spawn_claude_auth_monitor(
     tokio::spawn(async move {
         let mut delay = Duration::from_secs(5);
         let mut observed_generation = claude.auth_snapshot().generation;
+        let mut sync_error = None;
         loop {
             tokio::time::sleep(delay).await;
+            // A chat that refreshed its token must hand it back before the user's own CLI spends
+            // the rotated refresh token.
+            let synced = local::harness::claude::sync_credentials()
+                .await
+                .err()
+                .map(|error| format!("{error:#}"));
+            if synced.is_some() && synced != sync_error {
+                eprintln!("orx up: warning: {}", synced.as_deref().unwrap_or_default());
+            }
+            sync_error = synced;
             let before = claude.auth_snapshot();
             if before.generation != observed_generation {
                 observed_generation = before.generation;

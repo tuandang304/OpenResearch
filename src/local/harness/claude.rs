@@ -295,6 +295,9 @@ fn gate_oauth_version(mut probe: AuthProbe, version: Option<&str>) -> AuthProbe 
 /// candidate: `find_claude` already returns the executable detection selected.
 pub(crate) async fn current_auth_state() -> AuthProbe {
     let sequence = next_auth_sequence();
+    if let Err(error) = sync_credentials().await {
+        eprintln!("orx up: warning: {error:#}");
+    }
     match find_claude() {
         Some(bin) => {
             let version = bin_version(&bin).await;
@@ -305,6 +308,13 @@ pub(crate) async fn current_auth_state() -> AuthProbe {
         }
         None => AuthProbe::unknown(sequence),
     }
+}
+
+/// `auth status` reads the user's own home, so it must see a token a chat refreshed in orx's.
+pub(crate) async fn sync_credentials() -> Result<()> {
+    tokio::task::spawn_blocking(native_store::sync_claude_credentials)
+        .await
+        .map_err(|error| anyhow!("Claude Code sign-in sync stopped: {error}"))?
 }
 
 pub(crate) fn auth_recovery_note(method: Option<&str>, provider: Option<&str>) -> &'static str {

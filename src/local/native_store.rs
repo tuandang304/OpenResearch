@@ -1075,9 +1075,12 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
             }
             let previous = std::fs::read_to_string(&marker).ok();
             if previous.as_deref() == file_hash(destination)?.as_deref() {
-                std::fs::remove_file(destination)?;
-            } else if previous.as_deref() == file_hash(source)?.as_deref() {
+                return relink_over(source, destination, &marker);
+            } else if previous.as_deref() == file_hash(source)?.as_deref()
+                || fresher_claude_credentials(destination, source)
+            {
                 adopt_managed_file(destination, source)?;
+                return relink_over(source, destination, &marker);
             } else {
                 preserve_conflict(destination)?;
             }
@@ -1135,8 +1138,66 @@ fn adopt_managed_file(from: &Path, to: &Path) -> Result<()> {
         std::fs::rename(&backup, to)?;
         return Err(error.into());
     }
-    std::fs::remove_file(from)?;
     Ok(())
+}
+
+/// Replace a regular file with the managed link. On Unix the link lands by rename, so an agent
+/// reading the path mid-swap never finds it missing, which Claude Code takes as signed out.
+fn relink_over(source: &Path, destination: &Path, marker: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut staged_name = destination.file_name().unwrap_or_default().to_os_string();
+        staged_name.push(format!(".orx-link-{}", uuid::Uuid::new_v4()));
+        let staged = destination.with_file_name(staged_name);
+        create_symlink(source, &staged)
+            .and_then(|()| std::fs::rename(&staged, destination))
+            .map_err(|error| {
+                let _ = std::fs::remove_file(&staged);
+                anyhow!(
+                    "could not link {} to {}: {error}",
+                    destination.display(),
+                    source.display()
+                )
+            })?;
+        write_marker(marker, source)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::remove_file(destination)?;
+        reconcile_link(source, destination)
+    }
+}
+
+/// Claude Code saves `.credentials.json` by rename, which turns orx's link into a file of its
+/// own whenever a chat refreshes the OAuth token. Refresh tokens rotate, so when both copies
+/// changed, the one that expires later is the live sign-in and the other is spent.
+fn fresher_claude_credentials(candidate: &Path, current: &Path) -> bool {
+    fn expires_at(path: &Path) -> Option<i64> {
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        value.get("claudeAiOauth")?.get("expiresAt")?.as_i64()
+    }
+    candidate.file_name() == Some(std::ffi::OsStr::new(".credentials.json"))
+        && expires_at(candidate)
+            .is_some_and(|candidate| expires_at(current).is_none_or(|current| candidate > current))
+}
+
+/// Hands a token Claude Code refreshed in orx's home back to the user's own, so their CLI and
+/// orx's next probe don't spend the rotated refresh token and sign the user out.
+pub fn sync_claude_credentials() -> Result<()> {
+    let isolated = claude_home(NativeStore::Isolated);
+    let legacy = claude_home(NativeStore::Legacy);
+    let linked = isolated.join(".credentials.json");
+    if isolated == legacy
+        || std::fs::symlink_metadata(&linked).map_or(true, |metadata| metadata.is_symlink())
+    {
+        return Ok(());
+    }
+    prepare_links(&isolated, &legacy, &[legacy.join(".credentials.json")]).with_context(|| {
+        format!(
+            "Could not sync Claude Code sign-in from {}",
+            linked.display()
+        )
+    })
 }
 
 fn preserve_conflict(path: &Path) -> Result<()> {
@@ -1524,6 +1585,75 @@ mod link_tests {
             .unwrap();
         assert_eq!(std::fs::read_to_string(conflict).unwrap(), "local edits");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn credentials(expires_at: i64) -> String {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"a{expires_at}","refreshToken":"r{expires_at}","expiresAt":{expires_at}}}}}"#
+        )
+    }
+
+    fn conflicts(dir: &Path) -> Vec<PathBuf> {
+        child_paths(dir)
+            .unwrap()
+            .into_iter()
+            .filter(|path| path.to_string_lossy().contains(".orx-conflict-"))
+            .collect()
+    }
+
+    #[test]
+    fn a_claude_token_refreshed_in_orx_home_wins_over_a_spent_one() {
+        let root = std::env::temp_dir().join(format!("orx-claude-creds-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("legacy");
+        let isolated = root.join("isolated");
+        let source = legacy.join(".credentials.json");
+        let linked = isolated.join(".credentials.json");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(&source, credentials(100)).unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
+
+        // Claude Code saves by rename, replacing the link; the user's CLI rewrites its own copy.
+        std::fs::remove_file(&linked).unwrap();
+        std::fs::write(&linked, credentials(300)).unwrap();
+        std::fs::write(&source, credentials(200)).unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), credentials(300));
+        assert!(std::fs::symlink_metadata(&linked).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&linked).unwrap(), credentials(300));
+        assert!(conflicts(&isolated).is_empty());
+
+        // When the user's own copy is the fresher one, it stays and orx's is kept aside.
+        std::fs::remove_file(&linked).unwrap();
+        std::fs::write(&linked, credentials(400)).unwrap();
+        std::fs::write(&source, credentials(500)).unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&linked).unwrap(), credentials(500));
+        let kept = conflicts(&isolated);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), credentials(400));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn syncing_hands_a_refreshed_claude_token_back_to_the_user() {
+        let isolated = claude_home(NativeStore::Isolated);
+        let legacy = claude_home(NativeStore::Legacy);
+        let source = legacy.join(".credentials.json");
+        let linked = isolated.join(".credentials.json");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(&source, credentials(100)).unwrap();
+        prepare_claude(NativeStore::Isolated).unwrap();
+        sync_claude_credentials().unwrap();
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), credentials(100));
+
+        std::fs::remove_file(&linked).unwrap();
+        std::fs::write(&linked, credentials(200)).unwrap();
+        sync_claude_credentials().unwrap();
+
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), credentials(200));
+        assert!(std::fs::symlink_metadata(&linked).unwrap().is_symlink());
     }
 
     #[test]
