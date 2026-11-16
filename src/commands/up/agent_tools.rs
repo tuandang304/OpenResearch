@@ -200,7 +200,11 @@ async fn call(
             if models.is_empty() {
                 bail!("No agent is ready to run a delegate. The user can sign in to one in OpenResearch.");
             }
-            Ok(model_routes::listing(&models))
+            let allowed = crate::config::delegation_policy().limit_routes(models);
+            if allowed.is_empty() {
+                bail!("The user's sub-agent limits leave no model to delegate to. Do the work yourself, or ask the user to allow one in Settings → Harnesses → Sub-agent limits.");
+            }
+            Ok(model_routes::listing(&allowed))
         }
         "delegate" => delegate(state, caller, args).await,
         "subscribe" => {
@@ -429,9 +433,15 @@ async fn delegate(state: &AppState, caller: &StoredChatSession, args: &Value) ->
         notify.then_some((delegation.depth + 1, may_delegate)),
     );
     let models = models(state, optional_text(args, "route")).await?;
-    let route = model_routes::resolve(&models, text(args, "model")?, optional_text(args, "route"))
+    let (route, effort, notes) = crate::config::delegation_policy()
+        .delegate_route(
+            &models,
+            text(args, "model")?,
+            optional_text(args, "route"),
+            optional_text(args, "effort"),
+        )
         .map_err(|e| anyhow!(e))?;
-    let effort = optional_text(args, "effort");
+    let effort = effort.as_deref();
     if let Some(effort) = effort.filter(|effort| !route.efforts.iter().any(|e| e == effort)) {
         bail!(if route.efforts.is_empty() {
             format!(
@@ -510,14 +520,15 @@ async fn delegate(state: &AppState, caller: &StoredChatSession, args: &Value) ->
     let effort = effort
         .map(|effort| format!(" at {effort} effort"))
         .unwrap_or_default();
+    let notes: String = notes.iter().map(|note| format!(" {note}")).collect();
     Ok(if notify {
         format!(
-            "Delegated to chat `{}` running `{}` on {}{effort}. Its answer arrives here as a new message when it finishes, or sooner through `wait`.",
+            "Delegated to chat `{}` running `{}` on {}{effort}.{notes} Its answer arrives here as a new message when it finishes, or sooner through `wait`.",
             child.id, route.model, route.name
         )
     } else {
         format!(
-            "Started chat `{}` running `{}` on {}{effort}. It is not your delegate and you are not subscribed to it; `subscribe` to hear from it.",
+            "Started chat `{}` running `{}` on {}{effort}.{notes} It is not your delegate and you are not subscribed to it; `subscribe` to hear from it.",
             child.id, route.model, route.name
         )
     })
