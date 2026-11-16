@@ -25,6 +25,7 @@ pub(crate) mod codex;
 pub(crate) mod cursor;
 mod detect;
 mod failover;
+pub(crate) mod launch_gate;
 pub(crate) mod managed;
 pub(crate) mod model_route;
 pub(crate) mod opencode;

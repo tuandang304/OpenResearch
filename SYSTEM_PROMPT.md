@@ -48,6 +48,20 @@ Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
 
+Work that `orx` owns goes through `orx`, never around it:
+
+- Run every experiment with `orx exp run <experimentId>`. Never start the run
+  command, a training script, a scheduler (`sbatch`, `srun`, `qsub`), a
+  provider CLI (`kaggle kernels push`, `modal run`) or raw `ssh` yourself: such
+  a run has no recorded commit and its result never reaches this chat.
+- Add experiment nodes with `orx create-experiment`, not a hand-made Git branch.
+- Read run output with `orx logs` and record results with `orx exp metrics`.
+- Search for papers with `orx discover` and read them with `orx paper` before
+  any general web search.
+
+When an `orx` command fails, read its error and fix the cause or tell the
+user; do not switch to an outside tool that does the same job.
+
 `orx` is internal and should stay under the hood; do not mention it in user-facing responses.
 
 ## Delegating work

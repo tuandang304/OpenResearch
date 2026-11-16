@@ -181,6 +181,8 @@ The bridge endpoint grants permissions, so it takes a per-child token that each 
 
 Where an agent offers a hook or plugin, it stamps each shell command with the issuing model, so a run records which model launched it (`src/commands/invocation_gate.rs`).
 
+Experiments run only through `orx exp run`, so the playbook says so every turn, and Claude Code's shell hook denies a command that clearly launches compute around orx (a scheduler or provider job submission, or the project's own run command typed directly) with the `orx` command to use instead (`src/local/harness/launch_gate.rs`). Agents without a hook get only the playbook.
+
 ## Turns survive restarts
 
 A turn is a row with a state and a **delivery state**: its prompt was never sent, rejected, accepted, or of unknown fate. A running turn holds a per-chat lease with a heartbeat, which keeps one turn per chat and exposes a turn whose process died ([storage](storage.md)).
@@ -200,7 +202,7 @@ Queued messages are persisted before they are acknowledged and run in order as e
 
 Every agent whose harness takes an MCP server gets `orx mcp` (`src/commands/mcp.rs`, tools in `src/commands/up/agent_tools.rs`). It speaks stdio, the one transport every harness accepts, and relays to the owning dashboard, which knows the calling chat by a token derived from a key that lives only in that dashboard's process.
 
-Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versioned model, and orx picks a route unless the agent names one: the vendor's own agent first, then flat-rate plans, direct APIs, and resellers last. Every agent and provider spells a model differently, so routes join on a canonical id derived from each spelling (`src/local/model_routes.rs`). A model the user turns off in Settings, or just its free tier, offers delegates no route.
+Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versioned model, and orx picks a route unless the agent names one: the vendor's own agent first, then flat-rate plans, direct APIs, and resellers last. Every agent and provider spells a model differently, so routes join on a canonical id derived from each spelling (`src/local/model_routes.rs`). A model the user turns off in Settings, or just its free tier, offers delegates no route. With sub-agent limits on, `models` lists and `delegate` accepts only routes on an allowed harness and allowed model, and the harness's fixed effort replaces the one asked for (`src/local/delegation.rs`).
 
 **A delegate is a side chat of the chat that started it,** in the same worktree, unless it asks for its own and stands as an ordinary chat. It starts with only its task, runs with a permission mode no broader than its delegator's, and records who delegated to it, which counts its depth. A harness with no permission modes takes a delegate only from a chat that may do anything. Stopping a chat stops every delegate below it. A chat an agent starts without hearing from it is no delegate and stands as the user's. A retry finds the chat the first attempt started, by an id derived from the request.
 
