@@ -13,6 +13,8 @@
 //!
 //! Every substitution is reported back to the agent as a note, and the playbook
 //! lists the limits so the agent picks an allowed combination the first time.
+//! The `delegate` tool enforces them on routes instead ([`DelegationPolicy::delegate_route`]):
+//! `models` lists only allowed routes and a ruled-out model or route is refused.
 //! The limits apply only to chats agents create; the user's own chats, the
 //! composer and harness failover are unaffected. One exception the user opts
 //! into per harness: [`HarnessRule::subagent_model`] pins the model Claude Code
@@ -22,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::harness::REASONING_DEFAULT_ID;
+use super::model_routes::{self, Model, Route};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -328,6 +331,99 @@ impl DelegationPolicy {
         })
     }
 
+    /// The models and routes `delegate` may use: routes on a harness that is
+    /// off, or with a model outside its allowed list, are dropped, and so is
+    /// a model left with no route.
+    pub fn limit_routes(&self, mut models: Vec<Model>) -> Vec<Model> {
+        for model in &mut models {
+            model.routes.retain(|route| {
+                self.allows_harness(&route.harness)
+                    && self.allows_model(&route.harness, &route.model)
+            });
+        }
+        models.retain(|model| !model.routes.is_empty());
+        models
+    }
+
+    /// The route and effort a `delegate` call runs on within the limits.
+    /// `models` is every model the user's agents can run; a model or route
+    /// only the limits rule out is refused with what is allowed instead.
+    pub fn delegate_route(
+        &self,
+        models: &[Model],
+        model: &str,
+        route: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<(Route, Option<String>, Vec<String>), String> {
+        let allowed = self.limit_routes(models.to_vec());
+        let resolved = match model_routes::resolve(&allowed, model, route) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let Ok(blocked) = model_routes::resolve(models, model, route) else {
+                    return Err(error);
+                };
+                let what = match route {
+                    Some(route) => format!("`{}` on {route}", blocked.model),
+                    None => format!("`{model}`"),
+                };
+                let wanted = model_routes::canonical(model);
+                let others: Vec<String> = allowed
+                    .iter()
+                    .find(|candidate| candidate.id == wanted)
+                    .map(|candidate| candidate.routes.iter().map(|r| r.name.clone()).collect())
+                    .unwrap_or_default();
+                return Err(if !others.is_empty() {
+                    format!(
+                        "The user's sub-agent limits rule out {what}, so no chat was created. \
+                         `{wanted}` may run only on: {}.",
+                        others.join(", ")
+                    )
+                } else if allowed.is_empty() {
+                    format!(
+                        "The user's sub-agent limits rule out {what} and leave no model to \
+                         delegate to, so no chat was created. Do the work yourself, or ask the \
+                         user to allow one in Settings → Harnesses → Sub-agent limits."
+                    )
+                } else {
+                    format!(
+                        "The user's sub-agent limits rule out {what}, so no chat was created. \
+                         Call `models` for the models you may delegate to."
+                    )
+                });
+            }
+        };
+        let mut notes = Vec::new();
+        let asked = effort.map(str::trim).filter(|effort| !effort.is_empty());
+        let effort = match self
+            .active_rule(&resolved.harness)
+            .and_then(|rule| rule.effort.as_deref())
+        {
+            None => asked.map(str::to_string),
+            Some(fixed) => {
+                if asked.is_some_and(|asked| asked != fixed) {
+                    notes.push(format!(
+                        "Effort `{}` was replaced by `{fixed}`, the effort the user set for \
+                         sub-agent chats on {}.",
+                        asked.unwrap_or_default(),
+                        display(&resolved.harness)
+                    ));
+                }
+                if fixed == REASONING_DEFAULT_ID {
+                    None
+                } else if resolved.efforts.iter().any(|level| level == fixed) {
+                    Some(fixed.to_string())
+                } else {
+                    notes.push(format!(
+                        "`{}` on {} has no `{fixed}` effort; it runs at its default effort.",
+                        resolved.model, resolved.name
+                    ));
+                    None
+                }
+            }
+        };
+        Ok((resolved, effort, notes))
+    }
+
     /// The playbook bullet telling agents the limits, or `""` while they are off.
     pub fn playbook_bullet(&self, chat_harnesses: &[(&str, &str)]) -> String {
         if !self.enabled {
@@ -368,7 +464,8 @@ impl DelegationPolicy {
             .unwrap_or_default();
         format!(
             "\n- Sub-agent limits: **on** — chats you `delegate` to may run only on: {list}. \
-             Pick the model and `effort` from this list.{native}"
+             Pick the model and `effort` from this list; `models` lists only what it allows \
+             and `delegate` refuses anything else.{native}"
         )
     }
 }
@@ -716,6 +813,119 @@ mod tests {
             "{bullet}"
         );
         assert_eq!(DelegationPolicy::default().playbook_bullet(&[]), "");
+    }
+
+    fn route(harness: &str, name: &str, model: &str, efforts: &[&str]) -> Route {
+        Route {
+            profile: None,
+            name: name.into(),
+            harness: harness.into(),
+            model: model.into(),
+            free: false,
+            efforts: efforts.iter().map(|e| e.to_string()).collect(),
+        }
+    }
+
+    fn routed_models() -> Vec<Model> {
+        vec![
+            Model {
+                id: "claude-opus-5.5".into(),
+                routes: vec![
+                    route("claude-code", "claude-code", "opus", &["low", "high"]),
+                    route(
+                        "opencode",
+                        "openrouter",
+                        "openrouter/anthropic/claude-opus-5.5",
+                        &[],
+                    ),
+                ],
+            },
+            Model {
+                id: "gpt-6.1".into(),
+                routes: vec![route("codex", "codex", "gpt-6.1", &["medium", "xhigh"])],
+            },
+        ]
+    }
+
+    #[test]
+    fn delegate_cannot_reach_a_harness_or_model_the_limits_rule_out() {
+        let mut codex = HarnessRule::new("codex");
+        codex.allowed = false;
+        let mut opencode = HarnessRule::new("opencode");
+        opencode.models = vec!["openrouter/deepseek/deepseek-v4".into()];
+        let policy = policy(vec![codex, opencode]);
+        let models = routed_models();
+
+        let listed = policy.limit_routes(models.clone());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].routes.len(), 1);
+        assert_eq!(listed[0].routes[0].harness, "claude-code");
+
+        let refusal = policy
+            .delegate_route(&models, "gpt-6.1", None, None)
+            .unwrap_err();
+        assert!(refusal.contains("sub-agent limits"), "{refusal}");
+        let refusal = policy
+            .delegate_route(&models, "claude-opus-5.5", Some("openrouter"), None)
+            .unwrap_err();
+        assert!(refusal.contains("claude-code"), "{refusal}");
+
+        let (route, _, notes) = policy
+            .delegate_route(&models, "claude-opus-5.5", None, None)
+            .unwrap();
+        assert_eq!(route.harness, "claude-code");
+        assert!(notes.is_empty());
+
+        // A model nobody can run keeps its own error, not a limits refusal.
+        let unknown = policy
+            .delegate_route(&models, "nonexistent-9", None, None)
+            .unwrap_err();
+        assert!(!unknown.contains("sub-agent limits"), "{unknown}");
+    }
+
+    #[test]
+    fn delegate_with_limits_off_or_none_left() {
+        let models = routed_models();
+        let (route, effort, _) = DelegationPolicy::default()
+            .delegate_route(&models, "gpt-6.1", None, Some("xhigh"))
+            .unwrap();
+        assert_eq!(route.harness, "codex");
+        assert_eq!(effort.as_deref(), Some("xhigh"));
+
+        let off = ["claude-code", "codex", "opencode"].map(|id| {
+            let mut rule = HarnessRule::new(id);
+            rule.allowed = false;
+            rule
+        });
+        let policy = policy(off.to_vec());
+        assert!(policy.limit_routes(models.clone()).is_empty());
+        let refusal = policy
+            .delegate_route(&models, "gpt-6.1", None, None)
+            .unwrap_err();
+        assert!(refusal.contains("Settings"), "{refusal}");
+    }
+
+    #[test]
+    fn delegate_runs_at_the_fixed_effort() {
+        let mut codex = HarnessRule::new("codex");
+        codex.effort = Some("medium".into());
+        let mut claude = HarnessRule::new("claude-code");
+        claude.effort = Some("max".into());
+        let policy = policy(vec![codex, claude]);
+        let models = routed_models();
+
+        let (_, effort, notes) = policy
+            .delegate_route(&models, "gpt-6.1", None, Some("xhigh"))
+            .unwrap();
+        assert_eq!(effort.as_deref(), Some("medium"));
+        assert_eq!(notes.len(), 1);
+
+        // A fixed effort the route lacks runs at the default, and says so.
+        let (_, effort, notes) = policy
+            .delegate_route(&models, "claude-opus-5.5", None, None)
+            .unwrap();
+        assert_eq!(effort, None);
+        assert_eq!(notes.len(), 1);
     }
 
     #[test]
