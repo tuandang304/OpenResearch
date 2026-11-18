@@ -111,7 +111,7 @@ pub async fn colab_launch_spec(
         archive: &source.path,
         timeout_secs,
         env_keys: forwarded_env_keys(run_id),
-    });
+    })?;
     let files = [
         (crate::jobs::colab::CONTROLLER_FILE.to_string(), controller),
         (
