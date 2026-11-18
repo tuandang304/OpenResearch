@@ -2,7 +2,8 @@
 //!
 //! Every account lives in its own folder under the orx data dir, which the
 //! `colab` CLI sees as its home (`HOME`), so it keeps that account's sign-in
-//! (`.config/colab-cli/token.json`) and session list there. Accounts never
+//! (`.config/colab-cli/token.json`, or the file orx's keyring backend keeps for
+//! CLIs that use a keyring) and session list there. Accounts never
 //! mix, and the CLI's own sign-in in `~/.config/colab-cli` is left alone; it
 //! is imported once as the first account, so runs that worked before keep
 //! working. Folders are readable by the owner only, and orx never prints or
@@ -29,7 +30,7 @@ use tokio::sync::Mutex;
 use super::colab::{find_cli, Flavor, INSTALL_HINT};
 use super::colab_account::Account;
 use super::colab_runtimes::Runtime;
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 
 pub const ADD_ACCOUNT_HINT: &str =
     "Add a Google account for Colab in Settings → Compute → Colab, or run `orx compute connect colab`.";
@@ -71,9 +72,73 @@ pub fn account_home(id: &str) -> PathBuf {
     root().join("accounts").join(id)
 }
 
-/// The CLI's sign-in file under a home folder.
+/// The CLI's sign-in file under a home folder: where orx's keyring keeps it
+/// for a CLI that stores tokens in a keyring, else the older CLIs' file.
 pub fn token_file(home: &Path) -> PathBuf {
+    let keyring = keyring_token_file(home);
+    if keyring.is_file() {
+        keyring
+    } else {
+        legacy_token_file(home)
+    }
+}
+
+fn legacy_token_file(home: &Path) -> PathBuf {
     home.join(".config/colab-cli/token.json")
+}
+
+/// Kept in step with `KEYRING_BACKEND`.
+fn keyring_token_file(home: &Path) -> PathBuf {
+    home.join(".config/colab-cli/orx-keyring-token.json")
+}
+
+/// A Python `keyring` backend for the CLI (0.8 and later keeps its token in a
+/// keyring): one file in the account's home, so accounts never share the OS
+/// keyring's single entry and sign-in works where no keyring exists.
+const KEYRING_BACKEND: &str = r#"import os
+from keyring.backend import KeyringBackend
+from keyring.errors import PasswordDeleteError
+
+def _path():
+    return os.path.expanduser("~/.config/colab-cli/orx-keyring-token.json")
+
+class Keyring(KeyringBackend):
+    priority = 1
+
+    def get_password(self, service, username):
+        try:
+            with open(_path()) as f:
+                return f.read() or None
+        except FileNotFoundError:
+            return None
+
+    def set_password(self, service, username, password):
+        path = _path()
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(password)
+        os.replace(tmp, path)
+
+    def delete_password(self, service, username):
+        try:
+            os.remove(_path())
+        except FileNotFoundError:
+            raise PasswordDeleteError("No Colab sign-in to delete.")
+"#;
+
+/// The folder holding `orx_colab_keyring.py`, written on every call so an
+/// update to the backend reaches existing installs.
+fn keyring_backend_dir() -> Result<PathBuf> {
+    let dir = root().join("python");
+    create_private_dir(&dir)?;
+    let file = dir.join("orx_colab_keyring.py");
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(KEYRING_BACKEND) {
+        crate::local::git::atomic_write_with_mode(&file, KEYRING_BACKEND.as_bytes(), Some(0o600))
+            .with_context(|| format!("Could not write {}", file.display()))?;
+    }
+    Ok(dir)
 }
 
 /// The user's real home, where the CLI keeps its own sign-in.
@@ -382,7 +447,16 @@ async fn finish_pending(home: &Path) -> Result<AccountStatus> {
     }
     let target = account_home(&id);
     if token_file(&target).is_file() {
-        std::fs::rename(token_file(home), token_file(&target))
+        let source = token_file(home);
+        let stale = [keyring_token_file(&target), legacy_token_file(&target)];
+        for file in &stale {
+            if file.is_file() {
+                std::fs::remove_file(file)
+                    .map_err(|e| anyhow!("Could not replace the old Colab sign-in: {e}"))?;
+            }
+        }
+        let dest = target.join(source.strip_prefix(home).expect("token under home"));
+        std::fs::rename(&source, dest)
             .map_err(|e| anyhow!("Could not save the Colab sign-in: {e}"))?;
     } else {
         let _ = std::fs::remove_dir_all(&target);
@@ -420,8 +494,22 @@ async fn finish_pending(home: &Path) -> Result<AccountStatus> {
 
 /// The environment that makes the CLI use `home` as its home. A `pip install
 /// --user` CLI finds its packages through `HOME`, so the real user base stays.
-pub fn account_env(home: &Path) -> Vec<(&'static str, String)> {
+pub fn account_env(home: &Path) -> Result<Vec<(&'static str, String)>> {
     let mut env = vec![("HOME", home.to_string_lossy().into_owned())];
+    let mut python_path = vec![keyring_backend_dir()?];
+    python_path.extend(
+        std::env::var_os("PYTHONPATH")
+            .iter()
+            .flat_map(std::env::split_paths),
+    );
+    env.push((
+        "PYTHONPATH",
+        std::env::join_paths(python_path)
+            .context("Could not build PYTHONPATH for the Colab CLI")?
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    env.push(("PYTHON_KEYRING_BACKEND", "orx_colab_keyring.Keyring".into()));
     if std::env::var_os("PYTHONUSERBASE").is_none() {
         if let Some(real) = cli_home() {
             env.push((
@@ -430,16 +518,14 @@ pub fn account_env(home: &Path) -> Vec<(&'static str, String)> {
             ));
         }
     }
-    env
+    Ok(env)
 }
 
-fn command(cli: &Path, home: &Path) -> tokio::process::Command {
+fn command(cli: &Path, home: &Path) -> Result<tokio::process::Command> {
     let mut command = crate::process::tokio_command(cli);
-    for (key, value) in account_env(home) {
-        command.env(key, value);
-    }
+    command.envs(account_env(home)?);
     command.kill_on_drop(true);
-    command
+    Ok(command)
 }
 
 /// Any authenticated command makes the CLI sign in first; listing sessions
@@ -458,7 +544,7 @@ pub async fn login_interactive() -> Result<AccountStatus> {
     let home = pending_home();
     create_private_dir(&home)?;
     eprintln!("Sign in with the Google account to add. If the browser is already signed in to another account, pick or add the right one on Google's account page.");
-    let status = command(&cli, &home)
+    let status = command(&cli, &home)?
         .args(SIGN_IN_ARGS)
         .stdin(std::process::Stdio::inherit())
         .status()
@@ -522,7 +608,7 @@ pub async fn login_start() -> Result<LoginStart> {
     }
     let home = pending_home();
     create_private_dir(&home)?;
-    let mut child = match command(&cli, &home)
+    let mut child = match command(&cli, &home)?
         .args(SIGN_IN_ARGS)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -642,6 +728,10 @@ pub async fn login_finish(id: &str, code: &str) -> Result<AccountStatus> {
     let signed_in = token_file(&login.home).is_file();
     let result = match status {
         Ok(Ok(_)) | Err(_) if signed_in => finish_pending(&login.home).await,
+        Ok(Ok(exit)) if exit.success() => Err(anyhow!(
+            "The Colab CLI signed in but saved no sign-in orx can read: {}",
+            last_line(&login.output).unwrap_or_else(|| "no reason given".into())
+        )),
         Ok(Ok(_)) => Err(anyhow!(
             "Google did not accept that code: {}",
             last_line(&login.output).unwrap_or_else(|| "no reason given".into())
@@ -730,6 +820,75 @@ mod tests {
             balance: Some(balance),
             ..Account::default()
         }
+    }
+
+    #[test]
+    fn the_cli_keyring_keeps_each_sign_in_in_its_account_home() {
+        let Some(python) = crate::local::shell_env::find_on_path("python3") else {
+            crate::config::skip_without_tool("python3");
+            return;
+        };
+        let tmp = crate::config::test_root().join(uuid::Uuid::new_v4().to_string());
+        // A stand-in for the `keyring` package the CLI ships with.
+        let fake = tmp.join("fake");
+        std::fs::create_dir_all(fake.join("keyring")).unwrap();
+        std::fs::write(fake.join("keyring/__init__.py"), "").unwrap();
+        std::fs::write(
+            fake.join("keyring/backend.py"),
+            "class KeyringBackend: pass\n",
+        )
+        .unwrap();
+        std::fs::write(
+            fake.join("keyring/errors.py"),
+            "class PasswordDeleteError(Exception): pass\n",
+        )
+        .unwrap();
+        let home = tmp.join("home");
+        std::fs::create_dir_all(legacy_token_file(&home).parent().unwrap()).unwrap();
+        std::fs::write(legacy_token_file(&home), "{}").unwrap();
+        assert_eq!(token_file(&home), legacy_token_file(&home));
+
+        let mut env = account_env(&home).unwrap();
+        let backend = env
+            .iter()
+            .find(|(key, _)| *key == "PYTHON_KEYRING_BACKEND")
+            .map(|(_, value)| value.clone())
+            .unwrap();
+        let (module, class) = backend.split_once('.').unwrap();
+        for (key, value) in &mut env {
+            if *key == "PYTHONPATH" {
+                *value = std::env::join_paths(std::env::split_paths(value).chain([fake.clone()]))
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+            }
+        }
+        let script = format!(
+            "import {module}; k = {module}.{class}(); \
+             assert k.get_password('google-colab-cli', 'oauth_token') is None; \
+             k.set_password('google-colab-cli', 'oauth_token', '{{\"token\": \"t\"}}'); \
+             print(k.get_password('google-colab-cli', 'oauth_token'))"
+        );
+        let out = crate::process::command(python)
+            .arg("-c")
+            .arg(script)
+            .envs(env)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            r#"{"token": "t"}"#
+        );
+        assert_eq!(token_file(&home), keyring_token_file(&home));
+        assert_eq!(
+            std::fs::read_to_string(token_file(&home)).unwrap(),
+            r#"{"token": "t"}"#
+        );
     }
 
     #[test]

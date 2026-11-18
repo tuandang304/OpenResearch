@@ -445,7 +445,7 @@ fn remote_archive_name(archive: &Path) -> String {
 
 /// The bash controller that drives one run (see the module docs). Run again
 /// after it died, it skips straight to following the run.
-pub fn controller_script(spec: &ControllerSpec<'_>) -> String {
+pub fn controller_script(spec: &ControllerSpec<'_>) -> Result<String> {
     use crate::jobs::ssh::sh_quote;
     let new_args = spec
         .flavor
@@ -461,7 +461,7 @@ pub fn controller_script(spec: &ControllerSpec<'_>) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join(" ");
-    let account_env = super::colab_accounts::account_env(spec.home)
+    let account_env = super::colab_accounts::account_env(spec.home)?
         .into_iter()
         .map(|(key, value)| format!("export {key}={}", sh_quote(&value)))
         .collect::<Vec<_>>()
@@ -475,7 +475,7 @@ pub fn controller_script(spec: &ControllerSpec<'_>) -> String {
         String::new()
     };
     let remote_archive = remote_archive_name(spec.archive);
-    CONTROLLER_TEMPLATE
+    Ok(CONTROLLER_TEMPLATE
         .replace("__CLI__", &sh_quote(&spec.cli.to_string_lossy()))
         .replace("__ACCOUNT_ENV__", &account_env)
         .replace("__SESSION__", &sh_quote(spec.session))
@@ -502,7 +502,7 @@ pub fn controller_script(spec: &ControllerSpec<'_>) -> String {
         .replace("__TIMEOUT__", &spec.timeout_secs.to_string())
         .replace("__ENV_KEYS__", &env_keys)
         .replace("__DRIVER__", &sh_quote(DRIVER_FILE))
-        .replace("__DEADLINE__", super::SHELL_DEADLINE)
+        .replace("__DEADLINE__", super::SHELL_DEADLINE))
 }
 
 const CONTROLLER_TEMPLATE: &str = r#"#!/usr/bin/env bash
@@ -1035,6 +1035,7 @@ mod tests {
             timeout_secs: 3600,
             env_keys: vec!["HF_TOKEN".into(), "BAD;KEY".into()],
         })
+        .unwrap()
     }
 
     #[test]
@@ -1085,7 +1086,8 @@ mod tests {
             archive: Path::new("/data/source-snapshots/0123.tar"),
             timeout_secs: 20 * 3600,
             env_keys: vec![],
-        });
+        })
+        .unwrap();
         assert!(
             script.contains("Colab ends a runtime after 12 hours"),
             "{script}"
@@ -1197,7 +1199,8 @@ esac
                 archive: &archive,
                 timeout_secs: 600,
                 env_keys: vec!["ORX_TEST_SECRET".into()],
-            });
+            })
+            .unwrap();
             std::fs::write(dir.join(CONTROLLER_FILE), controller).unwrap();
             std::fs::write(
                 dir.join(DRIVER_FILE),
