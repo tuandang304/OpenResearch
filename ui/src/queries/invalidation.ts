@@ -21,7 +21,7 @@ export function isImmutableQuery(query: Query) {
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
-const liveFamilies = ["getSessionExperiments", "getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", "getUsage", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
+export const liveFamilies = ["getSessionExperiments", "getSubagentTranscript", "listChatShownRuns", "getRunMonitor", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", "getUsage", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
 
 const settingsFamilies: Record<string, readonly string[]> = {
   hf: ["getHfSettings", "getComputeSettings", "getEnvVars", "getTrackioRuns"],
@@ -176,6 +176,8 @@ export function createInvalidation(client: WorkspaceClient) {
     }
     if (path.startsWith("/api/chat/")) {
       invalidate(["listSidebarChatSessions"], scope);
+      // An env card's answer saves variables.
+      if (path.endsWith("/respond")) invalidate(["getEnvVars"], scope);
       if (path === "/api/chat/sessions") invalidate(["getProjectStarterPrompts", "listProjectActivity"], scope);
       return;
     }

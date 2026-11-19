@@ -1,14 +1,14 @@
 # Where state lives
 
-orx keeps a researcher's work on their own machine. Projects, experiments, runs, chats and transcripts pass through no service, so the copy on disk is the only one, and every orx process on the machine reads and writes it at once: the dashboard and its run engine, the desktop app, a terminal `orx`, an agent's `orx`, a supervisor an older orx left watching a job.
+orx keeps a researcher's work on their own machine. Projects, experiments, runs, chats and transcripts are kept nowhere else ([what leaves the machine](#what-leaves-the-machine) lists what is sent, and when), so the copy on disk is the only one, and every orx process on the machine reads and writes it at once: the dashboard and its run engine, the desktop app, a terminal `orx`, an agent's `orx`, a supervisor an older orx left watching a job.
 
 ## Three directories
 
 | Directory | Location | Holds |
 | --- | --- | --- |
 | config | `$XDG_CONFIG_HOME/openresearch`, else `~/.config/openresearch` | `settings.json`, credentials for openresearch.sh, alphaXiv and Overleaf, the SSH hosts saved in orx (`ssh/`), the telemetry outbox, the locks that cover the data directory as a whole |
-| data | resolved below | `orx.db`, `repos/`, `worktrees/`, `agents/`, `run-logs/`, `files/`, `chat-attachments/`, per-run state |
-| cache | `ORX_CACHE_DIR`, the `cacheDir` setting, else `~/.cache/openresearch` | orx's managed agent copies, the model price list, and the legacy repository root, which [migrations](#migrations-follow-paths) empty |
+| data | resolved below | `orx.db`, `repos/`, `scratch/`, `worktrees/`, `agents/`, `run-logs/`, `files/`, `chat-attachments/`, per-run state |
+| cache | `ORX_CACHE_DIR`, the `cacheDir` setting, else `~/.cache/openresearch` | orx's managed agent copies, the model price list, the last model feed, and the legacy repository root, which [migrations](#migrations-follow-paths) empty |
 
 **The data directory is one relocatable unit.** Its location resolves, most to least authoritative, from `ORX_DATA_DIR`, the `dataDir` in `settings.json`, `$XDG_DATA_HOME/openresearch`, and `~/.local/share/openresearch`. The setting is read fresh on every resolution, so a process opening the store after a move sees the new place. The directory is owner-only because the store holds scoped compute capabilities. The desktop app imports these overrides from the login shell, or it and a terminal `orx` would open different databases ([desktop](desktop.md)).
 
@@ -18,7 +18,7 @@ OpenCode provider records (`opencode-providers.json`, including API keys) stay i
 
 Saved SSH passwords and key passphrases sit in the system's credential store (Keychain, Credential Manager, the Secret Service), one item per host alias, never in a file ([remote](remote.md#saved-hosts)).
 
-`~/.openresearch/env` sits outside all three. It holds the variables and compute credentials saved in compute settings and fans out to agents and launched runs (`src/config.rs`), so a secret that must stay on this machine, like Overleaf's, belongs in the config directory.
+`~/.openresearch/env` sits outside all three. It holds the variables and compute credentials saved in compute settings and fans out to agents and launched runs (`src/config.rs`), so a secret that must stay on this machine, like Overleaf's, belongs in the config directory. A project's own variables live in the store and override the file for that project's agents and runs; descriptions of both live in the store too, so the file keeps the one format shells and older versions read.
 
 ## The store
 
@@ -56,6 +56,10 @@ Removable managed installs also ignore hidden-agent settings.
 
 A project is a Git repository anywhere on disk, the user's own or one orx cloned into `repos/`; the store records only its path. orx shells out to `git` rather than embedding a Git library, so every repository stays readable with ordinary tools (`src/local/git.rs`). Each chat works in its own worktree under `worktrees/<project>/<session>`, so agents never edit the user's checkout. [Experiments](experiments.md) covers how branches relate.
 
+**A chat without a project is a project orx keeps for it.** Its repository lives under `scratch/<project>`, and that location is what marks it: the store has no flag, so an older orx shows it as an ordinary project named "No project". Creating the project from the chat fast-forwards the baseline to the chat's commits, moves the repository to the folder the user picked and repairs the worktree links, all while every chat of the project is idle; a failure after the move moves it back. orx commits nothing: uncommitted files stay in the chat's worktree. The project keeps its id, its chats and its artifacts folder, so links in earlier messages keep working. Deleting the last chat deletes the scratch project and its repository (`src/local/projects.rs`).
+
+A chat in a project can move into a new one the same way: its latest commit is pushed as the new repository's `main` with the history behind it, and its worktree folder moves whole and is registered with the new repository, so uncommitted and ignored files stay as they were; the old project keeps its history, experiments and artifacts. A request made while a chat involved runs is kept in `chat_project_moves` and carried out once they are idle, which survives a restart (`src/local/chat/project_move.rs`).
+
 Per-project artifacts are a plain folder, `files/<project slug>/` (`src/local/files.rs`). The filesystem is their truth: there is no registry and no upload step, and every path the API accepts must resolve inside the folder once symlinks are followed.
 
 ## Run logs are files
@@ -68,7 +72,8 @@ Claude Code, Codex and Cursor use isolated homes; OpenCode uses its own session 
 Claude Code and Codex profiles keep private sign-ins under `agents/profiles`,
 with their names and icons in owner-only `agent-profiles.json`; their transcript
 directories link into the harness's shared orx home. Owner-only `agent-labels.json`
-stores names and icons the user gives agents found on this computer. Removing a profile leaves
+stores names and icons the user gives agents and OpenCode providers found on this
+computer, and the logo pinned on any row. Removing a profile leaves
 those transcripts intact. Chats created before isolation existed keep resolving
 to the user's own stores. Because these homes hold live SQLite files, a
 data-directory move first shuts down every idle agent process.
@@ -119,21 +124,28 @@ Detection repeats on every start, so an interrupted rename or reference repair r
 
 **Code, experiments, runs, logs, chats, transcripts and artifacts go to openresearch.sh only when the user publishes a project.** Otherwise its API serves accounts, organizations, SSH keys, sandboxes and compute catalogs, plus the telemetry and feedback below. A test keeps research-state endpoints other than publishing out of `src/client.rs`; `src/jobs/rental.rs`, the box's `orx-host` and `src/telemetry.rs` call the API beyond that test's reach. Other traffic:
 
-- **Compute.** Work the user launches goes to the backend they chose as a source snapshot and the run's environment, on most backends all of `~/.openresearch/env` plus any configured Hugging Face token; logs and metrics come back. An OpenResearch box is provisioned through the API, and the snapshot reaches it over SSH. Compute settings check saved credentials against their providers.
+- **Compute.** Work the user launches goes to the backend they chose as a source snapshot and the run's environment. On most backends this includes `~/.openresearch/env`, the project's overrides and any configured Hugging Face token. Hugging Face Jobs receives its token and Trackio settings from the saved environment. Logs and metrics come back. The dashboard and CLI read Trackio at the project's saved destination. For a Trackio Space, they use the project's Hugging Face token when saved, with the configured account as a fallback. An OpenResearch box is provisioned through the API, and the snapshot reaches it over SSH. Compute settings check saved credentials against their providers.
 - **Checkpoint storage.** Only when the user saves an rclone remote (`orx compute checkpoints set` or the compute settings) do Google Cloud and Modal runs receive that remote's section of their rclone config, credentials included, and copy `$ORX_CHECKPOINT_DIR` to it from the run machine. The laptop sends no checkpoint bytes itself ([experiments](experiments.md#checkpoints)).
 - **The SSH public key.** Signing in uploads nothing. Only when the user adds a key, from the OpenResearch compute settings, `orx compute connect openresearch` or `orx ssh-key add`, does orx send a public key to their account: by default `~/.ssh/id_ed25519.pub`, creating the pair if it is missing. The private key never leaves the machine.
 - **Remote network check.** Setting up Claude Code on a remote machine without an API key asks `ipaddress.to`, from that machine, for its public IP and hosting classification. Only the source IP reaches that service, and a failed lookup never blocks setup.
 - **Paper search.** Queries and paper identifiers go to the public alphaXiv, OpenAlex, bioRxiv and PubMed APIs, without credentials, except an `OPENALEX_API_KEY` the user sets, which goes to OpenAlex. Paper PDFs come from arXiv or alphaXiv.
 - **alphaXiv sign-in.** A browser trip to alphaXiv, whose identity token orx hands to openresearch.sh for its own token, or, with `orx login --alphaxiv`, to link the signed-in account. alphaXiv's tokens stay owner-only in the config directory and read the user's folders and papers; the laptop forwards its access token, never the refresh token, to the SSH hosts attached to it ([remote](remote.md)). orx also reads the user's public profile, followed topics and researcher card: the dashboard shows the avatar alphaXiv names, and blank-project starter prompts are briefed from the profile, so it reaches the agent's model provider. The library picker loads thumbnails from alphaXiv's public asset CDN.
 - **alphaXiv agent tools.** `orx alphaxiv-mcp` forwards research tool calls to alphaXiv, anonymously while signed out; signed in, it also reads library notes and highlights and, when requested, creates folders and saves papers. Tool arguments (research queries, paper and researcher identifiers, GitHub repository paths, folder identifiers and names) reach alphaXiv; results enter the agent's context and reach its model provider. The proxy sends no transcript, project files, experiments or logs of its own.
-- **Telemetry.** Official builds send opt-out usage events to the first-party API under a random install ID that is not tied to an account: commands run; product events such as chats, messages, skills, experiments and retries, with the harness and coarse backend, plus the chat's Agentic/Copilot setting on messages; harness detection and setup states; token usage per turn with model and provider labels when reported; and a research profile, including the area and background text the user typed, when an older onboarding submits one. ACP telemetry identifies known agent presets and groups other definitions as custom. Source builds send nothing. Events queue in an outbox in the config directory and send in the background, so telemetry never blocks or fails a command. An `orx` command run inside a chat queues its events in the store instead and leaves sending to `orx up`, since an agent's sandbox may report a command as failed when its exit cuts off a proxied send. A change of the telemetry choice is itself recorded, so opt-outs are visible.
+- **Telemetry.** Official builds send opt-out usage events to the first-party API under a random install ID that is not tied to an account: commands run; product events such as chats, messages, skills, experiments and retries, with the harness and coarse backend, plus the chat's Agentic/Copilot setting on messages; harness detection and setup states (a failed install or update can name the step that failed: vendor release lookup, the agent's own updater, or installation of a managed copy); models picked in the model picker and the popups on its button, with the model ID and agent; token usage per turn with model and provider labels when reported; and a research profile, including the area and background text the user typed, when an older onboarding submits one. ACP telemetry identifies known agent presets and groups other definitions as custom. Source builds send nothing. Events queue in an outbox in the config directory and send in the background, so telemetry never blocks or fails a command. An `orx` command run inside a chat queues its events in the store instead and leaves sending to `orx up`, since an agent's sandbox may report a command as failed when its exit cuts off a proxied send. A change of the telemetry choice is itself recorded, so opt-outs are visible.
+  Managed-install failures also include fixed diagnostic phrases, never raw installer output.
+- **Interrupted setup commands.** If an in-flight setup task ends before its command returns, its interruption event includes a fixed diagnostic, never command output.
 - **Feedback.** `orx feedback` sends an agent-written report to the first-party API: a summary, details, an optional quote, and context including the harness, the model it last ran, chat session ID, versions, OS and install ID. The telemetry opt-out stops it. Signed in, the report also carries the account token, which ties that install ID to the account. `agent-skills/orx-feedback/` tells agents what to leave out.
+- **Chat retry telemetry.** When chat setup retries run out, the event records a fixed reason such as sign-in, process startup or initialization, never the local error text.
 - **Sharing.** Nothing leaves on its own: sharing writes a `.orx` file the user sends themselves (`src/local/share.rs`), holding a Git bundle of the baseline and experiment branches, the experiment tree, finished runs without their descriptors, their logs, the artifacts and the chats the user left ticked. A chat, log or artifact that looks like a credential refuses the share; the code is not scanned, since it is what the user chose to send. An opened file becomes a new project with no remote, and its runs carry the backend kind `imported`, which nothing launches, watches or cleans up.
 - **Published projects.** Publishing, from the Share dialog or `orx project share --publish`, uploads exactly the file sharing would write, after the same scan, to openresearch.sh, which serves it to anyone with the link until the publisher deletes it. The upload names the local project ID, so publishing again replaces the file behind the same link.
 - **Updates.** Each surface checks GitHub releases on its own schedule ([desktop](desktop.md)).
 - **Prices.** Once a day `orx up` downloads models.dev's public model price list (`models.dev/api.json`) into the cache directory, keeping the last good copy when a fetch fails. When a run starts on a backend that bills, the engine reads its price: Hugging Face's public hardware list, the Modal workspace's rates through Modal's SDK with the user's token, or the box's own price from openresearch.sh. The requests carry no research data, and costs never go to telemetry.
+- **Run watching.** Run watching, on by default when a watching model is selected, sends a bounded digest of a chat's runs to that model's provider when something about them changes or a look is asked for: each run's label, experiment, state, progress, stages and estimate; its signal values with recent points and how each compares with the parent, the parent's name and kinds of warning, and pattern match counts; selected log lines, which can quote code or data; the brief the agent wrote, why the look started, the flags someone kept going after with their reasons; the watcher's own earlier sentences and notes; and the dashboard's language. It sends no full chat, repository or whole log. Turn it off in Settings. The model is the chat's own agent's cheap one (Claude Code's Haiku, Codex's GPT Luna), run as a one-shot with no tools, and every field of the request passes the credential scan sharing uses, as written and before it is clipped: a log line or field that matches is left out, the look goes on without it, and the journal tells the user once where it was ([experiments](experiments.md)).
 - **Plan usage.** For each Claude Code and Codex sign-in that may be on a subscription, `orx up` asks the user's own agent how much of the plan is left: Claude Code's `get_usage` and Codex's `account/rateLimits/read` reach Anthropic and OpenAI with the user's sign-in, when the dashboard asks (at most once a minute per account unless the user refreshes) and when a running chat's limits move ([agents](agents.md)). The answer stays in `orx up`'s memory.
-- **Agent releases.** Once a day `orx up` asks downloads.claude.ai, releases.openai.com and registry.npmjs.org for the newest release of whichever of Claude Code, Codex and OpenCode is installed (skipping one signed out on every account), and downloads one when it installs or updates a copy of its own ([agents](agents.md)); the onboarding installs OpenCode that way unasked while it is missing, for its free models. The requests carry no account or research data. Built-in agents additionally fetch Node.js releases
+- **Cursor sign-in diagnostics.** When telemetry is enabled, an unsuccessful sign-in verification can report a fixed status-probe failure category to the first-party API. The probe's output and account details are never sent.
+- **Model feed.** Every `orx up`, a remote host's included, asks openresearch.sh for the model feed when it starts and every six hours: the models the picker features, its nudge, and the release days of models models.dev lists as new. The request carries no credentials, account, install ID or research data, and the answer is kept in the cache directory as served.
+- **Hosted free models.** The feed can name OpenAI-compatible endpoints whose models are free to everyone, each with a public key. While free models are on, OpenCode gets each as a provider, and a chat on one of its models sends its turns to that endpoint as it would to any provider. An endpoint at openresearch.sh or alphaxiv.org, or a subdomain of either, also receives the signed-in user's alphaXiv user ID in `X-OpenResearch-User`; no other host does, and no email or token goes with it.
+- **Agent releases.** Once a day `orx up` asks downloads.claude.ai, releases.openai.com and registry.npmjs.org for the newest release of whichever of Claude Code, Codex and OpenCode is installed (skipping one signed out on every account), and downloads one when it installs or updates a copy of its own ([agents](agents.md)); `orx up` installs OpenCode that way unasked while it is missing or on major 1, for its free models. The requests carry no account or research data. Built-in agents additionally fetch Node.js releases
   and SHA-256 lists from nodejs.org, package metadata and integrity-checked npm
   packages from registry.npmjs.org (native package dependencies may fetch release
   assets from github.com, api.github.com and release-assets.githubusercontent.com),
@@ -149,3 +161,42 @@ Detection repeats on every start, so an interrupted rename or reference repair r
   and cache; no user npm configuration or global prefix is used.
 - **Installers the user starts.** Git for Windows comes from GitHub (`src/local/portable_git.rs`).
 - **Integrations the user turns on.** Creating a project from a GitHub URL, which also asks GitHub's public API for its size; publishing to GitHub; syncing a paper with Overleaf, through its Git bridge or its live editor channel with the user's browser session cookie; Trackio metrics; and the agents' own model providers, which the agent talks to directly. Adding a custom endpoint also asks it, with its key, for its model list.
+
+## Signal checkpoints
+
+The owner-only file `run-signals/<run>.json` commits raw carry, cursor and
+aggregates together by syncing a temporary file, renaming it and syncing its
+directory. Its nonblocking per-run lock returns WouldBlock on contention.
+A failed publication leaves the previous committed cursor available for replay.
+
+Signal debt is independent of log debt and gates host cleanup until it
+settles. While the host has the run, its checkpoint is the answer. Once the
+host cannot be asked, the laptop continues that checkpoint over the log it
+kept where that reaches its cursor, and settles as incomplete only for
+reported signals the kept log lacks or that nothing kept. Another generation
+replaces a checkpoint with signals only when it covers at least the same
+bytes; until then it is kept in `<run>.replay`, which resumes across passes
+and restarts, and the held one stands, marked `rebuilding`, or `log_replaced`
+once the other ended short. A promoted rebuild carries a `log_replaced`
+diagnostic; a host gone mid-rebuild leaves it to go on over the kept log where
+that reaches as far. The staging file goes with the first publication of a
+checkpoint not rebuilding. `hostGone` keeps how the host went, which a
+settlement names over any earlier failure.
+A run that never reported a signal settles quietly.
+The owner-only `<run>.status.json` keeps the specific cause and the laptop's
+last successful collection time. The checkpoint's `updatedAt` is the host
+data time; status labels both. `clock` is `[host, laptop]`: the host's clock
+in the last answer a successful collection accepted and the laptop's time of
+receipt. It carries the checkpoint's host times onto the laptop's clock and
+moves at most once a minute while nothing changes; a run folded on the laptop
+has none.
+
+Sharing can include `signals/<run>.json` when logs are selected, after the
+credential scan. Import rewrites the local run ID when the file is present.
+Folded data leaves the machine only in that file and in run watching's digests ([above](#what-leaves-the-machine)).
+
+Component bounds keep current snapshots below the 16 MiB publication cap.
+The worst-case serialization test reserves the 2 MiB row budget and 2 MiB
+for cursor, retained timing, phases, diagnostics and bounded error metadata.
+New reducers and cell stores must preserve that guarantee or reduce
+deterministically before publication.

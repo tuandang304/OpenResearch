@@ -258,11 +258,23 @@ fn is_readonly_producer(stage: &str) -> bool {
 
 /// True iff the stage runs one of the [`PURE_CONSUMERS`]. Args are arbitrary:
 /// redirection/substitution/background were already rejected per-token, and
-/// none of these programs writes without a redirect.
+/// none of these programs writes without a redirect, bar the two that take an
+/// output file as an argument.
 fn is_pure_consumer(tokens: &[&str]) -> bool {
-    match tokens.first() {
-        Some(program) => PURE_CONSUMERS.contains(program),
-        None => false,
+    let Some((program, args)) = tokens.split_first() else {
+        return false;
+    };
+    match *program {
+        // `-o`/`--output` writes a file and `--compress-program` runs one. Any
+        // short cluster holding `o` and any `--o…`/`--co…` abbreviation gates.
+        "sort" => !args.iter().any(|arg| {
+            arg.starts_with("--o")
+                || arg.starts_with("--co")
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('o'))
+        }),
+        // A second operand is the file it writes.
+        "uniq" => args.iter().filter(|arg| !arg.starts_with('-')).count() <= 1,
+        program => PURE_CONSUMERS.contains(&program),
     }
 }
 
@@ -315,11 +327,28 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
                     })))
                 )
         }
+        "agents" => matches!(
+            <crate::Cli as clap::Parser>::try_parse_from(tokens).map(|cli| cli.command),
+            Ok(Some(crate::Command::Agents(crate::AgentsArgs {
+                command: None,
+                ..
+            })))
+        ),
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
         "project" | "results" => matches!(subcommand(&mut rest), Some("view")),
         "exp" => match subcommand(&mut rest) {
+            Some("run") => {
+                use clap::Parser;
+                matches!(crate::Cli::try_parse_from(tokens), Ok(crate::Cli {
+                    command: Some(crate::Command::Exp(crate::ExpArgs {
+                        command: crate::ExpCommand::Run(args),
+                    })), ..
+                }) if args.estimate)
+            }
             // Pure reads.
             Some("status" | "wait") => true,
+            // A view is read and checked against a run freely; saving one changes the node.
+            Some("view") => matches!(subcommand(&mut rest), Some("get" | "show" | "check")),
             // `desc` views the node's notes, but writes them with
             // `--set`/`--stdin`. Allow only the read form.
             Some("desc") => !stage.contains("--set") && !stage.contains("--stdin"),
@@ -467,6 +496,14 @@ mod tests {
     }
 
     #[test]
+    fn estimates_are_reads_but_launches_and_embedded_flags_are_gated() {
+        assert!(allowed("orx exp run child --estimate"));
+        assert!(!allowed("orx exp run child"));
+        assert!(!allowed("orx exp run child --host=--estimate"));
+        assert!(!allowed("orx exp run child --estimate && touch marker"));
+    }
+
+    #[test]
     fn compute_reads_are_allowed_but_setup_and_instruction_writes_are_gated() {
         for command in [
             "orx compute",
@@ -522,6 +559,11 @@ mod tests {
         // The playbook's core orientation reads (view form).
         assert!(allowed("orx exp desc e-1"));
         assert!(allowed("orx exp wait e-1"));
+        assert!(allowed("orx exp view get e-1 --json"));
+        assert!(allowed("orx exp view check r-1 --file view.xml"));
+        assert!(allowed("orx exp view show r-1"));
+        assert!(!allowed("orx exp view set e-1 --file view.xml"));
+        assert!(!allowed("orx exp view e-1"));
     }
 
     #[test]
@@ -553,6 +595,18 @@ mod tests {
         ] {
             assert!(!allowed(c), "should gate: {c}");
         }
+    }
+
+    #[test]
+    fn agents_lists_freely_and_gates_its_changes() {
+        assert!(allowed("orx agents"));
+        assert!(allowed("orx agents --json | head -20"));
+        assert!(!allowed(
+            "orx agents label opencode:tinker --logo thinkingmachines"
+        ));
+        assert!(!allowed(
+            "orx agents add-endpoint --name Box --url http://127.0.0.1:1/v1 --model m"
+        ));
     }
 
     #[test]
@@ -622,6 +676,7 @@ mod tests {
         // Consumers stand alone and pipe among themselves.
         assert!(allowed("wc -l README.md"));
         assert!(allowed("cat notes.md | grep TODO | sort | uniq"));
+        assert!(allowed("sort -u names.txt | uniq -c | head"));
         // Pipelines and sequences compose.
         assert!(allowed("orx runs | head -5; echo ok && git status"));
         // No-space pipes parse the same way the shell parses them.
@@ -639,6 +694,13 @@ mod tests {
         assert!(!allowed("| head")); // no producer
         assert!(!allowed("cargo metadata | head")); // unknown producer
         assert!(!allowed("head -1 f | orx runs")); // orx is not a consumer
+                                                   // `sort` and `uniq` take an output file as an argument.
+        assert!(!allowed("sort -o important.txt /dev/null"));
+        assert!(!allowed("sort --output=important.txt names.txt"));
+        assert!(!allowed("sort -ro important.txt names.txt"));
+        assert!(!allowed("sort --compress-program=sh names.txt"));
+        assert!(!allowed("uniq source.txt important.txt"));
+        assert!(!allowed("cat names.txt | sort -o important.txt"));
     }
 
     #[test]
@@ -771,7 +833,7 @@ mod tests {
             );
         }
         // The verbs with mixed read/write subcommands must also be real.
-        for verb in ["project", "exp"] {
+        for verb in ["project", "exp", "agents"] {
             assert!(real.contains(verb), "`{verb}` is not a real orx command");
         }
     }

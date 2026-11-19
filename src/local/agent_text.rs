@@ -19,9 +19,31 @@ pub(super) fn sample_project() -> LocalProject {
         repo_path: "/tmp/nonexistent".into(),
         run_command: None,
         paper_id: None,
+        icon: None,
         created_at: 0,
         updated_at: 0,
     }
+}
+
+fn scratch_project() -> LocalProject {
+    let mut project = sample_project();
+    project.repo_path = super::projects::scratch_root()
+        .join(&project.id)
+        .to_string_lossy()
+        .into_owned();
+    project
+}
+
+/// A chat without a project learns how to make one, and is never told its
+/// temporary folder is the user's checkout.
+#[test]
+fn a_chat_without_a_project_is_told_how_to_make_one() {
+    let scratch = playbook_md(&scratch_project(), &ProjectState::default());
+    assert!(scratch.contains("orx project create --name"));
+    assert!(!scratch.contains("Project folder"));
+    let project = playbook_md(&sample_project(), &ProjectState::default());
+    assert!(project.contains("- Project folder: `/tmp/nonexistent`"));
+    assert!(!project.contains("orx project create"));
 }
 
 /// Text rendered from a template at runtime, labelled for failure messages.
@@ -37,6 +59,10 @@ fn rendered() -> Vec<(String, String)> {
         (
             "local playbook".into(),
             playbook_md(&local, &ProjectState::default()),
+        ),
+        (
+            "scratch playbook".into(),
+            playbook_md(&scratch_project(), &ProjectState::default()),
         ),
     ];
     for skill in super::skills::CATALOG {
@@ -162,6 +188,82 @@ fn every_orx_command_in_agent_text_parses() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert!(checked > 100, "only {checked} commands found");
+}
+
+/// An agent copies the worked views, patterns and plans as they are, so each must save as written.
+#[test]
+fn every_view_pattern_and_plan_in_agent_text_compiles() {
+    use crate::engine::view::{self, Refusal, Source};
+
+    let refused = |refusal: Refusal| match refusal {
+        Refusal::Invalid(why) => why,
+        _ => "refused".to_owned(),
+    };
+    let source = Source {
+        file: None,
+        patterns: Some("patterns.json"),
+        config: Some("plan.json"),
+    };
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for (label, text) in all_text() {
+        for block in text.split("```").skip(1).step_by(2) {
+            let (language, body) = block.split_once('\n').unwrap_or((block, ""));
+            let problem = match language.trim() {
+                "html" if body.contains("<view") => view::compile(body)
+                    .err()
+                    .map(|problem| problem.text("view.xml", "")),
+                "json" => match serde_json::from_str(body) {
+                    Err(error) => Some(error.to_string()),
+                    Ok(given) if body.contains("\"regex\"") => {
+                        view::patterns(&given, &source, "").err().map(refused)
+                    }
+                    Ok(given)
+                        if ["\"plan\"", "\"rules\"", "\"brief\"", "\"watch\""]
+                            .iter()
+                            .any(|key| body.contains(key)) =>
+                    {
+                        view::config_of(&given, &source, "").err().map(refused)
+                    }
+                    Ok(_) => continue,
+                },
+                _ => continue,
+            };
+            checked += 1;
+            if let Some(problem) = problem {
+                failures.push(format!("{label}: {problem}\n{body}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    assert!(
+        checked >= 10,
+        "only {checked} views, patterns and plans found"
+    );
+}
+
+/// A run prints the documented `::orx::` lines as they are, so each must fold without a complaint.
+#[test]
+fn every_orx_line_in_agent_text_folds() {
+    let mut checked = 0;
+    for (label, text) in all_text() {
+        for line in text
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("::orx:: "))
+        {
+            let mut snapshot = orx_signals::Snapshot::new("run", "log", "1");
+            snapshot
+                .feed(format!("::orx:: {line}\n").as_bytes(), true, 0, false)
+                .unwrap();
+            assert!(
+                snapshot.diagnostics.counts.is_empty(),
+                "{label}: `::orx:: {line}` folds with {:?}",
+                snapshot.diagnostics.counts
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 3, "only {checked} ::orx:: lines found");
 }
 
 const PLACEHOLDER: &str = "PLACEHOLDER";

@@ -46,8 +46,8 @@ use super::options::{
 };
 use super::{
     should_synthesize_plan, synthesize_resume, CompactCtx, CompactOutcome, Harness, OneShot,
-    OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
-    TURN_WATCHDOG,
+    OneShotQuality, OneShotReply, OneShotUsage, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
+    Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -355,35 +355,87 @@ async fn codex_model_list(bin: &Path, home: Option<&Path>) -> Option<Value> {
         .cloned()
 }
 
+/// The GPT Luna this Codex sign-in's own catalog offers, newest first by its id, with the name the
+/// catalog gives it; None when it offers none.
+pub(crate) async fn codex_luna(profile: Option<&str>) -> Result<Option<(String, String)>> {
+    let bin = find_codex().ok_or_else(|| anyhow!("Codex is not installed"))?;
+    let home = profile
+        .map(|id| crate::local::agent_profiles::prepare(id, "codex"))
+        .transpose()?;
+    let catalog = codex_model_list(&bin, home.as_deref())
+        .await
+        .ok_or_else(|| anyhow!("Codex did not list its models"))?;
+    let mut lunas: Vec<_> = parse_model_list(&catalog, None)
+        .into_iter()
+        .filter(|model| {
+            crate::local::model_routes::canonical(&model.id)
+                .split('-')
+                .any(|part| part == "luna")
+        })
+        .collect();
+    lunas.sort_by(|a, b| b.id.cmp(&a.id));
+    Ok(lunas.into_iter().next().map(|model| {
+        let label = model
+            .display_name
+            .clone()
+            .unwrap_or_else(|| model.id.clone());
+        (model.id, label)
+    }))
+}
+
 /// One request on a throwaway `codex app-server`: `initialize` →
 /// `initialized` (the handshake `local::codex` uses, incl. `experimentalApi`,
 /// which the v2 surface needs), the request, then its whole response, a
-/// JSON-RPC error included.
+/// JSON-RPC error included. Its input then closes and it exits on its own,
+/// since it may be saving a sign-in it refreshed.
 async fn codex_rpc(
     bin: &Path,
     home: Option<&Path>,
     method: &str,
     params: Value,
 ) -> std::result::Result<Value, Unanswered> {
-    // Acquire the spawn lane before the deadline — queue time must not spend
-    // the child's execution budget.
-    let permit = super::detect::detect_spawn_permit().await;
-    let fut = async move {
-        let mut cmd = crate::process::tokio_command(bin);
+    let (bin, home, method) = (
+        bin.to_path_buf(),
+        home.map(Path::to_path_buf),
+        method.to_string(),
+    );
+    // Detached: a caller that gives up must not drop, and so kill, a child saving a sign-in.
+    let (answered, answer) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        // Acquire the spawn lane before the deadline — queue time must not spend
+        // the child's execution budget.
+        let permit = super::detect::detect_spawn_permit().await;
+        if answered.is_closed() {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut cmd = crate::process::tokio_command(&bin);
         cmd.arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
+            .stderr(Stdio::null());
         prepare_env(&mut cmd);
-        if let Some(home) = home {
+        if let Some(home) = &home {
             cmd.env("CODEX_HOME", home);
         }
-        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit)
-            .await
-            .map_err(Unanswered::Spawn)?;
-        let mut stdin = child.stdin.take().ok_or(Unanswered::Closed)?;
-        let mut lines = BufReader::new(child.stdout.take().ok_or(Unanswered::Closed)?).lines();
+        let spawned =
+            tokio::time::timeout_at(deadline, super::detect::spawn_with_permit(cmd, permit)).await;
+        let (mut child, permit) = match spawned {
+            Ok(Ok(spawned)) => spawned,
+            Ok(Err(error)) => {
+                let _ = answered.send(Err(Unanswered::Spawn(error)));
+                return;
+            }
+            Err(_) => {
+                let _ = answered.send(Err(Unanswered::TimedOut));
+                return;
+            }
+        };
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = answered.send(Err(Unanswered::Closed));
+            return;
+        };
+        let mut lines = BufReader::new(stdout).lines();
 
         use tokio::io::AsyncWriteExt;
         async fn send(
@@ -412,34 +464,42 @@ async fn codex_rpc(
             Err(Unanswered::Closed)
         }
 
-        send(
-            &mut stdin,
-            serde_json::json!({
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "clientInfo": {
-                        "name": "orx",
-                        "title": "OpenResearch",
-                        "version": env!("CARGO_PKG_VERSION"),
+        // The block owns `stdin`, so the child's input closes as soon as it answers.
+        let reply = tokio::time::timeout_at(deadline, async {
+            let mut stdin = stdin;
+            send(
+                &mut stdin,
+                serde_json::json!({
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {
+                            "name": "orx",
+                            "title": "OpenResearch",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                        "capabilities": { "experimentalApi": true },
                     },
-                    "capabilities": { "experimentalApi": true },
-                },
-            }),
-        )
-        .await?;
-        recv(&mut lines, 1).await?;
-        send(&mut stdin, serde_json::json!({ "method": "initialized" })).await?;
-        send(
-            &mut stdin,
-            serde_json::json!({ "id": 2, "method": method, "params": params }),
-        )
-        .await?;
-        recv(&mut lines, 2).await
-    };
-    tokio::time::timeout(Duration::from_secs(15), fut)
+                }),
+            )
+            .await?;
+            recv(&mut lines, 1).await?;
+            send(&mut stdin, serde_json::json!({ "method": "initialized" })).await?;
+            send(
+                &mut stdin,
+                serde_json::json!({ "id": 2, "method": method, "params": params }),
+            )
+            .await?;
+            recv(&mut lines, 2).await
+        })
         .await
-        .unwrap_or(Err(Unanswered::TimedOut))
+        .unwrap_or(Err(Unanswered::TimedOut));
+        let _ = answered.send(reply);
+        crate::process::let_probe_exit(child, lines.into_inner()).await;
+        // The lane stays taken until the child is gone.
+        drop(permit);
+    });
+    answer.await.unwrap_or(Err(Unanswered::Closed))
 }
 
 const RATE_LIMITS: &str = "account/rateLimits/read";
@@ -1144,6 +1204,10 @@ impl CustomProvider {
     }
 }
 
+pub(super) fn provider_env_key(config: &Path) -> Option<String> {
+    parse_custom_provider(&std::fs::read_to_string(config).ok()?)?.env_key
+}
+
 /// The active provider, when it is a custom one that bypasses OpenAI auth.
 /// `None` means first-party detection (auth.json) applies.
 fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
@@ -1285,76 +1349,185 @@ pub(crate) async fn profile_auth(bin: Option<&Path>, home: &Path, version: Optio
 ///
 /// A failed turn's error event becomes the error; stderr is only Codex's own logging.
 async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
+    codex_exec_one_shot(bin, request, false)
+        .await
+        .map(|reply| reply.text)
+}
+
+/// Switches that take every tool away from a `codex exec` turn. Codex names a switch it does not
+/// know in an `error` item, so a CLI that would keep one of these tools is caught by name.
+const NO_TOOLS: &[&str] = &[
+    "features.shell_tool=false",
+    "features.unified_exec=false",
+    "features.apply_patch_freeform=false",
+    "features.image_generation=false",
+    "features.multi_agent=false",
+    "features.apps=false",
+    "features.browser_use=false",
+    "features.computer_use=false",
+    "features.in_app_browser=false",
+    "features.sleep_tool=false",
+    "features.goals=false",
+    "features.hooks=false",
+    "features.tool_suggest=false",
+    "features.skill_search=false",
+    "features.code_mode_host=false",
+    "web_search=\"disabled\"",
+];
+
+/// Items a `codex exec` turn writes that are words, never an action.
+const WORDS_ONLY: &[&str] = &["agent_message", "reasoning", "error"];
+
+/// `request` on a throwaway `codex exec`; with `tool_free`, every tool switched off and the
+/// stream watched so a turn that acts anyway is stopped and refused.
+async fn codex_exec_one_shot(
+    bin: &Path,
+    request: OneShot<'_>,
+    tool_free: bool,
+) -> Result<OneShotReply> {
     let effort = match request.quality {
         OneShotQuality::Cheap => "low",
         OneShotQuality::Standard => "medium",
     };
     let message = format!("{}\n\n{}", request.system, request.prompt);
-    let fut = async {
-        let mut cmd = crate::process::tokio_command(bin);
-        cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
-            .args(["-c", "sandbox_mode=\"read-only\""])
-            .args(["-c", "approval_policy=\"never\""])
-            .args(["-c", &format!("model_reasoning_effort=\"{effort}\"")])
-            .args(request.model.iter().flat_map(|model| ["-m", model]))
-            // A one-shot needs no MCP: booting the user's servers for a
-            // single request would cost far more than the request itself.
-            .args(["-c", "mcp_servers={}"])
-            // Nor skills: the plugin catalog alone injected ~6k prompt tokens
-            // (24.3k → 18k input measured) into a request that ignores it.
-            .args(["-c", "features.plugins=false"])
-            .arg(&message)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            // Hermetic: run outside any repo so the child doesn't ingest the
-            // server cwd's AGENTS.md into a request that carries its own context.
-            .current_dir(std::env::temp_dir());
-        prepare_env(&mut cmd);
-        let home = match request.profile {
-            Some(id) => crate::local::agent_profiles::prepare(id, "codex")?,
-            None => native_store::prepare_codex(NativeStore::Isolated)?,
-        };
-        let sqlite = native_store::codex_home(NativeStore::Isolated);
-        cmd.env("CODEX_HOME", home);
-        cmd.args([
-            "-c",
-            &format!("sqlite_home={}", native_store::toml_string(&sqlite)),
-        ]);
-        // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
-        // would otherwise write escape codes straight into the reply.
-        cmd.env("NO_COLOR", "1");
-        let mut child = cmd.spawn()?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    let mut cmd = crate::process::tokio_command(bin);
+    cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
+        .args(["-c", "sandbox_mode=\"read-only\""])
+        .args(["-c", "approval_policy=\"never\""])
+        .args(["-c", &format!("model_reasoning_effort=\"{effort}\"")])
+        .args(request.model.iter().flat_map(|model| ["-m", model]))
+        // A one-shot needs no MCP: booting the user's servers for a
+        // single request would cost far more than the request itself.
+        .args(["-c", "mcp_servers={}"])
+        // Nor skills: the plugin catalog alone injected ~6k prompt tokens
+        // (24.3k → 18k input measured) into a request that ignores it.
+        .args(["-c", "features.plugins=false"])
+        // Nor the user's hooks, which would run on every request.
+        .args(["-c", "features.hooks=false"]);
+    if tool_free {
+        cmd.args(NO_TOOLS.iter().flat_map(|switch| ["-c", switch]));
+    }
+    cmd.arg(&message)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        // Hermetic: run outside any repo so the child doesn't ingest the
+        // server cwd's AGENTS.md into a request that carries its own context.
+        .current_dir(std::env::temp_dir());
+    prepare_env(&mut cmd);
+    let (home, name) = match request.profile {
+        Some(id) => (crate::local::agent_profiles::prepare(id, "codex")?, id),
+        None => (native_store::prepare_codex(NativeStore::Isolated)?, "codex"),
+    };
+    let sqlite = native_store::codex_home(NativeStore::Isolated);
+    // A one-shot brings its own context: the user's AGENTS.md and skills would add
+    // thousands of tokens to every request.
+    cmd.env(
+        "CODEX_HOME",
+        native_store::prepare_codex_one_shot(&home, name)?,
+    );
+    cmd.args([
+        "-c",
+        &format!("sqlite_home={}", native_store::toml_string(&sqlite)),
+    ]);
+    // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
+    // would otherwise write escape codes straight into the reply.
+    cmd.env("NO_COLOR", "1");
+    let deadline = tokio::time::Instant::now() + request.timeout;
+    let timeout = request.timeout.as_secs();
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    // Detached: a caller that gives up must not drop, and so kill, a child saving a sign-in.
+    let (status, last, error, usage) = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         // Keep the last agent message: a chatty run may narrate before it
         // answers, and the reply is what it settled on.
         let mut last = None;
         let mut error = None;
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(text) = exec_line_agent_message(&line) {
-                last = Some(text);
-            } else if let Some(message) = exec_line_error(&line) {
-                error = Some(message);
+        let mut usage = None;
+        let finished = tokio::time::timeout_at(deadline, async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                if tool_free {
+                    if let Some(refusal) = exec_line_tool(&line) {
+                        let _ = child.kill().await;
+                        return Err(anyhow!("{refusal}"));
+                    }
+                }
+                if let Some(text) = exec_line_agent_message(&line) {
+                    last = Some(text);
+                } else if let Some(message) = exec_line_error(&line) {
+                    error = Some(message);
+                } else if let Some(used) = exec_line_usage(&line) {
+                    usage = Some(used);
+                }
             }
-        }
-        let status = child.wait().await?;
-        match (status.success(), last, error) {
-            (true, Some(text), _) => Ok(text),
-            (_, _, Some(message)) => Err(anyhow!("{message}")),
-            (true, None, None) => Err(anyhow!("returned no reply")),
-            (false, _, None) => Err(anyhow!("{status}")),
-        }
-    };
-    tokio::time::timeout(request.timeout, fut)
-        .await
-        .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))?
+            Ok(child.wait().await?)
+        })
+        .await;
+        let Ok(status) = finished else {
+            crate::process::ask_agent_to_stop(&mut child, None).await;
+            return Err(anyhow!("timed out after {timeout}s"));
+        };
+        Ok((status?, last, error, usage))
+    })
+    .await??;
+    match (status.success(), last, error) {
+        (_, _, Some(error)) if error.is::<super::OneShotAuthError>() => Err(error),
+        (true, Some(text), _) => Ok(OneShotReply { text, usage }),
+        (_, _, Some(error)) => Err(error),
+        (true, None, None) => Err(anyhow!("returned no reply")),
+        (false, _, None) => Err(anyhow!("{status}")),
+    }
+}
+
+/// Why a tool-free turn must stop at this line: it started something other than words, or the
+/// CLI ignored one of the switches that keep tools away.
+fn exec_line_tool(line: &str) -> Option<String> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    let item = event.get("item")?;
+    let kind = item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if !WORDS_ONLY.contains(&kind) {
+        return Some(format!(
+            "Codex started a {kind} in a request that allows no tools, so it was stopped"
+        ));
+    }
+    let message = item.get("message").and_then(Value::as_str)?;
+    let ignored = NO_TOOLS
+        .iter()
+        .map(|switch| switch.split('=').next().unwrap_or(switch))
+        .find(|key| message.contains(&format!("`{key}` is ignored")))?;
+    Some(format!(
+        "This Codex does not know `{ignored}`, so it cannot run a request without tools; update Codex"
+    ))
+}
+
+/// A `codex exec --json` line's token counts, from the turn's completion.
+fn exec_line_usage(line: &str) -> Option<OneShotUsage> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    if event.get("type").and_then(Value::as_str) != Some("turn.completed") {
+        return None;
+    }
+    let usage = event.get("usage")?;
+    Some(OneShotUsage {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        cost_usd: None,
+    })
 }
 
 /// A `codex exec --json` line's turn error, with the provider's message
 /// unwrapped from the JSON body Codex embeds in it.
-fn exec_line_error(line: &str) -> Option<String> {
+fn exec_line_error(line: &str) -> Option<crate::error::Error> {
     let event = serde_json::from_str::<Value>(line).ok()?;
     let message = match event.get("type").and_then(Value::as_str)? {
         "error" => event.get("message"),
@@ -1363,10 +1536,15 @@ fn exec_line_error(line: &str) -> Option<String> {
     }?
     .as_str()?;
     let nested = serde_json::from_str::<Value>(message).ok();
+    if nested.as_ref().is_some_and(|body| {
+        body["status"] == 401 || body["error"]["type"] == "authentication_error"
+    }) {
+        return Some(super::OneShotAuthError.into());
+    }
     let inner = nested
         .as_ref()
-        .and_then(|body| body.get("error")?.get("message")?.as_str());
-    Some(inner.unwrap_or(message).to_string())
+        .and_then(|body| body["error"]["message"].as_str());
+    Some(super::one_shot_request_error(inner.unwrap_or(message)))
 }
 
 /// One `codex exec --json` stdout line → its agent message text, if it carries
@@ -1768,6 +1946,16 @@ impl Harness for Codex {
     async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
         let bin = find_codex().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
         codex_one_shot(&bin, request).await
+    }
+
+    /// Every tool switched off, and a turn that starts one anyway is stopped.
+    fn runs_without_tools(&self) -> bool {
+        true
+    }
+
+    async fn one_shot_without_tools(&self, request: OneShot<'_>) -> Result<OneShotReply> {
+        let bin = find_codex().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        codex_exec_one_shot(&bin, request, true).await
     }
 
     fn options(&self) -> HarnessOptions {
@@ -3467,8 +3655,7 @@ async fn ensure_codex_pre_accept(
                     .any(|code| detail.contains(code));
                 let retry = retryable.then(|| ctx.schedule_orx_retry(None)).flatten();
                 let Some((retry_number, delay)) = retry else {
-                    ctx.mark_delivery(DeliveryState::NotSent);
-                    ctx.mark_terminal_failure("codex_setup", error.to_string());
+                    ctx.mark_setup_failure("codex_setup", &error);
                     return Err(error);
                 };
                 ctx.show_retry_status(
@@ -4216,7 +4403,9 @@ fn user_input_reply(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value>
     }
     let note = answer.note.as_deref().filter(|s| !s.trim().is_empty());
     let mut selected: Vec<String> = if !answer.answers.is_empty() {
-        answer.answers.clone()
+        // Marked so the model does not read the note as one more choice.
+        let noted = note.map(|note| format!("user_note: {note}"));
+        answer.answers.iter().cloned().chain(noted).collect()
     } else if let Some(note) = note {
         vec![note.to_string()]
     } else if !answer.annotations.is_empty() {
@@ -4472,7 +4661,7 @@ const STEER_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// codex rejects `turn/steer` on review and compaction turns, and older
 /// app-servers lack the method — those answer definitively, so the message
-/// parks for the next turn. A transport failure or timeout answers nothing:
+/// runs as a queued one after the turn. A transport failure or timeout answers nothing:
 /// codex may already have applied the text, so re-running it as a fresh turn
 /// could execute the instruction twice. Say so instead.
 async fn steer_turn(
@@ -4483,11 +4672,12 @@ async fn steer_turn(
     steer: SteerMessage,
 ) {
     let Some(turn_id) = turn_id else {
-        if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
-            ctx.push_error(format!("Could not preserve steering message: {error}"));
-        }
+        ctx.host.release_steer(&ctx.session_id, &steer.id);
         return;
     };
+    if !ctx.host.steer_pending(&ctx.session_id, &steer.id) {
+        return;
+    }
     let answered = client
         .try_request_with_timeout(
             "turn/steer",
@@ -4499,17 +4689,12 @@ async fn steer_turn(
             STEER_TIMEOUT,
         )
         .await;
+    // codex reads an accepted steer at once, so its answer marks the spot.
     match answered {
-        Ok(Ok(_)) => ctx.record_steer(&steer, true),
-        Ok(Err(_)) => {
-            if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
-                ctx.push_error(format!("Could not preserve steering message: {error}"));
-            }
-        }
+        Ok(Ok(_)) => ctx.record_steer(&steer),
+        Ok(Err(_)) => ctx.host.release_steer(&ctx.session_id, &steer.id),
         Err(e) => {
-            // Record it anyway: the composer is already cleared, so this is
-            // the only copy of what the user typed.
-            ctx.record_steer(&steer, false);
+            ctx.record_steer(&steer);
             ctx.push_error(format!("codex did not confirm the steering message ({e})"));
         }
     }
@@ -5132,7 +5317,7 @@ mod tests {
                     case "$request" in *"$expected"*) ;; *) exit 1 ;; esac
                 done
                 printf '%s\n' '{"id":1,"result":{"thread":{"id":"saved-thread"},"model":"saved-model"}}'
-                sleep 600
+                cat >/dev/null
             "#,
         );
         let setup = codex_thread_setup(
@@ -5176,7 +5361,7 @@ mod tests {
     #[tokio::test]
     async fn compaction_refuses_a_different_resumed_thread() {
         let client = crate::local::codex::tests::rpc_test_client(
-            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{"thread":{"id":"different-thread"},"model":"wrong-model"}}'; sleep 600"#,
+            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{"thread":{"id":"different-thread"},"model":"wrong-model"}}'; cat >/dev/null"#,
         );
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
@@ -6658,6 +6843,75 @@ requires_openai_auth = false
         assert_eq!(codex_sandbox(None), Some("workspace-write"));
     }
 
+    /// A `codex exec` that prints `lines`, keeping the switches it was given in `args`.
+    #[cfg(unix)]
+    fn fake_exec(dir: &Path, lines: &[&str]) -> std::path::PathBuf {
+        let bin = dir.join("codex");
+        let printed: String = lines
+            .iter()
+            .map(|line| format!("printf '%s\\n' '{line}'\n"))
+            .collect();
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{printed}",
+            dir.join("args").display()
+        );
+        orx_test_support::write_executable(&bin, script, 0o755).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_request_without_tools_switches_them_off_and_refuses_a_turn_that_uses_one() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-codex-no-tools").unwrap();
+        let request = OneShot {
+            profile: None,
+            system: "Look.",
+            prompt: "{}",
+            quality: OneShotQuality::Cheap,
+            model: Some("gpt-6-luna"),
+            timeout: Duration::from_secs(10),
+        };
+        let answer =
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"runs\":{}}"}}"#;
+        let usage = r#"{"type":"turn.completed","usage":{"input_tokens":4000,"cached_input_tokens":0,"output_tokens":90}}"#;
+        let bin = fake_exec(dir.path(), &[answer, usage]);
+        let reply = codex_exec_one_shot(&bin, request, true).await.unwrap();
+        assert_eq!(reply.text, r#"{"runs":{}}"#);
+        assert_eq!(
+            reply
+                .usage
+                .map(|u| (u.input_tokens, u.output_tokens, u.cost_usd)),
+            Some((4000, 90, None))
+        );
+        let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
+        for switch in NO_TOOLS {
+            assert!(args.contains(switch), "{switch} in {args}");
+        }
+
+        let acted = r#"{"type":"item.started","item":{"type":"command_execution","command":"cat ~/.ssh/id_ed25519"}}"#;
+        let bin = fake_exec(dir.path(), &[acted, answer]);
+        let error = codex_exec_one_shot(&bin, request, true).await.unwrap_err();
+        assert!(
+            format!("{error}").contains("started a command_execution"),
+            "{error}"
+        );
+
+        let ignored = r#"{"type":"item.completed","item":{"type":"error","message":"Codex is ignoring 1 unrecognized configuration setting.\n  session-flags: `features.shell_tool` is ignored."}}"#;
+        let bin = fake_exec(dir.path(), &[ignored, answer]);
+        let error = codex_exec_one_shot(&bin, request, true).await.unwrap_err();
+        assert!(
+            format!("{error}").contains("does not know `features.shell_tool`"),
+            "{error}"
+        );
+
+        // A request that may use tools never hears of the switches.
+        let bin = fake_exec(dir.path(), &[answer]);
+        codex_exec_one_shot(&bin, request, false).await.unwrap();
+        assert!(!std::fs::read_to_string(dir.path().join("args"))
+            .unwrap()
+            .contains("shell_tool"));
+    }
+
     #[test]
     fn exec_line_agent_message_reads_both_jsonl_shapes() {
         // Legacy shape: the message nests under "msg".
@@ -6696,13 +6950,20 @@ requires_openai_auth = false
             exec_line_error(
                 r#"{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-x' model is not supported when using Codex with a ChatGPT account.\"}}"}}"#
             )
-            .as_deref(),
+            .map(|error| error.to_string()).as_deref(),
             Some(unsupported)
         );
         assert_eq!(
-            exec_line_error(r#"{"type":"error","message":"stream disconnected"}"#).as_deref(),
+            exec_line_error(r#"{"type":"error","message":"stream disconnected"}"#)
+                .map(|error| error.to_string())
+                .as_deref(),
             Some("stream disconnected")
         );
+        let rejected = exec_line_error(
+            r#"{"type":"turn.failed","error":{"message":"{\"status\":401,\"error\":{\"message\":\"The credentials were refused\"}}"}}"#,
+        )
+        .unwrap();
+        assert!(rejected.is::<super::super::OneShotAuthError>());
         // A metadata warning rides an item, not a turn error.
         assert!(exec_line_error(
             r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata not found"}}"#
@@ -6974,6 +7235,7 @@ requires_openai_auth = false
             note: note.map(str::to_string),
             annotations: Vec::new(),
             from: None,
+            env: Vec::new(),
         }
     }
 
@@ -7180,6 +7442,14 @@ requires_openai_auth = false
         );
         assert_eq!(reply["answers"]["q2"]["answers"], serde_json::json!([]));
 
+        // A note typed beside a choice travels with it.
+        let reply =
+            user_input_reply(&prompt, &answer(true, None, &["red"], Some("darker"))).unwrap();
+        assert_eq!(
+            reply["answers"]["q1"]["answers"],
+            serde_json::json!(["red", "user_note: darker"])
+        );
+
         // Note-only (freeform) answers the surfaced id.
         let reply = user_input_reply(&prompt, &answer(true, None, &[], Some("teal"))).unwrap();
         assert_eq!(
@@ -7232,6 +7502,73 @@ requires_openai_auth = false
             plan: Some("the plan".into()),
             synthesized: true,
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_binary_setup_exhaustion_reports_no_local_path() {
+        if !crate::config::in_test_child(&["ORX_TEST_SPEEDUP"]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000");
+        let mut ctx = TurnCtx::test_stub();
+        ctx.harness = "codex".into();
+        assert!(ctx
+            .exhausted_retry_properties("orx", "codex_setup")
+            .is_none());
+        assert!(ensure_codex_pre_accept(&mut ctx, NativeStore::Isolated)
+            .await
+            .is_err());
+        let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
+        assert_eq!(kind, "codex_setup");
+        assert!(!local_message.is_empty());
+        assert_eq!(
+            ctx.exhausted_retry_properties("orx", kind),
+            Some(json!({
+                "harness": "codex", "owner": "orx", "reason": "codex_setup_binary",
+                "attempt": ORX_MAX_ATTEMPTS
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_rejection_is_only_reported_after_retries_run_out() {
+        if !crate::config::in_test_child(&["ORX_TEST_SPEEDUP"]) {
+            return;
+        }
+        std::env::set_var("ORX_TEST_SPEEDUP", "1000");
+        let bin = crate::config::test_home().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for (code, retries) in [(-32600, false), (-32001, true)] {
+            let reply =
+                json!({"id": 1, "error": {"code": code, "message": "private fixture marker"}});
+            #[cfg(unix)]
+            orx_test_support::write_executable(
+                bin.join("codex"),
+                format!("#!/bin/sh\nIFS= read -r request\nprintf '%s\\n' '{reply}'\n"),
+                0o755,
+            )
+            .unwrap();
+            #[cfg(windows)]
+            std::fs::write(
+                bin.join("codex.cmd"),
+                format!("@echo off\r\nset /p request=\r\necho {reply}\r\n"),
+            )
+            .unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.harness = "codex".into();
+            assert!(ensure_codex_pre_accept(&mut ctx, NativeStore::Isolated)
+                .await
+                .is_err());
+            let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
+            assert!(local_message.contains("private fixture marker"));
+            assert_eq!(
+                ctx.exhausted_retry_properties("orx", kind),
+                retries.then(|| json!({
+                    "harness": "codex", "owner": "orx", "reason": "codex_setup_initialize",
+                    "attempt": ORX_MAX_ATTEMPTS
+                }))
+            );
         }
     }
 

@@ -14,6 +14,7 @@ import type {
   Run,
   UpdateStatus,
 } from "./api";
+import type { RunMonitorEvent } from "./runMonitor/types";
 
 export interface RunLogEvent {
   generation?: string;
@@ -32,6 +33,7 @@ export type ChatEvent =
   | { type: "sessionDeleted"; sessionId: string }
   | { type: "message"; sessionId: string; message: ChatMessage }
   | { type: "busy"; sessionId: string; busy: boolean }
+  | { type: "background"; sessionId: string }
   | { type: "usage"; sessionId: string; usage: ContextUsage }
   | { type: "queued"; sessionId: string; items: QueuedMessage[] }
   /** A different fork of a turn is now the branch on screen. */
@@ -81,6 +83,7 @@ type ConnectionListener = () => void;
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
   onRunLog?: (event: RunLogEvent) => void;
+  onRunMonitor?: (event: RunMonitorEvent) => void;
   onExperiment?: (experiment: Experiment) => void;
   onProject?: (project: Project) => void;
   onReconnect?: () => void;
@@ -352,6 +355,10 @@ export function createEvents(client: WorkspaceClient) {
             ref.current.onRun(d.run);
           }
         });
+        es.addEventListener("run.monitor", (e) => {
+          const d = parse<RunMonitorEvent>(e as MessageEvent);
+          if (d?.runId) ref.current.onRunMonitor?.(d);
+        });
         es.addEventListener("experiment.updated", (e) => {
           const d = parse<{ experiment: Experiment }>(e as MessageEvent);
           if (d?.experiment) {
@@ -409,6 +416,10 @@ export function createEvents(client: WorkspaceClient) {
             emitProjectActivityEvent();
             emitChat({ type: "busy", sessionId: d.sessionId, busy: d.busy });
           }
+        });
+        es.addEventListener("chat.background", (e) => {
+          const d = parse<{ sessionId: string }>(e as MessageEvent);
+          if (d?.sessionId) emitChat({ type: "background", sessionId: d.sessionId });
         });
         es.addEventListener("chat.usage", (e) => {
           const d = parse<{ sessionId: string; usage: ContextUsage }>(e as MessageEvent);

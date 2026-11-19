@@ -45,6 +45,7 @@ import { WorkspaceDomContext } from "../WorkspaceDom";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { HarnessLogo } from "./HarnessLogo";
 import { LitSourceLogo } from "./LitSourceLogo";
+import { ResizeHandle } from "./ResizeHandle";
 import { CommandIcon, SkillPreviewCard } from "./SkillChips";
 
 /** What the draft's tokens resolve to; a token that resolves to nothing stays text. */
@@ -272,7 +273,7 @@ function chips(source: () => ChipSource): Extension {
 }
 
 const composerTheme = EditorView.theme({
-  "&": { color: "var(--text)", maxHeight: "40vh", padding: "var(--editor-pad-y) 0" },
+  "&": { color: "var(--text)", padding: "var(--editor-pad-y) 0" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.5", overflow: "auto" },
   // WebKit can retain an empty horizontal scrollbar gutter after the draft shrinks.
@@ -294,6 +295,11 @@ const markdownSource = markdown({
   extensions: { remove: ["HTMLBlock", "HTMLTag"] },
 });
 
+/** Read-only refuses every change, including the editor's own commands that skip the `readOnly` facet. */
+function readOnlyExtension(readOnly: boolean): Extension {
+  return readOnly ? [EditorState.readOnly.of(true), EditorState.changeFilter.of(() => false)] : [];
+}
+
 function modeExtension(plain: boolean): Extension {
   return plain ? EditorView.editorAttributes.of({ class: "cm-plain" }) : [markdownSource, livePreview];
 }
@@ -305,7 +311,6 @@ function isComposing(event: KeyboardEvent): boolean {
 
 /** One 24px line plus the 10px padding above and below; a shorter box would scroll an empty draft. */
 const MIN_HEIGHT = 44;
-const KEYBOARD_STEP = 24;
 
 function storedHeight(key: string): number | null {
   try {
@@ -316,12 +321,12 @@ function storedHeight(key: string): number | null {
   }
 }
 
-/** Dragged heights stop short of crowding out the transcript. */
+/** The draft grows, and can be dragged, up to this height, then scrolls inside the box. */
 function maxHeight(dom: HTMLElement): number {
   const pane = dom.closest<HTMLElement>(".chat-pane");
   const composer = dom.closest<HTMLElement>(".composer");
   const chrome = composer ? composer.offsetHeight - dom.offsetHeight : 0;
-  return Math.max(MIN_HEIGHT, ((pane?.clientHeight ?? window.innerHeight) - chrome) * 0.6);
+  return Math.max(MIN_HEIGHT, ((pane?.clientHeight ?? window.innerHeight) - chrome) * 0.8);
 }
 
 export interface ComposerEditorHandle {
@@ -348,6 +353,7 @@ export function ComposerEditor({
   onPaste,
   placeholder,
   plain,
+  readOnly,
   chipSource,
   projectId,
   describedBy,
@@ -369,6 +375,8 @@ export function ComposerEditor({
   placeholder: string;
   /** Shell commands: monospace, no markdown or chips. */
   plain: boolean;
+  /** Keeps focus and the text but takes no edits, as while the text is being sent. */
+  readOnly: boolean;
   chipSource: ChipSource;
   projectId: string;
   describedBy?: string;
@@ -379,13 +387,17 @@ export function ComposerEditor({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const latest = useRef({ onChange, onKeyDown, onSubmit, onFiles, onPaste, chipSource, plain, placeholder, describedBy });
-  latest.current = { onChange, onKeyDown, onSubmit, onFiles, onPaste, chipSource, plain, placeholder, describedBy };
-  const [compartments] = useState(() => ({ mode: new Compartment(), placeholder: new Compartment(), aria: new Compartment() }));
+  const latest = useRef({ onChange, onKeyDown, onSubmit, onFiles, onPaste, chipSource, plain, readOnly, placeholder, describedBy });
+  latest.current = { onChange, onKeyDown, onSubmit, onFiles, onPaste, chipSource, plain, readOnly, placeholder, describedBy };
+  const [compartments] = useState(() => ({ mode: new Compartment(), readOnly: new Compartment(), placeholder: new Compartment(), aria: new Compartment() }));
   const [hovered, setHovered] = useState<HTMLElement | null>(null);
   const previewId = useId();
-  /** A height the user dragged to; null keeps the natural height. */
+  /** A height the user dragged to, which the draft can still grow past; null keeps the natural height. */
   const [height, setHeight] = useState(() => storedHeight(resizeKey));
+  /** Whether a drag holds the box at `height` though the draft is taller; the next edit that grows the draft lifts it. */
+  const [capped, setCapped] = useState(false);
+  /** The draft's laid-out height, so an edit can tell whether it grew the draft. */
+  const contentHeight = useRef(0);
   const [heightLimit, setHeightLimit] = useState(Number.POSITIVE_INFINITY);
   const closeTimer = useRef<number | null>(null);
 
@@ -428,6 +440,7 @@ export function ComposerEditor({
           },
         })),
         compartments.mode.of(modeExtension(latest.current.plain)),
+        compartments.readOnly.of(readOnlyExtension(latest.current.readOnly)),
         keymap.of([
           // Enter belongs to send; Shift+Enter breaks the line.
           ...defaultKeymap.filter((binding) => !binding.key?.endsWith("Enter")),
@@ -448,6 +461,17 @@ export function ComposerEditor({
         compartments.placeholder.of(placeholderText(latest.current.placeholder)),
         compartments.aria.of(EditorView.contentAttributes.of(ariaAttributes())),
         EditorView.updateListener.of((update) => {
+          if (update.docChanged || update.geometryChanged) {
+            // Measured rather than `view.contentHeight`, which estimates wrapped lines right after an edit.
+            const edited = update.docChanged;
+            update.view.requestMeasure({
+              read: (view) => view.contentDOM.getBoundingClientRect().height,
+              write: (measured) => {
+                if (edited && measured > contentHeight.current) setCapped(false);
+                contentHeight.current = measured;
+              },
+            });
+          }
           if (!update.docChanged && !update.selectionSet) return;
           const typed = update.transactions.some(
             (transaction) => transaction.isUserEvent("input") && !transaction.isUserEvent("input.type.compose"),
@@ -474,12 +498,17 @@ export function ComposerEditor({
     if (!view || (view.state.doc.toString() === value && shownDraftKey.current === draftKey)) return;
     shownDraftKey.current = draftKey;
     view.setState(createState(value));
+    setCapped(false);
     latest.current.onChange(value, value.length, false);
   }, [value, draftKey]);
 
   useEffect(() => {
     viewRef.current?.dispatch({ effects: compartments.mode.reconfigure(modeExtension(plain)) });
   }, [plain, compartments]);
+
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: compartments.readOnly.reconfigure(readOnlyExtension(readOnly)) });
+  }, [readOnly, compartments]);
 
   useEffect(() => {
     viewRef.current?.dispatch({
@@ -499,8 +528,8 @@ export function ComposerEditor({
     if (!dom) return;
     const clamped = height === null ? null : Math.min(height, heightLimit);
     dom.style.minHeight = clamped === null ? "" : `${clamped}px`;
-    dom.style.maxHeight = `min(${heightLimit}px, max(40vh, ${clamped ?? MIN_HEIGHT}px))`;
-  }, [height, heightLimit]);
+    dom.style.maxHeight = `${clamped !== null && capped ? clamped : heightLimit}px`;
+  }, [height, heightLimit, capped]);
 
   useEffect(() => {
     try {
@@ -528,8 +557,6 @@ export function ComposerEditor({
     };
   }, []);
 
-  const resizeBy = (start: number, delta: number) =>
-    setHeight(Math.round(Math.min(Math.max(start + delta, MIN_HEIGHT), heightLimit)));
   const currentHeight = () => viewRef.current?.dom.getBoundingClientRect().height ?? MIN_HEIGHT;
 
   useImperativeHandle(ref, () => ({
@@ -581,7 +608,7 @@ export function ComposerEditor({
   return (
     <div
       ref={hostRef}
-      className="composer-editor min-w-0 flex-1 [--editor-pad-x:12px] [--editor-pad-y:10px]"
+      className="composer-editor min-w-0 flex-1 [--editor-pad-x:var(--composer-pad-x,12px)] [--editor-pad-y:10px]"
       onKeyDown={(event) => {
         // CodeMirror skips its handlers while an IME composes; keep those keys
         // (an Escape that cancels a candidate) from reaching page shortcuts.
@@ -624,46 +651,18 @@ export function ComposerEditor({
         if (event.target instanceof Element && event.target.closest("[data-chip]")) scheduleClose();
       }}
     >
-      {/* Positioned against the composer box, so it rides the box's top edge. */}
-      <div
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label={m.chat_resize_composer()}
-        aria-valuemin={MIN_HEIGHT}
-        aria-valuemax={Number.isFinite(heightLimit) ? Math.round(heightLimit) : undefined}
-        aria-valuenow={Math.round(height ?? MIN_HEIGHT)}
-        title={m.chat_resize_composer_hint()}
-        tabIndex={0}
-        className="group/resize absolute inset-x-0 -top-1.5 z-3 flex h-3 cursor-row-resize touch-none items-center justify-center outline-none"
-        onPointerDown={(event) => {
-          event.preventDefault();
-          event.currentTarget.setPointerCapture(event.pointerId);
-          const startY = event.clientY;
-          const start = currentHeight();
-          const move = (moveEvent: PointerEvent) => resizeBy(start, startY - moveEvent.clientY);
-          const stop = () => {
-            window.removeEventListener("pointermove", move);
-            window.removeEventListener("pointerup", stop);
-            window.removeEventListener("pointercancel", stop);
-          };
-          window.addEventListener("pointermove", move);
-          window.addEventListener("pointerup", stop);
-          window.addEventListener("pointercancel", stop);
+      {/* Rides the top edge of the composer box, or of the answer field under a question. */}
+      <ResizeHandle
+        label={m.chat_resize_composer()}
+        height={height}
+        min={MIN_HEIGHT}
+        max={heightLimit}
+        measure={currentHeight}
+        onChange={(next) => {
+          setHeight(next);
+          setCapped(next !== null);
         }}
-        onDoubleClick={() => setHeight(null)}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowUp" || event.key === "ArrowDown") {
-            event.preventDefault();
-            const current = currentHeight();
-            resizeBy(event.key === "ArrowUp" ? current : Math.min(height ?? MIN_HEIGHT, current), event.key === "ArrowUp" ? KEYBOARD_STEP : -KEYBOARD_STEP);
-          } else if (event.key === "Home") {
-            event.preventDefault();
-            setHeight(null);
-          }
-        }}
-      >
-        <span className="h-1 w-10 rounded-full bg-muted opacity-0 transition-opacity group-hover/resize:opacity-100 group-focus-visible/resize:opacity-100 group-active/resize:opacity-100" />
-      </div>
+      />
       {hovered && hoveredSkill && (
         <SkillPreviewCard
           id={previewId}

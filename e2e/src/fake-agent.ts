@@ -13,7 +13,7 @@ const control = process.env.ORX_E2E_AGENT
 const log = process.env.ORX_E2E_AGENT_LOG
 const reverse = new Map<string, (message: Message) => void>()
 let nextReverse = 0
-let turn: { abort: AbortController } | undefined
+let turn: { abort: AbortController; onCancel?: 'exit' } | undefined
 // orx gives every chat session its MCP servers and a one-shot (title, starter prompts, summary) none. One-shots end with
 // no text, so they keep orx's fallbacks and never take a script meant for a chat turn.
 const oneShots = new Set<string>()
@@ -69,8 +69,31 @@ async function prompt(request: Message) {
     for (const step of await script(text)) {
       if ('say' in step) update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: step.say } })
       else if ('think' in step) update(sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: step.think } })
-      else if ('hold' in step) await fetch(`${control}/hold/${encodeURIComponent(step.hold)}`, { method: 'POST', signal: abort.signal })
-      else if ('run' in step) await run(sessionId, step)
+      else if ('hold' in step) {
+        turn.onCancel = step.onCancel
+        await fetch(`${control}/hold/${encodeURIComponent(step.hold)}`, { method: 'POST', signal: abort.signal })
+      } else if ('run' in step) await run(sessionId, step)
+      else if ('permissionAfterReply' in step) {
+        send({ id: request.id, result: { stopReason: 'end_turn' } })
+        await ask('session/request_permission', {
+          sessionId, toolCall: { toolCallId: 'late-permission', title: step.permissionAfterReply, kind: 'execute' },
+          options: [{ optionId: 'late-allow', name: 'Allow late action', kind: 'allow_once' }],
+        })
+        return
+      }
+      else if ('permission' in step) {
+        const toolCallId = `permission-${nextReverse}`
+        const toolCall = { toolCallId, title: step.permission, kind: step.kind ?? 'execute', status: 'pending' }
+        update(sessionId, { sessionUpdate: 'tool_call', ...toolCall })
+        const grant = step.grant ?? 'allow_once'
+        const options = [
+          ...(grant === 'none' ? [] : [{ optionId: 'opaque-allow', name: 'Allow this action', kind: grant }]),
+          { optionId: 'opaque-reject', name: 'Reject this action', kind: 'reject_once' },
+        ]
+        const response = await ask('session/request_permission', { sessionId, toolCall, options })
+        const selected = response.result?.outcome?.optionId ?? response.result?.outcome?.outcome
+        update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId, status: selected === 'opaque-allow' ? 'completed' : 'failed', rawOutput: selected })
+      }
       else if ('exit' in step) process.exit(step.exit)
     }
     send({ id: request.id, result: { stopReason: 'end_turn' } })
@@ -106,6 +129,7 @@ function handle(message: Message) {
     case 'session/prompt':
       return void prompt(message)
     case 'session/cancel':
+      if (turn?.onCancel === 'exit') process.exit(0)
       return turn?.abort.abort()
     default:
       if (message.id !== undefined) send({ id: message.id, error: { code: -32601, message: `${message.method} is not scripted` } })

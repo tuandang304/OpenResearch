@@ -18,6 +18,9 @@ use crate::jobs::localbox;
 #[path = "../../../crates/orx-host/src/log.rs"]
 pub(super) mod log;
 
+#[path = "../../../crates/orx-host/src/signals.rs"]
+pub(crate) mod signals;
+
 /// Keeps this machine from idle sleep until dropped. Windows runs have no `orx-host wrap` to
 /// hold it, so the engine holds one while any local run is unfinished.
 #[cfg(windows)]
@@ -67,15 +70,7 @@ impl Local {
     }
 
     fn directory(&self, intent: &RunIntent) -> Result<PathBuf> {
-        if intent.run.id.is_empty()
-            || !intent
-                .run
-                .id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-        {
-            bail!("Invalid local run id");
-        }
+        signals::validate_run(&intent.run.id)?;
         Ok(self.root.join(&intent.run.id))
     }
 
@@ -188,12 +183,13 @@ impl Local {
                     }
                 }
             };
-            let mut env = crate::config::launch_env(&intent.run.id);
+            let mut env = crate::config::launch_env(&intent.run)?;
             env.insert(
                 crate::compute::TENSORBOARD_LOGDIR.into(),
                 dir.join("tensorboard").to_string_lossy().into_owned(),
             );
-            env.extend(crate::local::trackio::local_run_env());
+            let trackio_env = crate::local::trackio::local_run_env(&env);
+            env.extend(trackio_env);
             crate::local::shell_env::export_to(|key, value| {
                 env.insert(key.into(), value.to_string_lossy().into_owned());
             });
@@ -469,6 +465,7 @@ impl Backend for Local {
                         state = orx_host::wrapper::state(dir)?;
                     }
                     Ok(orx_host_proto::Summary {
+                        signals: None,
                         started_at: orx_host::wrapper::started_at(dir),
                         state,
                         log_len: Some(len("log")?),
@@ -504,6 +501,7 @@ impl Backend for Local {
             let job = localbox::inspect_job(dir);
             let observation = if let Some(code) = job.exit_code {
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(code),
                     signal: None,
@@ -513,6 +511,7 @@ impl Backend for Local {
                 let never_started =
                     cfg!(windows) && matches!(dir.join("log").try_exists(), Ok(false));
                 Observation::Failed {
+                    started_at: None,
                     finished_at: None,
                     reason: if never_started {
                         "The run never started: OpenResearch stopped while launching it.".into()
@@ -631,6 +630,40 @@ impl Backend for Local {
                 detail: error.to_string(),
             },
         }
+    }
+
+    async fn signals(
+        &self,
+        run: &WatchedRun,
+        terminal: bool,
+        _previous: Option<&orx_signals::Snapshot>,
+    ) -> Result<Option<(orx_signals::Snapshot, Option<(i64, i64)>)>> {
+        let dir = self.dir(run)?.to_path_buf();
+        let data = self
+            .root
+            .parent()
+            .ok_or_else(|| anyhow!("Local run root has no data directory"))?
+            .to_path_buf();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as i64;
+        let run_id = run.id.clone();
+        let scanned = tokio::task::spawn_blocking(move || -> Result<_> {
+            #[cfg(unix)]
+            let started_at = orx_host::wrapper::started_at(&dir);
+            #[cfg(windows)]
+            let started_at = None;
+            Ok(signals::scan(
+                &dir.join("log"),
+                &data.join("run-signals").join(format!("{run_id}.json")),
+                &run_id,
+                terminal,
+                now,
+                started_at,
+            )?)
+        })
+        .await??;
+        Ok(scanned.map(|snapshot| (snapshot, None)))
     }
 
     async fn read_log(

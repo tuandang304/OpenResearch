@@ -47,9 +47,17 @@ fn title_prompt_in(first_message: &str, language: Option<&str>) -> String {
         format!(" Write the title in {language}.")
     });
     format!(
-        "Generate a short title for a chat session that starts with the user \
-         message below. At most 6 words.{language} Reply with the title text ONLY — no \
-         quotes, no trailing punctuation, no explanation, nothing else.\n\n\
+        "Name this chat like a commit scope plus subject, so its topic is \
+         recognizable weeks later.\n\
+         - 1-4 words, a Title Case noun phrase naming the thing being built, \
+         fixed or investigated, like \"Sitemap\" or \"Login Crash\".\n\
+         - No leading request verb (Generate, Add, Visualize) unless the topic \
+         is itself a fix. Leave out how the work is done: models, agents, PRs, \
+         branches, tests.\n\
+         - When the work is confined to one package or folder, prefix its name \
+         in backticks, like \"`@clo/lib` Meta Scraper\".{language}\n\
+         Reply with the title text ONLY — no quotes, no trailing punctuation, \
+         no explanation, nothing else.\n\n\
          User message:\n{input}"
     )
 }

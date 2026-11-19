@@ -283,7 +283,7 @@ pub async fn run_antigravity() -> Result<()> {
     Ok(())
 }
 
-/// agy's shell call that launches compute around orx, as Claude Code's `orx invocation-gate` denies it.
+/// agy's shell call that launches compute around orx, as Claude Code's `orx launch-gate` denies it.
 fn launch_bypass(payload: &Value) -> Option<String> {
     if payload.pointer("/toolCall/name")? != "run_command" {
         return None;
@@ -294,7 +294,7 @@ fn launch_bypass(payload: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(std::path::Path::new);
     let run_commands = match crate::store::Store::open() {
-        Ok(store) => crate::commands::invocation_gate::run_commands(&store),
+        Ok(store) => crate::local::harness::launch_gate::run_commands(&store),
         Err(error) => {
             eprintln!("orx antigravity-gate: cannot open the store for run commands: {error}");
             Vec::new()
@@ -490,8 +490,11 @@ fn invocation_overwrite(input: &str) -> Option<Value> {
         model: payload.get("modelName")?.as_str()?.to_string(),
         provider: None,
     };
-    let command =
-        crate::commands::invocation_gate::with_invocation_context(command, &identity).ok()?;
+    identity.validate().ok()?;
+    let command = format!(
+        "export ORX_INVOCATION_CONTEXT={}; {command}",
+        crate::jobs::ssh::sh_quote(&serde_json::to_string(&identity).ok()?)
+    );
     Some(json!({ "CommandLine": command }))
 }
 
