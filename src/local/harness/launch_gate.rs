@@ -4,8 +4,9 @@
 //! The playbook and `orx-compute` already say every experiment runs through
 //! `orx exp run`; a run started any other way has no recorded commit and its
 //! result never reaches the chat. Claude Code's `PreToolUse` hook (`orx
-//! invocation-gate`) asks [`bypass_reason`] about each Bash call and denies the
-//! ones that clearly bypass orx, with a reason naming the `orx` command to use.
+//! launch-gate`, [`hook`]) and Antigravity's gate ask [`bypass_reason`] about each
+//! shell call and deny the ones that clearly bypass orx, with a reason naming the
+//! `orx` command to use.
 //!
 //! Only clear launches are denied: a scheduler or provider job submission, the
 //! project's own run command typed as a shell command, or a local script that
@@ -14,6 +15,76 @@
 //! passes untouched.
 
 use std::path::{Path, PathBuf};
+
+use std::io::Read;
+
+use serde_json::{json, Value};
+
+use crate::error::Result;
+use crate::store::Store;
+
+/// The fixed run commands of the chat's project. Best effort: without them the
+/// gate still catches scheduler and provider launches.
+pub(crate) fn run_commands(store: &Store) -> Vec<String> {
+    let lookup = || -> Result<Vec<String>> {
+        let Some(session) = crate::local::chat::launching_chat_session() else {
+            return Ok(Vec::new());
+        };
+        let Some(session) = store.get_chat_session(&session)? else {
+            return Ok(Vec::new());
+        };
+        let mut commands: Vec<String> = store
+            .list_experiments_by_project(&session.project_id)?
+            .into_iter()
+            .map(|experiment| experiment.run_command)
+            .collect();
+        if let Some(project) = store.get_local_project(&session.project_id)? {
+            commands.extend(project.run_command);
+        }
+        commands.retain(|command| !command.trim().is_empty());
+        commands.sort();
+        commands.dedup();
+        Ok(commands)
+    };
+    lookup().unwrap_or_else(|error| {
+        eprintln!("orx launch-gate: cannot read the project's run commands: {error}");
+        Vec::new()
+    })
+}
+
+/// Claude Code's `PreToolUse` hook body: a Bash call that bypasses orx is denied.
+pub(crate) fn hook() -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let payload: Value = serde_json::from_str(&input)?;
+    if let Some(reason) = deny_reason(&payload) {
+        println!(
+            "{}",
+            json!({"hookSpecificOutput":{
+                "hookEventName":"PreToolUse",
+                "permissionDecision":"deny",
+                "permissionDecisionReason":reason,
+            }})
+        );
+    }
+    Ok(())
+}
+
+fn deny_reason(payload: &Value) -> Option<String> {
+    if payload.get("tool_name").and_then(Value::as_str) != Some("Bash") {
+        return None;
+    }
+    let command = payload.pointer("/tool_input/command")?.as_str()?;
+    let cwd = payload.get("cwd").and_then(Value::as_str).map(Path::new);
+    let commands = match Store::open() {
+        Ok(store) => run_commands(&store),
+        Err(error) => {
+            eprintln!("orx launch-gate: cannot open the store for run commands: {error}");
+            Vec::new()
+        }
+    };
+    bypass_reason(command, &commands, cwd)
+}
 
 /// Programs whose only job is to submit work to a cluster scheduler.
 const SCHEDULERS: &[&str] = &["sbatch", "srun", "salloc", "qsub", "bsub"];
@@ -280,6 +351,16 @@ fn contains_tokens(haystack: &[&str], needle: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hook_denies_only_bash_calls_that_bypass_orx() {
+        let bash = |command: &str| json!({"tool_name": "Bash", "tool_input": {"command": command}});
+        assert!(deny_reason(&bash("sbatch train.sh"))
+            .is_some_and(|reason| reason.contains("orx exp run")));
+        assert!(deny_reason(&bash("git status")).is_none());
+        let edit = json!({"tool_name": "Edit", "tool_input": {"command": "sbatch train.sh"}});
+        assert!(deny_reason(&edit).is_none());
+    }
 
     fn scratch() -> PathBuf {
         let dir = crate::config::test_root().join(format!("launch-gate-{}", uuid::Uuid::new_v4()));

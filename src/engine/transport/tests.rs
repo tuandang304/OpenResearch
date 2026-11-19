@@ -793,6 +793,7 @@ fn jittered_cadence_is_persisted_and_capped_at_fifteen_minutes() {
         publish,
         incoming,
         unsupported: None,
+        signals_advertised: Arc::new(AtomicBool::new(false)),
     };
     actor.classify(HostClass::Key);
     let mut since = None;
@@ -1153,7 +1154,6 @@ async fn key_retry_resets_the_backoff_step_without_prompting() {
             &HostState {
                 status: Status::Backoff,
                 failures: 4,
-                next_retry_ms: Some(clock.wall_ms() + 900_000),
                 ..HostState::default()
             },
         )
@@ -1164,11 +1164,22 @@ async fn key_retry_resets_the_backoff_step_without_prompting() {
         HostConn::start_shared(config, store, clock.clone(), auth)
     }
     .unwrap();
+    // Startup retries a key host at once; a retry pressed during that attempt only joins it.
+    let state = status(&conn, Status::Backoff).await;
+    assert_eq!(state.failures, 5);
+
+    let before = clock.wall_ms();
     assert!(conn.retry_key().await.is_err());
+    let after = clock.wall_ms();
+
     let state = status(&conn, Status::Backoff).await;
     assert_eq!(state.failures, 1);
-    let delay = state.next_retry_ms.unwrap() - state.since_ms;
-    assert!((4000..=6000).contains(&delay), "{delay}");
+    let retry = state.next_retry_ms.unwrap();
+    assert!(
+        (before + 4000..=after + 6000).contains(&retry),
+        "{}",
+        retry - before
+    );
     assert!(auth_attempts(&server).is_empty());
 }
 
@@ -2022,6 +2033,79 @@ async fn unpersisted_breaker_still_blocks_every_root() {
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert_eq!(auth_attempts(&server), blocked);
     assert_eq!(blocked.values().sum::<usize>(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_signal_pages_leave_capacity_for_cancel() {
+    use std::io::Write;
+    let server = Sshd::start().unwrap();
+    let conn = start(&server, TestClock::new());
+    status(&conn, Status::Live).await;
+    let inspected = conn
+        .request(Request::Inspect { run: "r1".into() })
+        .await
+        .unwrap();
+    assert!(matches!(inspected, Response::Inspect { summary, .. } if summary.signals.is_some()));
+    let directory = server.home().join("engine-root/run-signals");
+    fs::create_dir_all(&directory).unwrap();
+    let paths: Vec<_> = (0..32)
+        .map(|i| directory.join(format!("blocked-{i}.json")))
+        .collect();
+    for fifo in &paths {
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    }
+    let mut reads: Vec<_> = (0..32)
+        .map(|i| {
+            Box::pin(conn.request(Request::ReadSignals {
+                terminal: false,
+                run: format!("blocked-{i}"),
+                generation: "g1".into(),
+                revision: 1,
+                offset: 0,
+                length: 1,
+            }))
+        })
+        .collect();
+    for read in &mut reads {
+        assert!(futures::poll!(read.as_mut()).is_pending());
+    }
+    let first = paths[0].clone();
+    let writer = tokio::task::spawn_blocking(move || {
+        fs::OpenOptions::new().write(true).open(first).unwrap()
+    });
+    let writer = tokio::time::timeout(Duration::from_secs(10), writer)
+        .await
+        .unwrap()
+        .unwrap();
+    let cancelled = tokio::time::timeout(
+        Duration::from_secs(2),
+        conn.request(Request::Cancel { run: "r1".into() }),
+    )
+    .await;
+    let release = tokio::task::spawn_blocking(move || {
+        let bytes =
+            serde_json::to_vec(&orx_signals::Snapshot::new("blocked", "1-2", "g1")).unwrap();
+        let mut writer = writer;
+        writer.write_all(&bytes).unwrap();
+        drop(writer);
+        for path in paths.into_iter().skip(1) {
+            let mut writer = fs::OpenOptions::new().write(true).open(path).unwrap();
+            writer.write_all(&bytes).unwrap();
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(10), release)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        cancelled.is_ok(),
+        "cancel waited behind pending signal pages"
+    );
+    assert!(cancelled.unwrap().is_ok());
+    for read in reads {
+        read.await.unwrap();
+    }
 }
 
 /// Pins and log reads wait in the upload and log lanes, so a host slow to answer them still

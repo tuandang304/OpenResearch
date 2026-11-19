@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 /// How long a process may stay unreadable while it forks, execs or exits on a busy machine.
 const UNREADABLE_SETTLE: Duration = Duration::from_millis(1000);
+const BRIEF_SETTLE: Duration = Duration::from_millis(15);
 
 #[derive(Debug, Clone)]
 pub struct Process {
@@ -135,11 +136,11 @@ pub(crate) struct ProcessTable {
 impl ProcessTable {
     /// Unreadable processes started before `born_after` are left out: they cannot carry a tag
     /// minted after them.
-    pub(crate) fn read(born_after: Option<u64>) -> io::Result<Self> {
+    pub(crate) fn read(born_after: Option<u64>, settle: Duration) -> io::Result<Self> {
         Ok(Self::from_pids(
             pids()?,
             born_after,
-            UNREADABLE_SETTLE,
+            settle,
             process,
             process_uid,
             environment,
@@ -277,6 +278,24 @@ impl ProcessTable {
 }
 
 pub fn scan(wrapper: Option<&ProcessIdentity>, tag: &str, subreaper: bool) -> io::Result<Scan> {
+    scan_within(wrapper, tag, subreaper, UNREADABLE_SETTLE)
+}
+
+pub(crate) fn scan_brief(
+    wrapper: Option<&ProcessIdentity>,
+    tag: &str,
+    subreaper: bool,
+) -> io::Result<Scan> {
+    scan_within(wrapper, tag, subreaper, BRIEF_SETTLE)
+}
+
+/// `settle` bounds the wait for processes unreadable mid-fork, exec or exit.
+pub(crate) fn scan_within(
+    wrapper: Option<&ProcessIdentity>,
+    tag: &str,
+    subreaper: bool,
+    settle: Duration,
+) -> io::Result<Scan> {
     if let Some(wrapper) = wrapper {
         if wrapper.node != node()? || wrapper.boot_id != boot_id()? {
             return Err(io::Error::new(
@@ -286,7 +305,7 @@ pub fn scan(wrapper: Option<&ProcessIdentity>, tag: &str, subreaper: bool) -> io
         }
     }
     let born_after = wrapper.map(|wrapper| wrapper.starttime);
-    Ok(ProcessTable::read(born_after)?.select(wrapper, tag, subreaper))
+    Ok(ProcessTable::read(born_after, settle)?.select(wrapper, tag, subreaper))
 }
 
 pub fn signal(process: &Process, signal: i32) -> io::Result<()> {
@@ -717,6 +736,40 @@ mod tests {
     }
 
     #[test]
+    fn brief_scan_keeps_persistently_unreadable_process_unverified() {
+        let wrapper = identity(std::process::id()).unwrap();
+        let uid = unsafe { libc::getuid() };
+        let pid = u32::MAX;
+        let reads = std::cell::Cell::new(0);
+        let table = ProcessTable::from_pids(
+            vec![pid],
+            Some(wrapper.starttime),
+            BRIEF_SETTLE,
+            |pid| {
+                Ok(Process {
+                    pid,
+                    ppid: 1,
+                    uid,
+                    starttime: wrapper.starttime,
+                    state: "R".into(),
+                })
+            },
+            denied,
+            |pid| {
+                reads.set(reads.get() + 1);
+                denied(pid)
+            },
+        );
+        assert!(reads.get() > 1);
+        assert_eq!(
+            table.select(Some(&wrapper), "tag", true).outcome(true),
+            CancelOutcome::Unverifiable {
+                unreadable: vec![pid]
+            }
+        );
+    }
+
+    #[test]
     fn a_process_that_exits_mid_scan_is_gone_but_keeps_its_child() {
         let wrapper = identity(std::process::id()).unwrap();
         let uid = unsafe { libc::getuid() };
@@ -778,7 +831,10 @@ mod tests {
         let child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!ProcessTable::read(None).unwrap().unreadable.contains(&pid));
+        assert!(!ProcessTable::read(None, UNREADABLE_SETTLE)
+            .unwrap()
+            .unreadable
+            .contains(&pid));
         drop(child);
     }
 
@@ -800,7 +856,7 @@ mod tests {
             }
         }
         assert!(!other_uid.is_empty(), "test requires other-uid processes");
-        let table = ProcessTable::read(None).unwrap();
+        let table = ProcessTable::read(None, UNREADABLE_SETTLE).unwrap();
         assert!(other_uid.iter().all(|pid| !table.unreadable.contains(pid)));
         assert!(table.unreadable.is_empty(), "{:?}", table.unreadable);
     }

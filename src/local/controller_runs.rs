@@ -63,11 +63,19 @@ fn timeout(args: &crate::ExpRunArgs, default: u64) -> Result<u64> {
 
 /// Names of the variables the run gets, whose values the controller reads from
 /// its own environment at launch.
-fn forwarded_env_keys(run_id: &str) -> Vec<String> {
-    let mut keys: Vec<String> = crate::config::launch_env(run_id).into_keys().collect();
+fn forwarded_env_keys(run_id: &str) -> Result<Vec<String>> {
+    let mut keys: Vec<String> = crate::config::launch_env(&stored_run(run_id)?)?
+        .into_keys()
+        .collect();
     keys.sort();
     keys.dedup();
-    keys
+    Ok(keys)
+}
+
+fn stored_run(run_id: &str) -> Result<crate::store::StoredRun> {
+    crate::store::Store::open()?
+        .get_run(run_id)?
+        .ok_or_else(|| anyhow!("Run `{run_id}` is not in the local store"))
 }
 
 /// Synced secrets and the Hugging Face token: what a Kaggle kernel cannot be
@@ -110,7 +118,7 @@ pub async fn colab_launch_spec(
         flavor: &flavor,
         archive: &source.path,
         timeout_secs,
-        env_keys: forwarded_env_keys(run_id),
+        env_keys: forwarded_env_keys(run_id)?,
     })?;
     let files = [
         (crate::jobs::colab::CONTROLLER_FILE.to_string(), controller),

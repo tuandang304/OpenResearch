@@ -8,7 +8,7 @@ export type DelegateStatus = "running" | "asking" | "approval" | "finished" | "f
  * about to, since its task is queued. What it waits on comes first.
  */
 export function delegateStatus(session: ChatSession, sessions: ChatSession[]): DelegateStatus {
-  if (session.delegate?.asking === "question") return "asking";
+  if (session.delegate?.asking === "question" || session.delegate?.asking === "env") return "asking";
   if (session.delegate?.asking) return "approval";
   if (session.busy || delegatesOf(sessions, session.id).some((child) => delegateStatus(child, sessions) === "running")) {
     return "running";
@@ -30,6 +30,18 @@ export function delegatesOf(sessions: ChatSession[], parentId: string): ChatSess
   return sessions
     .filter((session) => session.delegate?.parentId === parentId)
     .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+}
+
+/** The chats that delegated to `session`, root first, up to the first one not in `sessions`. */
+export function delegateAncestors(sessions: ChatSession[], session: ChatSession | undefined): ChatSession[] {
+  const ancestors: ChatSession[] = [];
+  for (let parentId = session?.delegate?.parentId; parentId;) {
+    const parent = sessions.find((row) => row.id === parentId);
+    if (!parent) break;
+    ancestors.unshift(parent);
+    parentId = parent.delegate?.parentId;
+  }
+  return ancestors;
 }
 
 /** Every delegate below `rootId`, each followed by its own, with its level under the root. */

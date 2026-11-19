@@ -1,6 +1,7 @@
 import { useWorkspace } from "../workspace";
 import type { InfiniteData } from "@tanstack/react-query";
 import type { ChatSession, SidebarChatPage } from "../api";
+import type { RunMonitor, RunMonitorEvent } from "../runMonitor/types";
 import { markLiveUpdate } from "./live";
 
 import { inputSummaryChanged } from "./chatState";
@@ -8,6 +9,24 @@ import { useEffect, useMemo } from "react";
 
 import { artifactFamilies } from "./invalidation";
 import { artifactUrlPrefix } from "../useFileVersion";
+
+/** The cached monitor with `event` applied, or null when the event can't be applied to it and the run must be read again. */
+export function applyMonitorEvent(cached: RunMonitor, event: RunMonitorEvent): RunMonitor | null {
+  if (event.reset || event.generation !== cached.generation) return null;
+  if (event.rev <= cached.rev) return cached;
+  const { appendFrom, append, appendRows, dropRows, ...body } = event;
+  const appends = Object.entries(append);
+  const rowAppends = Object.entries(appendRows);
+  const rowDrops = Object.entries(dropRows);
+  const grew = appends.length > 0 || rowAppends.length > 0 || rowDrops.length > 0;
+  if ((grew ? appendFrom : body.seriesRev) !== cached.seriesRev) return null;
+  const series = { ...cached.series };
+  for (const [name, points] of appends) series[name] = [...(series[name] ?? []), ...points];
+  const rows = { ...cached.rows };
+  for (const [name, left] of rowDrops) if (rows[name]) rows[name] = rows[name].slice(left);
+  for (const [name, added] of rowAppends) rows[name] = [...(rows[name] ?? []), ...added];
+  return { ...body, view: cached.view, parent: cached.parent, series, rows };
+}
 
 function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefined, next: T) {
   if (!rows) return undefined;
@@ -36,6 +55,8 @@ export function QueryEvents() {
     listExperimentsQuery,
     listProjectsQuery,
     listChatSessionsQuery,
+    listChatShownRunsQuery,
+    getRunMonitorQuery,
     refreshHarnesses,
     refreshHarness,
     getHarnessesQuery,
@@ -64,11 +85,32 @@ export function QueryEvents() {
       const old = queryClient.getQueryData(listRunsQuery(run.projectId).queryKey)?.find((row) => row.id === run.id);
       markLiveUpdate(queryClient, listRunsQuery(run.projectId).queryKey, run.id);
       queryClient.setQueryData(listRunsQuery(run.projectId).queryKey, (rows) => upsert(rows, run));
+      markLiveUpdate(queryClient, listChatShownRunsQuery().queryKey, run.id);
+      queryClient.setQueryData(listChatShownRunsQuery().queryKey, (shown) => shown && {
+        ...shown,
+        runs: shown.runs.map((item) => item.run.id === run.id && item.run.updatedAt <= run.updatedAt ? { ...item, run } : item),
+      });
       if (old?.commitSha !== run.commitSha) {
         invalidateFamilies(["getRunDiff"], scope, (query) => query.queryKey[3] === run.id);
         invalidateFamilies(["getExperimentDiff"], scope, (query) => query.queryKey[3] === run.experimentId);
       }
       emitEntity.onRun(run);
+    },
+    onRunMonitor(event) {
+      if (!isCurrentScope(scope)) return;
+      // A look newer than its chat's summary may have written a new one, which rides on the shown runs.
+      const looked = event.watch?.looks.filter((look) => look.said !== "error" && look.said !== "interrupted").at(-1)?.id;
+      const shown = queryClient.getQueryData(listChatShownRunsQuery().queryKey)?.runs.find((item) => item.run.id === event.runId);
+      if (looked !== undefined && shown && Number(looked) > Number(shown.watch?.lookId ?? 0)) {
+        void queryClient.invalidateQueries({ queryKey: listChatShownRunsQuery().queryKey, exact: true });
+      }
+      const { queryKey } = getRunMonitorQuery(event.runId);
+      markLiveUpdate(queryClient, queryKey);
+      const cached = queryClient.getQueryData(queryKey);
+      if (!cached) return;
+      const next = applyMonitorEvent(cached, event);
+      if (next) queryClient.setQueryData(queryKey, next);
+      else void queryClient.invalidateQueries({ queryKey, exact: true });
     },
     onExperiment(experiment) {
       if (!isCurrentScope(scope)) return;
@@ -90,6 +132,18 @@ export function QueryEvents() {
       invalidateFamilies(["resolvedFile"], scope, (query) => query.queryKey[3] === projectId && query.queryKey[5] === "artifacts");
       // Artifact previews poll their HEAD only as a slow fallback; this event is the live signal.
       invalidateFamilies(["fileVersion"], scope, (query) => typeof query.queryKey[3] === "string" && query.queryKey[3].startsWith(artifactUrlPrefix(projectId)));
+      const projectRuns = queryClient.getQueryData(listRunsQuery(projectId).queryKey) ?? [];
+      const shownRuns = queryClient.getQueryData(listChatShownRunsQuery().queryKey)?.runs ?? [];
+      const runIds = new Set(projectRuns.map((run) => run.id));
+      for (const { run } of shownRuns) if (run.projectId === projectId) runIds.add(run.id);
+      for (const id of runIds) {
+        const { queryKey } = getRunMonitorQuery(id);
+        const state = queryClient.getQueryState(queryKey);
+        const media = state?.data?.media ?? {};
+        if (state?.fetchStatus !== "fetching" && !Object.values(media).some((gallery) => gallery.error?.kind !== "unsupported")) continue;
+        markLiveUpdate(queryClient, queryKey);
+        void queryClient.invalidateQueries({ queryKey, exact: true });
+      }
     },
     onUsageChanged() {
       invalidateFamilies(["getUsage"], scope);
@@ -126,6 +180,8 @@ export function QueryEvents() {
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
       if (inputSummaryChanged(event, promptStates)) refreshSidebar();
+      else if (event.type === "busy") invalidateFamilies(["listSidebarChatSessions"], scope);
+      if (event.type === "background") invalidateFamilies(["listSidebarChatSessions", "listChatSessions"], scope);
       if (event.type === "branch" || event.type === "sessionDeleted" || event.type === "busy" && !event.busy) invalidateFamilies(["chatSearch"], scope);
       if (event.type === "session") markLiveUpdate(queryClient, listChatSessionsQuery(event.session.projectId).queryKey, event.session.id);
       else if (event.type === "busy" || event.type === "usage") markLiveUpdate(queryClient, [...scope, "listChatSessions"], event.sessionId);
@@ -136,6 +192,12 @@ export function QueryEvents() {
             : { type: "activeLeaf", sessionId: event.sessionId, leafId: event.activeLeafId }, true);
       }
       if (event.type === "session" && !deletedSessionIds.has(event.session.id)) {
+        // A chat that moved into another project leaves its old project's list.
+        for (const [key, rows] of queryClient.getQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] })) {
+          if (key[3] !== event.session.projectId && rows?.some((row) => row.id === event.session.id)) {
+            queryClient.setQueryData(key, rows.filter((row) => row.id !== event.session.id));
+          }
+        }
         queryClient.setQueryData(listChatSessionsQuery(event.session.projectId).queryKey, (rows) => {
           if (!rows) return undefined;
           const old = rows.find((row) => row.id === event.session.id);

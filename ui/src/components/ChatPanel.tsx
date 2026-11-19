@@ -1,6 +1,9 @@
+import type { LogSeek } from "../logWindow";
 import { useMachines } from "../machineSelection";
 import { downloadFile } from "../download";
+import { flushSync } from "react-dom";
 import {
+  Fragment,
   createContext,
   useContext,
   memo,
@@ -20,6 +23,8 @@ import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 
 import { Dialog } from "@base-ui/react/dialog";
+import { Menu } from "@base-ui/react/menu";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { EscapeScope } from "./EscapeScope";
 import { commandRegion, subscribeCommandRegion } from "../keyboardRegion";
 import { ChatSearch } from "./ChatSearch";
@@ -27,12 +32,16 @@ import { chatSearchRanges } from "../chatSearch";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { LibraryPicker } from "./LibraryPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
+import { NoProjectGroupHeader, PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
+import { mutCreateScratchProject } from "../queries/projects";
+import { ProjectIconTile } from "./ProjectIcon";
 import { SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
-import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
+import { EnvRequestCard } from "./EnvRequestCard";
+import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
-import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import {
@@ -55,11 +64,12 @@ import {
 import { useMutate } from "@clo/react-mutation";
 
 import { nativeOptions, sessionAcpHarness } from "../acp";
-import { deriveComposerSelection, selectionHarness } from "../modelSelection";
+import { deriveComposerSelection, harnessDisplayName, harnessKey, selectionHarness, withAutoReviewer } from "../modelSelection";
+import { useAgentSignIn } from "./HarnessSetupDialog";
 
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 
-import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL, optimisticUserMessage } from "../queries/chatState";
 import { CancelledError, useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 
@@ -72,20 +82,20 @@ import {
   paperToken,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
-import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
+import { formatForDisplay, matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
 import { autoDir, fmtBytes, ltr } from "../i18n";
-import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
 import {
   ArrowDown,
   ArrowRightLeft,
   ArrowUpRight,
   Bell,
-  Blocks,
+  BookMarked,
   BookOpen,
+  ChartSpline,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -94,21 +104,28 @@ import {
   CornerDownLeft,
   Copy,
   Link,
+  FileCode,
   FileText,
   FlaskConical,
   FolderPlus,
+  SquarePen,
+  CircleCheck,
   Globe,
   Gauge,
+  Hourglass,
+  Undo2,
   HelpCircle,
   Goal,
   LibraryBig,
   Lightbulb,
+  LogIn,
   MessageSquareQuote,
   MessagesSquare,
   MoreHorizontal,
+  NotebookText,
   Paperclip,
   Pencil,
-  Plus,
+  ScrollText,
   Search,
   SlidersHorizontal,
   SquareTerminal,
@@ -120,6 +137,7 @@ import {
 } from "lucide-react";
 
 import { BrandMark } from "./Wordmark";
+import { chatStatus, chatStatusWorking, type ChatStatus } from "../chatStatus";
 import {
   type ChatSessionPatch,
   DEMO_FIGURE_SESSION_ID,
@@ -133,16 +151,22 @@ import {
   reasoningFor,
   reconcileReasoning,
   reconcileServiceTier,
+  fmtDuration,
+  timeAgo,
   RejectedResponseError,
   modelLabel,
   type FirstActionSurface,
   type ChatImageAttachment,
+  type ArtifactEntry,
   type ChatMessage,
   type AlphaXivFolder,
   type ChatPart,
+  type ChatToolState,
+  type FailureCause,
   type OrxSource,
   type Autonomy,
   type ChatSession,
+  type SidebarChatCursor,
   type CitedMessage,
   type ChatSearchHit,
   type Harness,
@@ -150,6 +174,7 @@ import {
   type Project,
   type PromptAnswer,
   type RuntimeInfo,
+  type Run,
   type NativeChat,
   type SkillInfo,
   type StarterPrompt,
@@ -205,18 +230,25 @@ import {
   shellWords,
   shellWrapperBody,
   unwrapShellBody,
+  loopPaperIds,
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
+import { FileScopeContext } from "./FileReference";
+import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
+import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMeta } from "../researchActivity";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
-import { ExperimentRunBanner } from "./ExperimentRunBanner";
-import { SETTINGS_NAV, harnessSetupPath } from "./settingsNav";
-import type { SettingsTab } from "./SettingsPage";
-import { useNavOrder } from "../navOrder";
+import { RunBanner } from "./run/RunBanner";
+import { BackgroundTaskBanner } from "./BackgroundTaskBanner";
+import { cardSentence, runModel, sessionLeadRun, sessionRunMark } from "../runMonitor/model";
+import { Mark } from "./run/Mark";
+import { Sentence } from "./run/Sentence";
+import type { ShownRun } from "../runMonitor/types";
+import { SettingsHeader, harnessSetupPath, type SettingsTab } from "./settingsNav";
 import { SkillMenu } from "./SkillMenu";
 import { MentionMenu, type MentionMatch } from "./MentionMenu";
 import { useDebouncedValue } from "./NewProjectForm";
@@ -233,7 +265,6 @@ import {
 } from "./ModelPicker";
 import { useModelName } from "./pickerAgents";
 import { HarnessActivity, type StepDescription } from "./HarnessActivity";
-import { WorkDuration } from "./WorkDuration";
 import { UsageMenu } from "./UsageMenu";
 import { renderNote } from "./agentNote";
 import {
@@ -266,7 +297,8 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Textarea, Tooltip } from "./ui";
+import { Button, IconButton, LoadingRow, MENU_LABEL, MENU_SEPARATOR, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { QuestionDock, useQuestions } from "./QuestionDock";
 import { cn } from "./ui/cn";
 import { PaperTitle } from "./PaperTitle";
 
@@ -817,6 +849,84 @@ const PLAN_RESOLVED_CLASS_NAME = [
 
 const USER_MESSAGE_BUBBLE_CLASS_NAME = "bg-panel rounded-2xl py-2.5 px-4 text-base leading-normal whitespace-pre-wrap wrap-anywhere";
 
+/** Rises a send from the composer, re-measured every frame because the pin and late row measurements keep moving it. */
+function riseIntoPlace(
+  threadRef: React.RefObject<HTMLElement | null>,
+  innerRef: React.RefObject<HTMLElement | null>,
+  arrived: (started: boolean) => { rising: HTMLElement[]; fading?: Element | null } | null,
+  waitMs: number,
+) {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  const userScroll = ["wheel", "touchmove", "pointerdown", "keydown"] as const;
+  const giveUpAt = performance.now() + waitMs;
+  const raised = new Map<HTMLElement, number>();
+  let tail: { rising: HTMLElement[] } | null = null;
+  let from = innerRef.current?.getBoundingClientRect().top;
+  let listening: HTMLElement | null = null;
+  let start: number | null = null;
+  let pushed = 0;
+  let frame = 0;
+
+  const stop = () => {
+    cancelAnimationFrame(frame);
+    innerRef.current?.style.removeProperty("transform");
+    for (const element of raised.keys()) element.style.removeProperty("transform");
+    for (const type of userScroll) listening?.removeEventListener(type, stop);
+  };
+  const step = (now: number) => {
+    const thread = threadRef.current;
+    const inner = innerRef.current;
+    if (thread && listening !== thread) {
+      for (const type of userScroll) listening?.removeEventListener(type, stop);
+      for (const type of userScroll) thread.addEventListener(type, stop, { passive: true });
+      listening = thread;
+    }
+
+    const settled = inner ? inner.getBoundingClientRect().top - pushed : undefined;
+    const found = thread && inner ? arrived(start !== null) : null;
+    if (start === null) {
+      if (!found) {
+        // The frame the message lands in has not painted yet, so the last painted spot is where content glides from.
+        from = settled;
+        if (now < giveUpAt) frame = requestAnimationFrame(step);
+        else stop();
+        return;
+      }
+      start = now;
+      found.fading?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 250, delay: 350, easing: "ease", fill: "backwards" });
+    }
+    // A fast reply can drop the status line mid-rise, and the server's copy replaces the sent row; both keep rising.
+    if (found) tail = found;
+    const [lead, ...others] = tail?.rising ?? [];
+    if (!thread || !inner || !lead?.isConnected || settled === undefined) return stop();
+    const rising = [lead, ...others.filter((element) => element.isConnected)];
+
+    const progress = Math.min(1, (now - start) / 600);
+    const remaining = 2 ** (-10 * progress);
+    const leadSettled = lead.getBoundingClientRect().top - pushed - (raised.get(lead) ?? 0);
+    const glide = Math.min(300, Math.max(0, (from ?? settled) - settled));
+    const rise = Math.min(300, Math.max(glide, thread.getBoundingClientRect().bottom - leadSettled));
+
+    pushed = glide * remaining;
+    inner.style.transform = `translateY(${pushed}px)`;
+    for (const element of raised.keys()) {
+      if (!rising.includes(element)) element.style.removeProperty("transform");
+    }
+    raised.clear();
+    const lift = (rise - glide) * remaining;
+    for (const element of rising) {
+      raised.set(element, lift);
+      element.style.transform = `translateY(${lift}px)`;
+    }
+
+    if (progress < 1) frame = requestAnimationFrame(step);
+    else stop();
+  };
+
+  frame = requestAnimationFrame(step);
+}
+
 const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 // --- chat state --------------------------------------------------------------
@@ -825,6 +935,7 @@ const NO_MESSAGES: ChatMessage[] = [];
 const EMPTY_SESSIONS: ChatSession[] = [];
 // Sidebar projects start folded each time the app opens; ones the user opens stay open until it closes.
 const openedSidebarProjects = new Map<string, readonly string[]>();
+const EMPTY_RUNS: ShownRun[] = [];
 type DelegateRow = { session: ChatSession; status: DelegateStatus };
 const EMPTY_DELEGATES: DelegateRow[] = [];
 const EMPTY_RECOVERY_OVERRIDES = {};
@@ -850,7 +961,35 @@ function nativeOrxSkillPath(tool: string, skillName: string): string | null {
   return null;
 }
 
-type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "command";
+/** What loading each of orx's research guides prepares the agent to do. */
+const GUIDE_LABELS: Record<string, [done: () => string, progress: () => string]> = {
+  "orx-agent-delegation": [m.activity_guide_delegation, m.activity_guide_delegation_progress],
+  "orx-compute": [m.activity_guide_compute, m.activity_guide_compute_progress],
+  "orx-create": [m.activity_guide_create, m.activity_guide_create_progress],
+  "orx-customize": [m.activity_guide_customize, m.activity_guide_customize_progress],
+  "orx-experiment-tree": [m.activity_guide_experiment_tree, m.activity_guide_experiment_tree_progress],
+  "orx-feedback": [m.activity_guide_feedback, m.activity_guide_feedback_progress],
+  "orx-figures": [m.activity_guide_figures, m.activity_guide_figures_progress],
+  "orx-git": [m.activity_guide_git, m.activity_guide_git_progress],
+  "orx-instances": [m.activity_guide_instances, m.activity_guide_instances_progress],
+  "orx-lit-review": [m.activity_guide_lit_review, m.activity_guide_lit_review_progress],
+  "orx-logs": [m.activity_guide_logs, m.activity_guide_logs_progress],
+  "orx-paper": [m.activity_guide_paper, m.activity_guide_paper_progress],
+  "orx-reports": [m.activity_guide_reports, m.activity_guide_reports_progress],
+  "orx-results": [m.activity_guide_results, m.activity_guide_results_progress],
+};
+
+/** orx's own skills are the research guides it gives every agent, each named
+ * for what it prepares the agent to do. */
+function guideFields(skillName: string | null): Partial<Pick<ToolActivity, "guide" | "label" | "progressLabel">> {
+  if (!skillName?.startsWith("orx-")) return {};
+  const labels = GUIDE_LABELS[skillName];
+  return labels
+    ? { guide: true, label: labels[0](), progressLabel: labels[1]() }
+    : { guide: true, progressLabel: m.activity_loading_research_guide() };
+}
+
+type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "run" | "log" | "command";
 
 interface ToolActivity {
   kind: ToolActivityKind;
@@ -863,11 +1002,22 @@ interface ToolActivity {
   fileRef?: string;
   labelTarget?: string;
   litCall?: NonNullable<ReturnType<typeof parseOrxLit>>;
+  /** Every paper an `orx paper` call reads, when it reads more than one or reads them in a loop. */
+  paperIds?: string[];
   queries?: string[];
   runIds?: string[];
   experimentIds?: string[];
   /** Chat sessions `orx agent spawn` created in this tool call. */
   spawnedSessionIds?: string[];
+  /** The label naming the experiment of the call's one run, in place of `label` and `progressLabel`. */
+  runLabel?: (experiment: string) => string;
+  runProgressLabel?: (experiment: string) => string;
+  /** A row about the chat itself, such as a compaction, which stays out of the research summary. */
+  aside?: boolean;
+  /** Reads one of orx's research guides. */
+  guide?: boolean;
+  /** The project an `orx project create` call proposed, once the command accepted it. */
+  projectProposal?: ProjectProposal;
 }
 
 type OpenTranscriptFile = (
@@ -1326,6 +1476,7 @@ function idsFromToolOutput(output: string | undefined, resource: "runs" | "exper
       new RegExp(`/runs/(${UUID_PATTERN})`, "gi"),
       new RegExp(`\\brun(?:_|\\s+)id:\\s*(${UUID_PATTERN})`, "gi"),
       new RegExp(`^\\s*RUN\\s+(${UUID_PATTERN})\\b`, "gim"),
+      new RegExp(`\\bRun\\s+(${UUID_PATTERN})\\b`, "g"),
       new RegExp(`={3,}\\s*(${UUID_PATTERN})\\s*={3,}`, "gi"),
     ]
     : [
@@ -1553,7 +1704,17 @@ function computeToolActivity(part: ChatPart): ToolActivity {
   switch (normalizedTool) {
     case "shell":
     case "bash": {
-      if (!rawCommand && !commandArgv?.length) return { kind: "command", label: m.chat_panel_ran_a_command() };
+      const proposed = (proposal: ProjectProposal): ToolActivity => ({
+        kind: "project",
+        label: m.activity_proposed_project({ name: autoDir(proposal.name) }),
+        projectProposal: part.state?.status === "completed" ? proposal : undefined,
+      });
+      if (!rawCommand && !commandArgv?.length) {
+        // ACP agents may name the command only in the call's title.
+        const titled = shellCommandSegments(meaningfulCommand(part.state?.title ?? ""))
+          .map((segment) => projectProposal(orxArgv(segment.raw))).find(Boolean);
+        return titled ? proposed(titled) : { kind: "command", label: m.chat_panel_ran_a_command() };
+      }
       const command = meaningfulCommand(rawCommand ?? commandArgv?.join(" ") ?? "");
       const shellSegments = shellCommandSegments(command);
       let literatureInputs: Array<string | readonly string[]> = shellSegments.map((segment) => segment.raw);
@@ -1563,20 +1724,23 @@ function computeToolActivity(part: ChatPart): ToolActivity {
           ? [commandArgv]
           : shellCommandSegments(normalizeShellBody(wrapperBody)).map((segment) => segment.raw);
       }
-      let litCall: ReturnType<typeof parseOrxLit> = null;
-      for (const input of literatureInputs) {
-        litCall = parseOrxLit(input);
-        if (litCall) break;
-      }
+      const proposal = literatureInputs.map((input) => projectProposal(orxArgv(input))).find(Boolean);
+      if (proposal) return proposed(proposal);
+      const litCalls = literatureInputs.flatMap((input) => parseOrxLit(input) ?? []);
+      const litCall = litCalls[0] ?? null;
       const hasNonLiteratureOrx = literatureInputs.some((input) => {
         const argv = orxArgv(input);
         return argv !== null && argv[0] !== "discover" && argv[0] !== "paper";
       });
       if (litCall && !hasNonLiteratureOrx) {
-        const queries = litCall.kind === "discover" && !litCall.query
-          ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
-          : [];
-        const discoveryLabel = litCall.kind === "discover"
+        const chainedSearches = litCalls.filter((call) => call.kind === "discover");
+        const queries = chainedSearches.length > 1
+          ? chainedSearches.flatMap((call) => call.query ? [call.query] : [])
+          : litCall.kind === "discover" && !litCall.query
+            ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
+            : [];
+        const oneStrategy = new Set(chainedSearches.map((call) => call.strategy)).size <= 1;
+        const discoveryLabel = litCall.kind === "discover" && oneStrategy
           ? {
             keyword: m.activity_searched_alphaxiv_full_text(),
             embedding: m.activity_searched_alphaxiv_semantically(),
@@ -1587,16 +1751,26 @@ function computeToolActivity(part: ChatPart): ToolActivity {
             semanticscholar: m.activity_searched_semantic_scholar(),
           }[litCall.strategy]
           : null;
-        const label = litCall.kind === "discover"
-          ? litCall.query
-            ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: litCall.query })
-            : queries.length === 1
-              ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: queries[0] })
-              : queries.length > 1
-                ? m.activity_for_queries({ activity: discoveryLabel ?? m.activity_searched_literature(), count: fmtNumber(queries.length) })
-                : discoveryLabel ?? m.activity_searched_literature()
-          : litCall.id ? m.activity_read_target({ target: ltr(litCall.id) }) : m.activity_read_paper();
-        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall, queries };
+        const literatureCommand = commandArgv ? shellWrapperBody(commandArgv) ?? command : command;
+        const paperIds = [...new Set([
+          ...litCalls.flatMap((call) => call.kind === "paper" && call.id ? [call.id] : []),
+          ...loopPaperIds(literatureCommand),
+        ])];
+        const searched = discoveryLabel ?? m.activity_searched_literature();
+        const query = litCall.kind === "discover" ? litCall.query ?? (queries.length === 1 ? queries[0] : null) : null;
+        const label = litCall.kind === "paper"
+          ? paperIds.length > 1
+            ? m.activity_read_papers({ count: fmtNumber(paperIds.length) })
+            : paperIds[0] ? m.activity_read_target({ target: ltr(paperIds[0]) }) : m.activity_read_paper()
+          : queries.length > 1
+            ? m.activity_for_queries({ activity: searched, count: fmtNumber(queries.length) })
+            : query ? m.activity_for_query({ activity: searched, query }) : searched;
+        const progressLabel = litCall.kind === "paper"
+          ? m.activity_reading_paper()
+          : litCall.query
+            ? m.activity_searching_literature_for({ query: litCall.query })
+            : m.activity_searching_literature();
+        return { kind: litCall.kind === "paper" ? "read" : "search", label, progressLabel, litCall, queries, paperIds: litCall.kind === "paper" ? paperIds : undefined };
       }
 
       if (commandInvokesOrx(command, "agent\\s+spawn")) {
@@ -1623,16 +1797,44 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       if (commandInvokesOrx(command, "logs")) {
         const runIds = commandRunIds(command, toolOutput, resourceRunIds, legacyTargetIds);
         const label = runIds.length === 1 ? m.activity_reviewed_run_log() : m.activity_reviewed_run_logs();
-        return { kind: "project", label, runIds, litCall: litCall ?? undefined };
+        return {
+          kind: "log",
+          label,
+          progressLabel: m.activity_reading_run_log(),
+          runIds,
+          runLabel: (experiment) => m.activity_read_log_of({ experiment }),
+          runProgressLabel: (experiment) => m.activity_reading_log_of({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       if (commandInvokesOrx(command, "exp\\s+run")) {
-        return { kind: "project", label: m.chat_panel_started_an_experiment_run(), litCall: litCall ?? undefined };
+        return {
+          kind: "run",
+          label: m.chat_panel_started_an_experiment_run(),
+          progressLabel: m.activity_launching_experiment(),
+          runIds: idsFromToolOutput(toolOutput, "runs"),
+          runLabel: (experiment) => m.activity_launched_experiment({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       if (commandInvokesOrx(command, "exp\\s+wait")) {
-        return { kind: "project", label: m.chat_panel_waited_for_an_experiment_run(), litCall: litCall ?? undefined };
+        return {
+          kind: "run",
+          label: m.chat_panel_waited_for_an_experiment_run(),
+          progressLabel: m.activity_waiting_on_run(),
+          runIds: idsFromToolOutput(toolOutput, "runs"),
+          runLabel: (experiment) => m.activity_waited_on_experiment({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       if (commandInvokesOrx(command, "exp\\s+cancel")) {
-        return { kind: "project", label: m.chat_panel_requested_an_experiment_stop(), litCall: litCall ?? undefined };
+        return {
+          kind: "run",
+          label: m.chat_panel_requested_an_experiment_stop(),
+          runIds: idsFromToolOutput(toolOutput, "runs"),
+          runLabel: (experiment) => m.activity_stopped_experiment({ experiment }),
+          litCall: litCall ?? undefined,
+        };
       }
       const readsProject = commandInvokesOrx(command, "project\\s+view");
       if (readsProject && readsExperimentStatus && readsExperimentNotes) {
@@ -1686,6 +1888,9 @@ function computeToolActivity(part: ChatPart): ToolActivity {
           litCall: litCall ?? undefined,
         };
       }
+      if (commandInvokesOrx(command, "create-experiment")) {
+        return { kind: "project", label: m.activity_created_an_experiment(), progressLabel: m.activity_creating_an_experiment(), litCall: litCall ?? undefined };
+      }
       if (commandInvokesOrx(command, "runs?")) {
         return { kind: "project", label: m.chat_panel_listed_project_runs(), litCall: litCall ?? undefined };
       }
@@ -1704,6 +1909,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return {
           kind: skillName ? "skill" : "read",
           label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(gitShowTarget.path)) }),
+          ...guideFields(skillName),
           filePath: gitShowTarget.path,
           fileRef: gitShowTarget.ref,
           labelTarget: skillName ? `${skillName} skill` : baseName(gitShowTarget.path),
@@ -1728,6 +1934,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return {
           kind: skillName ? "skill" : "read",
           label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(readTarget)) }),
+          ...guideFields(skillName),
           filePath: readPath,
           labelTarget: skillName ? `${skillName} skill` : baseName(readTarget),
         };
@@ -1781,6 +1988,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return {
         kind: "skill",
         label: skillName ? m.activity_loaded_skill({ name: ltr(skillName) }) : m.activity_loaded_a_skill(),
+        ...guideFields(skillName),
         filePath: filePath ?? undefined,
         labelTarget: filePath && skillName ? `${skillName} skill` : undefined,
       };
@@ -1792,6 +2000,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return {
           kind: "skill",
           label: m.activity_read_skill({ name: ltr(skillName) }),
+          ...guideFields(skillName),
           filePath: filePath ?? undefined,
           labelTarget: `${skillName} skill`,
         };
@@ -1856,7 +2065,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return { kind: "agent", label: from && to ? m.activity_switched_harness({ from: ltr(from), to: ltr(to) }) : part.state?.title ?? tool };
     }
     case "importedchat":
-      return { kind: "project", label: m.activity_imported_chat() };
+      return { kind: "project", label: m.activity_imported_chat(), aside: true };
     case "contextcompaction":
       return {
         kind: "command",
@@ -1867,6 +2076,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
             ? m.activity_compacting_context()
             : m.activity_compacted_context(),
         progressLabel: m.activity_compacting_context(),
+        aside: true,
       };
     default: {
       const detail = description ?? filePath ?? rawCommand ?? part.state?.title ?? "";
@@ -1888,6 +2098,12 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
     approvalLabel,
     // Paper arguments may be full titles, which have no page to link.
     litCall: { kind: "paper", source: "alphaxiv", id: paper && !/\s/.test(paper) ? paper : undefined },
+    // Saving a paper or reading notes on it does not read it.
+    paperIds: [],
+  });
+  const read = (label: string, paper: string | null): ToolActivity => ({
+    ...row("read", label, paper ?? undefined),
+    paperIds: paper && !/\s/.test(paper) ? [paper] : [],
   });
   const readPaper = (paper: string | null) =>
     paper ? m.activity_read_target({ target: ltr(paper) }) : m.activity_read_paper();
@@ -1929,11 +2145,11 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
       const label = queries.length > 1
         ? m.activity_for_queries({ activity: readPaper(paper), count: fmtNumber(queries.length) })
         : forQuery(readPaper(paper), queries[0] ?? null);
-      return row("read", label, paper ?? undefined);
+      return read(label, paper);
     }
     case "get_paper_content": {
       const paper = inputString(input, "url");
-      return row("read", readPaper(paper), paper ?? undefined);
+      return read(readPaper(paper), paper);
     }
     case "read_files_from_github_repository": {
       const repository = inputString(input, "githubUrl")
@@ -1946,7 +2162,10 @@ function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolAct
     case "discover_papers": {
       const keywords = exactInputStringArray(input, "keywords") ?? [];
       const query = inputString(input, "question") ?? (keywords.join(", ") || null);
-      return row("search", forQuery(m.activity_searched_alphaxiv(), query));
+      return {
+        ...row("search", forQuery(m.activity_searched_alphaxiv(), query)),
+        progressLabel: query ? m.activity_searching_literature_for({ query }) : m.activity_searching_literature(),
+      };
     }
     case "find_researchers":
       return row("search", forQuery(m.activity_alphaxiv_searched_researchers(), inputString(input, "topic", "query")));
@@ -2093,11 +2312,19 @@ function ToolActivityIcon({ activity, className = "" }: { activity: ToolActivity
   } else {
     switch (activity.kind) {
       case "skill":
-        icon = <Blocks {...props} />;
+        icon = <BookMarked {...props} />;
         break;
       case "read":
+        icon = /\.(?:md|markdown|txt|rst|tex|csv|tsv|log)$/i.test(activity.filePath ?? "")
+          ? <FileText {...props} />
+          : <FileCode {...props} />;
+        break;
       case "project":
-        icon = <BookOpen {...props} />;
+      case "run":
+        icon = <FlaskConical {...props} />;
+        break;
+      case "log":
+        icon = <ScrollText {...props} />;
         break;
       case "search":
         icon = <Search {...props} />;
@@ -2275,6 +2502,21 @@ function ToolActivityLabel({
       </>
     );
   }
+  const onlyRunId = activity.runIds?.length === 1 ? activity.runIds[0] : null;
+  const onlyRunName = onlyRunId && runExperimentName?.(onlyRunId);
+  if (activity.runLabel && onlyRunId && onlyRunName) {
+    const label = activity.runLabel(autoDir(onlyRunName));
+    return onOpenRun ? (
+      <button
+        type="button"
+        className="tool-target text-start"
+        title={m.a11y_open_logs_for_run({ run: ltr(onlyRunId) })}
+        {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun(onlyRunId, intent), { stopPropagation: true })}
+      >
+        {label}
+      </button>
+    ) : label;
+  }
   if (activity.runIds?.length) {
     const runIds = runExperimentName
       ? activity.runIds.filter((runId) => Boolean(runExperimentName(runId)))
@@ -2363,12 +2605,14 @@ function activityInProgress(activity: ToolActivity): ToolActivity {
     read: m.activity_reading(),
     search: m.activity_searching(),
     edit: m.activity_editing(),
-    project: m.activity_reviewing(),
+    project: m.activity_checking_experiments(),
+    run: m.activity_running(),
+    log: m.activity_reading_run_log(),
     web: m.activity_browsing(),
     agent: m.activity_delegating(),
     command: m.activity_running(),
   }[activity.kind];
-  return { ...activity, label };
+  return { ...activity, label, runLabel: activity.runProgressLabel };
 }
 
 /** Plain-text step summary for the live activity panel. */
@@ -2400,6 +2644,8 @@ function permissionActivityLabel(tool: string | undefined, input: Record<string,
     search: m.activity_search(),
     edit: m.activity_edit(),
     project: m.activity_review(),
+    run: m.activity_run(),
+    log: m.activity_read(),
     web: m.activity_browse(),
     agent: m.activity_delegate(),
     command: m.activity_run(),
@@ -2474,7 +2720,7 @@ function useDelayedToolShimmer(active: boolean): boolean {
 }
 
 function groupIconActivity(activities: ToolActivity[]): ToolActivity {
-  const priority: ToolActivityKind[] = ["skill", "read", "search", "edit", "project", "web", "command", "agent"];
+  const priority: ToolActivityKind[] = ["skill", "read", "search", "edit", "project", "run", "log", "web", "command", "agent"];
   for (const kind of priority) {
     const activity = activities.find((candidate) => candidate.kind === kind);
     if (activity) return activity;
@@ -2520,11 +2766,40 @@ function squashToolParts(parts: ChatPart[]): SquashedToolPart[] {
   return squashed;
 }
 
+type FailureInput = NonNullable<ChatToolState["input"]>;
+
+/** How a chat answers a failed turn: the agent or account it ran on, and what fixes a cause here, if anything does. */
+export interface FailureActions {
+  agent: (input: FailureInput) => Harness | undefined;
+  fix: (cause: FailureCause, input: FailureInput) => (() => void) | undefined;
+}
+
+const FAILURE_LABEL: Record<FailureCause, (agent?: string) => string> = {
+  sign_in: (agent) => agent ? m.chat_failure_signed_out({ name: autoDir(agent) }) : m.onboarding_not_signed_in(),
+  usage_limit: () => m.chat_session_limit_reached(),
+  credits: () => m.chat_failure_credits(),
+  model_unavailable: () => m.chat_model_unavailable(),
+  context_full: () => m.chat_failure_context_full(),
+  overloaded: () => m.chat_failure_overloaded(),
+  network: () => m.chat_panel_temporary_api_error(),
+};
+
+const FIX_LABEL: Partial<Record<FailureCause, () => string>> = {
+  sign_in: () => m.harness_setup_login(),
+  model_unavailable: () => m.model_picker_choose_model(),
+  context_full: () => m.usage_compact(),
+};
+
+function isSignInFailure(part: ChatPart) {
+  return part.state?.input?.cause === "sign_in";
+}
+
 function TurnStatusRow({
   part,
   busy,
   recovering,
   onRecover,
+  failure,
   usageLimited = false,
   temporaryApiError = false,
   superseded = false,
@@ -2539,6 +2814,7 @@ function TurnStatusRow({
   busy: boolean;
   recovering: boolean;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  failure?: FailureActions;
 }) {
   const input = part.state?.input;
   const nextRetryAt = input?.nextRetryAt ?? null;
@@ -2565,34 +2841,63 @@ function TurnStatusRow({
   }
   const action = parseRecoveryAction(input?.recoveryAction);
   const turnId = input?.turnId;
-  const label = isModelAccessLimitPart(part)
-    ? m.chat_model_unavailable()
-    : usageLimited ? m.chat_session_limit_reached()
-    : temporaryApiError ? m.chat_panel_temporary_api_error() : m.chat_turn_incomplete();
-  const Icon = temporaryApiError ? WifiOff : usageLimited ? Gauge : TriangleAlert;
-  const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
+  const reportedCause = input?.cause;
+  const cause = isSignInFailure(part) ? "sign_in"
+    : reportedCause && Object.hasOwn(FAILURE_LABEL, reportedCause) ? reportedCause
+    : isModelAccessLimitPart(part) ? "model_unavailable" : usageLimited ? "usage_limit" : temporaryApiError ? "network" : undefined;
+  const agent = input && failure?.agent(input);
+  const errorMessage = cleanToolError(part.state?.error || "");
+  const errorHeadline = errorMessage.split("\n", 1)[0].trim();
+  const label = cause ? FAILURE_LABEL[cause](agent && (agent.profile?.name ?? harnessDisplayName(agent)))
+    : errorHeadline || m.chat_turn_incomplete();
+  const Icon = cause === "network" ? WifiOff : cause === "overloaded" ? Hourglass : cause === "sign_in" ? LogIn : cause === "usage_limit" ? Gauge : TriangleAlert;
+  const quiet = cause === "network" || cause === "overloaded";
+  const fixLabel = cause && FIX_LABEL[cause];
+  const fix = fixLabel && input && failure?.fix(cause, input);
+  // While the agent is signed out, only signing in, here or in the composer, sends the turn again.
+  const waitsForSignIn = cause === "sign_in" && agent?.authState === "needsLogin";
+  const recover = onRecover && turnId && (action === "retry" || action === "continue") && cause !== "usage_limit" && !waitsForSignIn
+    ? action
+    : undefined;
   return (
-    <Disclosure id={`${part.id}:${turnId ?? ""}`} className={cn("turn-usage-limit group/limit mt-4 text-base", superseded ? "text-muted" : "text-subtext")} data-superseded={superseded || undefined}>
-      <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
-        <Icon size={superseded ? 16 : 18} className={temporaryApiError || superseded ? "shrink-0 text-muted" : "shrink-0 text-accent-red"} aria-hidden="true" />
-        <span>{label}</span>
-        <ChevronRight size={16} className={cn("shrink-0 transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none", superseded ? "text-muted" : "text-text")} aria-hidden="true" />
-      </summary>
-      <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
-        {errorMessage}
-      </pre>
-      {!usageLimited && onRecover && turnId && (action === "retry" || action === "continue") && (
-        <Button
-          type="button"
-          size="small"
-          className="mt-2"
-          disabled={busy || recovering}
-          onClick={() => onRecover(turnId, action)}
-        >
-          {recovering ? m.chat_starting() : action === "retry" ? m.app_retry() : m.chat_continue()}
-        </Button>
+    <div className={cn("turn-failure mt-4 text-base", superseded ? "text-muted" : "text-subtext")} data-superseded={superseded || undefined}>
+      <div className="flex items-center justify-between gap-3">
+        <p className="m-0 flex items-center gap-2">
+          <Icon size={superseded ? 16 : 18} className={quiet || superseded ? "shrink-0 text-muted" : "shrink-0 text-accent-red"} aria-hidden="true" />
+          <span>{label}</span>
+        </p>
+        {cause === "sign_in" && fix && (
+          <Button type="button" size="small" variant="primary" className="shrink-0" disabled={busy || recovering} onClick={fix} aria-haspopup="dialog">
+            {m.harness_setup_login()}
+          </Button>
+        )}
+      </div>
+      {((fix && cause !== "sign_in") || recover) && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {fix && fixLabel && cause !== "sign_in" && (
+            <Button type="button" size="small" variant="primary" disabled={busy || recovering} onClick={fix}>
+              {fixLabel()}
+            </Button>
+          )}
+          {recover && turnId && (
+            <Button type="button" size="small" disabled={busy || recovering} onClick={() => onRecover?.(turnId, recover)}>
+              {recovering ? m.chat_starting() : recover === "retry" ? m.app_retry() : m.chat_continue()}
+            </Button>
+          )}
+        </div>
       )}
-    </Disclosure>
+      {errorMessage && errorMessage !== label && (
+        <Disclosure id={`${part.id}:${turnId ?? ""}`} className="group/limit mt-2">
+          <summary className="flex w-fit max-w-full items-center gap-1.5 cursor-pointer list-none rounded-sm text-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+            <ChevronRight size={14} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+            <span>{m.onboarding_error_details()}</span>
+          </summary>
+          <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
+            {errorMessage}
+          </pre>
+        </Disclosure>
+      )}
+    </div>
   );
 }
 
@@ -2605,6 +2910,7 @@ function ToolRow({
   revealPartId,
   activity,
   repeatCount = 1,
+  quiet = false,
   onOpenFile,
   onOpenRun,
   onOpenSpawnedSession,
@@ -2618,6 +2924,8 @@ function ToolRow({
   revealPartId?: string;
   activity: ToolActivity;
   repeatCount?: number;
+  /** Supporting work, such as reading code, drawn a step dimmer than research. */
+  quiet?: boolean;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
   onOpenSpawnedSession?: (sessionId: string) => void;
@@ -2660,7 +2968,7 @@ function ToolRow({
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted" />
       )}
-      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red" : "text-subtext"}`}>
+      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red group-hover/detail:text-text" : quiet ? "text-muted" : "text-subtext"}`}>
         <ToolActivityLabel
           activity={activity}
           onOpenFile={onOpenFile}
@@ -2685,15 +2993,18 @@ function ToolRow({
 
   return (
     <div data-part-id={part.id} className="tool-row tool-row-error flex flex-col min-w-0">
-      <div className="flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm">
+      <div
+        className="group/detail flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm cursor-pointer hover:bg-surface"
+        onClick={toggleUnlessControl(() => { expansionState?.set(key, !detailOpen); setDetailOpen(!detailOpen); })}
+      >
         {line}
         <button
           type="button"
-          className="tool-row-detail-toggle inline-flex h-6 shrink-0 items-center justify-center p-0.5 rounded-sm cursor-pointer hover:bg-surface"
+          data-row-toggle
+          className="tool-row-detail-toggle inline-flex h-6 shrink-0 items-center justify-center p-0.5 rounded-sm cursor-pointer"
           aria-expanded={detailOpen}
           aria-controls={detailId}
           aria-label={detailOpen ? m.a11y_hide_error_details({ activity: activity.label }) : m.a11y_show_error_details({ activity: activity.label })}
-          onClick={() => { expansionState?.set(key, !detailOpen); setDetailOpen(!detailOpen); }}
         >
           <ChevronRight size={16} className={`text-accent-red transition-transform duration-120 ease-standard ${detailOpen ? "rotate-90" : ""}`} />
         </button>
@@ -2709,6 +3020,15 @@ function ToolRow({
   );
 }
 
+/** Toggles the row on click, unless a nested link or button without `data-row-toggle` was hit. */
+function toggleUnlessControl(toggle: () => void) {
+  return (event: React.MouseEvent<HTMLElement>) => {
+    const control = (event.target as Element).closest("a, button, [role='button']");
+    if (control && !control.hasAttribute("data-row-toggle")) return;
+    toggle();
+  };
+}
+
 /** Consecutive calls render as one Codex-style activity group: a readable
  * aggregate description and a collapsible list of semantic rows. */
 function ToolGroup({
@@ -2718,6 +3038,8 @@ function ToolGroup({
   revealPartId,
   pendingTail,
   streaming = false,
+  summary,
+  quiet = false,
   onOpenSubagent,
   onOpenFile,
   onOpenRun,
@@ -2732,6 +3054,9 @@ function ToolGroup({
   revealPartId?: string;
   pendingTail?: boolean;
   streaming?: boolean;
+  /** What the closed group says it did; "Used tools" when absent. */
+  summary?: string;
+  quiet?: boolean;
   onOpenSubagent?: OpenSubagent;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
@@ -2775,7 +3100,7 @@ function ToolGroup({
   const iconActivity = pendingActivity ?? groupIconActivity(activities);
   const summaryLabel = pendingActivity
     ? pendingActivity.label
-    : m.chat_panel_used_tools();
+    : summary ?? m.chat_panel_used_tools();
   // "Running…" alone hides what runs; show the command beside it.
   const pendingCommand = pendingActivity?.kind === "command" && tailPart ? describeActivityStep(tailPart).detail : null;
   const pendingCommandNode = pendingCommand && (
@@ -2822,6 +3147,7 @@ function ToolGroup({
         <ToolRow
           part={parts[0]}
           activity={displayParts[0].activity}
+          quiet={quiet}
           onOpenFile={onOpenFile}
           onOpenRun={onOpenRun}
           onOpenSpawnedSession={onOpenSpawnedSession}
@@ -2835,7 +3161,10 @@ function ToolGroup({
 
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-subtext text-start">
+      <div
+        className={`tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-start cursor-pointer ${quiet && !pendingActivity ? "text-muted" : "text-subtext"}`}
+        onClick={toggleUnlessControl(toggle)}
+      >
         <ToolActivityIcon activity={iconActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
         {pendingActivity ? (
           <span
@@ -2857,7 +3186,7 @@ function ToolGroup({
           <button
             type="button"
             className="tool-group-label min-w-0 whitespace-normal break-words cursor-pointer text-start"
-            onClick={toggle}
+            data-row-toggle
             aria-expanded={open}
           >
             {summaryLabel}
@@ -2866,7 +3195,7 @@ function ToolGroup({
         <button
           type="button"
           className="tool-group-chevron-button inline-flex h-6 shrink-0 items-center justify-center p-px cursor-pointer rounded-sm"
-          onClick={toggle}
+          data-row-toggle
           aria-expanded={open}
           aria-label={open ? m.chat_collapse_tool_activity() : m.chat_expand_tool_activity()}
         >
@@ -2896,6 +3225,7 @@ function ToolGroup({
                 revealPartId={revealPartId}
                 repeatCount={count}
                 activity={activity}
+                quiet={quiet}
                 onOpenFile={onOpenFile}
                 onOpenRun={onOpenRun}
                 onOpenSpawnedSession={onOpenSpawnedSession}
@@ -2911,9 +3241,230 @@ function ToolGroup({
   );
 }
 
-/** Interactive card for a plan / permission / question prompt. Approving (or
- * answering) resumes the session. Once resolved, cards mirror Claude Code:
- * a permission leaves no trace, a plan collapses to an expandable
+type ToolFacet = "literature" | "runs" | "experiments" | "guides" | "reports" | "code" | "other";
+
+function toolFacet(part: ChatPart, activity: ToolActivity): ToolFacet {
+  if (isSubagentPart(part) || activity.aside) return "other";
+  if (activity.litCall) return "literature";
+  switch (activity.kind) {
+    case "run":
+    case "log":
+      return "runs";
+    case "project":
+      return "experiments";
+    case "skill":
+      return "guides";
+    case "edit":
+      return reportPath(activity) ? "reports" : "code";
+    case "read":
+    case "search":
+    case "command":
+      return "code";
+    default:
+      return "other";
+  }
+}
+
+/** A Markdown file the agent wrote to the artifacts directory. */
+function reportPath(activity: ToolActivity): string | null {
+  const path = activity.kind === "edit" ? activity.filePath : undefined;
+  return path && /(?:^|[\\/])artifacts[\\/].+\.md$/i.test(path) ? path : null;
+}
+
+/** The papers a call finished reading, which the shelf shows in place of its row. */
+function shelvedPapers(part: ChatPart, activity: ToolActivity): ShelfPaper[] {
+  const lit = activity.litCall;
+  if (lit?.kind !== "paper" || part.state?.status !== "completed") return [];
+  const ids = activity.paperIds ?? (lit.id ? [lit.id] : []);
+  return ids.map((id) => ({
+    source: ids.length === 1 ? lit.source : parseOrxLit(["orx", "paper", id])?.source ?? lit.source,
+    id,
+    output: ids.length === 1 ? part.state?.output : undefined,
+  }));
+}
+
+function literatureSearches(activity: ToolActivity): number {
+  return activity.litCall && activity.kind === "search" ? Math.max(1, activity.queries?.length ?? 0) : 0;
+}
+
+/** The runs a call names that this workspace knows. */
+function knownRunIds(activity: ToolActivity, runExperimentName?: (runId: string) => string): string[] {
+  if (activity.kind !== "run" && activity.kind !== "log") return [];
+  return (activity.runIds ?? []).filter((runId) => !runExperimentName || Boolean(runExperimentName(runId)));
+}
+
+/** One line for a stretch of code work: the file it touched, else how much it did. */
+function codeSummary(activities: ToolActivity[]): string {
+  const files = new Map<string, { read: boolean; edited: boolean }>();
+  let commands = 0;
+  for (const activity of activities) {
+    if ((activity.kind === "read" || activity.kind === "edit") && activity.labelTarget) {
+      const file = files.get(activity.labelTarget) ?? { read: false, edited: false };
+      if (activity.kind === "read") file.read = true;
+      else file.edited = true;
+      files.set(activity.labelTarget, file);
+    } else {
+      commands++;
+    }
+  }
+
+  if (files.size === 1) {
+    const [[name, { read, edited }]] = [...files];
+    const target = ltr(name);
+    if (commands > 0) {
+      const [one, other] = edited
+        ? [m.activity_worked_on_and_ran_one, m.activity_worked_on_and_ran_other]
+        : [m.activity_read_and_ran_one, m.activity_read_and_ran_other];
+      return pluralMessage(commands, one, other)({ target, count: fmtNumber(commands) });
+    }
+    if (read && edited) return m.activity_read_and_edited({ target });
+    return edited ? m.activity_edited_target({ target }) : m.activity_read_target({ target });
+  }
+  if (files.size === 0) return pluralMessage(commands, m.activity_ran_commands_one, m.activity_ran_commands_other)({ count: fmtNumber(commands) });
+  return m.activity_worked_on_files({ count: fmtNumber(files.size) });
+}
+
+function reportTitle(parts: ChatPart[], path: string): { title: string; lines: number | null } {
+  for (const part of [...parts].reverse()) {
+    const input = part.state?.input ?? {};
+    const content = typeof input.content === "string" ? input.content : null;
+    if (!content || toolActivity(part).filePath !== path) continue;
+    const heading = /^#\s+(.+)$/m.exec(content)?.[1]?.trim();
+    return { title: heading || baseName(path), lines: content.replace(/\n$/, "").split("\n").length };
+  }
+  return { title: baseName(path), lines: null };
+}
+
+type ToolGroupProps = React.ComponentProps<typeof ToolGroup>;
+
+/** A run of tool calls sorted by what the research did: papers read, runs
+ * launched, reports written, then the code and other work that supported it.
+ * The calls still pending sort last, where the current step shows. */
+function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroupProps & {
+  /** Papers `orx discover` found earlier in the message, for naming the papers read. */
+  discovered: () => Map<string, PaperMeta>;
+}) {
+  const pendingId = pendingTail ? parts.at(-1)?.id : undefined;
+  const facets = new Map<ToolFacet, ChatPart[]>();
+  for (const part of parts) {
+    const facet = toolFacet(part, toolActivity(part));
+    facets.set(facet, [...(facets.get(facet) ?? []), part]);
+  }
+  const ordered = [...facets].sort(([, a], [, b]) =>
+    Number(a.some((part) => part.id === pendingId)) - Number(b.some((part) => part.id === pendingId)));
+  const group = (groupParts: ChatPart[], extra: Partial<ToolGroupProps> = {}) => (
+    <ToolGroup
+      key={`tg-${groupParts[0].id}`}
+      {...props}
+      {...extra}
+      parts={groupParts}
+      pendingTail={groupParts.some((part) => part.id === pendingId)}
+    />
+  );
+
+  return ordered.map(([facet, facetParts]) => {
+    const activities = facetParts.map(toolActivity);
+    switch (facet) {
+      case "literature": {
+        const shelf = new Map<string, ShelfPaper>();
+        const rows: ChatPart[] = [];
+        for (const part of facetParts) {
+          const papers = shelvedPapers(part, toolActivity(part));
+          for (const paper of papers) {
+            const key = `${paper.source}:${paper.id}`;
+            const shelved = shelf.get(key) ?? { ...paper, partIds: [] };
+            shelved.partIds?.push(part.id);
+            shelf.set(key, shelved);
+          }
+          if (papers.length === 0) rows.push(part);
+        }
+        const searches = rows.reduce((total, part) => total + literatureSearches(toolActivity(part)), 0);
+        const summary = searches > 0
+          ? pluralMessage(searches, m.activity_surveyed_literature_one, m.activity_surveyed_literature_other)({ count: fmtNumber(searches) })
+          : m.activity_checked_literature();
+        return (
+          <Fragment key={`literature-${facetParts[0].id}`}>
+            {rows.length > 0 && group(rows, { summary })}
+            {shelf.size > 0 && <PaperShelf papers={[...shelf.values()]} discovered={discovered()} />}
+          </Fragment>
+        );
+      }
+      case "runs": {
+        const cards = new Map<string, ChatPart[]>();
+        const rows: ChatPart[] = [];
+        for (const part of facetParts) {
+          const runIds = part.state?.status === "error" ? [] : knownRunIds(toolActivity(part), props.runExperimentName);
+          for (const runId of runIds) cards.set(runId, [...(cards.get(runId) ?? []), part]);
+          if (runIds.length === 0) rows.push(part);
+        }
+        return (
+          <Fragment key={`runs-${facetParts[0].id}`}>
+            {rows.length > 0 && group(rows, {
+              quiet: true,
+              summary: rows.every((part) => toolActivity(part).kind === "log") ? m.activity_reviewed_run_logs() : m.activity_checked_experiments(),
+            })}
+            {[...cards].map(([runId, runParts]) => {
+              const part = runParts.at(-1)!;
+              const pending = part.id === pendingId && part.state?.status === "running";
+              const activity = pending ? activityInProgress(toolActivity(part)) : toolActivity(part);
+              const name = props.runExperimentName?.(runId) || m.tree_experiment();
+              return (
+                <RunCard
+                  key={runId}
+                  runId={runId}
+                  label={activity.runLabel?.(autoDir(name)) ?? activity.label}
+                  pending={pending}
+                  partIds={runParts.map((runPart) => runPart.id)}
+                  onOpenRun={props.onOpenRun}
+                />
+              );
+            })}
+          </Fragment>
+        );
+      }
+      case "experiments":
+        return group(facetParts, { quiet: true, summary: m.activity_checked_experiments() });
+      case "guides": {
+        const count = fmtNumber(facetParts.length);
+        const summary = activities.every((activity) => activity.guide)
+          ? pluralMessage(facetParts.length, m.activity_loaded_research_guides_one, m.activity_loaded_research_guides_other)({ count })
+          : pluralMessage(facetParts.length, m.activity_loaded_skills_one, m.activity_loaded_skills_other)({ count });
+        return group(facetParts, { quiet: true, summary });
+      }
+      case "reports": {
+        const reports = new Set<string>();
+        const rows: ChatPart[] = [];
+        for (const part of facetParts) {
+          const path = reportPath(toolActivity(part));
+          if (path && part.state?.status === "completed") reports.add(path);
+          else rows.push(part);
+        }
+        return (
+          <Fragment key={`reports-${facetParts[0].id}`}>
+            {rows.length > 0 && group(rows)}
+            {[...reports].map((path) => (
+              <ReportCard
+                key={path}
+                path={path}
+                {...reportTitle(facetParts, path)}
+                partIds={facetParts.filter((part) => toolActivity(part).filePath === path).map((part) => part.id)}
+                onOpen={props.onOpenFile && ((target, intent) => props.onOpenFile?.(target, undefined, undefined, undefined, intent))}
+              />
+            ))}
+          </Fragment>
+        );
+      }
+      case "code":
+        return group(facetParts, { quiet: true, summary: codeSummary(activities) });
+      case "other":
+        return group(facetParts);
+    }
+  });
+}
+
+/** Interactive card for a plan / permission prompt, and the record of an
+ * answered question. Approving resumes the session. Once resolved, cards
+ * mirror Claude Code: a permission leaves no trace, a plan collapses to an expandable
  * "Proposed plan" row, a question collapses to a compact record of the
  * chosen answer — all inline at the card's chronological position. */
 function PromptCard({
@@ -2933,8 +3484,6 @@ function PromptCard({
 }) {
   const { id: elementId } = useContext(WorkspaceDomContext);
   const p = part.prompt;
-  const [picked, setPicked] = useState<string[]>([]);
-  const [answerText, setAnswerText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   if (!p) return null;
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
@@ -2944,14 +3493,13 @@ function PromptCard({
     if (!onRespond || submitting) return;
     setSubmitting(true);
     try {
-      if (await onRespond({ promptId: part.id, ...answer })) {
-        setAnswerText("");
-        setPicked([]);
-      }
+      await onRespond({ promptId: part.id, ...answer });
     } finally {
       setSubmitting(false);
     }
   };
+
+  if (p.kind === "env") return <EnvRequestCard part={part} done={done} respond={respond} />;
 
   // Resolved rendering, keyed off `resolved` alone (`done` also covers
   // read-only hosts, where an *unresolved* card must stay visible).
@@ -3130,77 +3678,8 @@ function PromptCard({
     );
   }
 
-  const toggle = (label: string) => {
-    setAnswerText("");
-    setPicked((cur) => p.multiSelect
-      ? cur.includes(label) ? cur.filter((item) => item !== label) : [...cur, label]
-      : [label]);
-  };
-  const submit = () => {
-    if (!done && (answerText.trim() || picked.length > 0)) {
-      void respond({ answers: picked, note: answerText.trim() || undefined });
-    }
-  };
-  const skip = () => void respond({ approve: false });
-  return (
-    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={elementId(`question-${part.id}`)}>
-      <div className="flex items-center gap-2 text-subtext">
-        <HelpCircle size={18} aria-hidden="true" />
-        <span className="flex-1 text-sm">{p.header || m.chat_question()}</span>
-        {onRespond && <IconButton aria-label={m.chat_question_skip()} disabled={done} onClick={skip}><X size={16} /></IconButton>}
-      </div>
-      <div id={elementId(`question-${part.id}`)} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
-      {(p.options?.length ?? 0) > 0 && (
-        <div className="prompt-options flex flex-col">
-          {p.options?.map((option, index) => {
-            const selected = picked.includes(option.label);
-            return (
-              <button
-                type="button"
-                key={option.label}
-                aria-pressed={selected}
-                className={`prompt-option flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-start text-text cursor-pointer transition-colors duration-120 ease-standard enabled:hover:bg-highlight focus-visible:bg-highlight focus-visible:outline-2 focus-visible:outline-focus disabled:cursor-default ${selected ? "bg-panel" : ""}`}
-                disabled={done}
-                onClick={() => toggle(option.label)}
-              >
-                <span className={`flex size-6 shrink-0 items-center justify-center rounded-md border text-sm ${selected ? "border-text bg-surface text-text" : "border-border bg-background text-subtext"}`}>{selected ? <Check size={14} /> : index + 1}</span>
-                <span className="min-w-0 text-base">
-                  <span>{option.label}</span>
-                  {option.description && <span className="ms-2 text-sm text-subtext">{option.description}</span>}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {onRespond && (
-        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-          <div className="flex min-w-0 basis-48 grow items-start gap-2">
-            <Pencil size={18} className="mt-2 shrink-0 text-subtext" aria-hidden="true" />
-            <Textarea
-              variant="inline"
-              aria-label={m.chat_question_your_answer()}
-              placeholder={m.chat_question_custom_response()}
-              value={answerText}
-              onChange={(event) => { setAnswerText(event.target.value); setPicked([]); }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
-                  event.preventDefault();
-                  submit();
-                }
-              }}
-              disabled={done}
-              rows={1}
-            />
-          </div>
-          <div className="ms-auto flex items-center gap-2">
-            <Button type="button" disabled={done} onClick={skip}>{m.chat_question_skip()}</Button>
-            <Button type="submit" variant="primary" disabled={done || (!answerText.trim() && picked.length === 0)}>{m.chat_panel_send()}</Button>
-          </div>
-        </form>
-      )}
-    </div>
-  );
+  // An open question is answered from the composer (`QuestionDock`).
+  return null;
 }
 
 /** Whether a message renders anything once resolved-permission cards vanish —
@@ -3362,6 +3841,7 @@ export const Message = memo(function Message({
   recoveringTurnId,
   onRecover,
   statusSuperseded = false,
+  failure,
   skills,
   predictTextTail = false,
   forkCount,
@@ -3397,6 +3877,7 @@ export const Message = memo(function Message({
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
   /** Render this turn's failure row as history (see `TurnStatusRow`). */
   statusSuperseded?: boolean;
+  failure?: FailureActions;
   /** Known slash-skills, for rendering a `/name` token as a command chip. */
   skills?: SkillInfo[];
   predictTextTail?: boolean;
@@ -3541,7 +4022,10 @@ export const Message = memo(function Message({
             </div>
           )}
         </div>
-        {forkCount !== undefined && (
+        {forkCount === undefined ? message.id.startsWith(LOCAL_PREFIX) && (
+          // Holds the controls' row so the server's copy of a just-sent message moves nothing below it.
+          <div aria-hidden="true" className="h-7" />
+        ) : (
           <ForkControls
             text={text}
             createdAt={message.createdAt}
@@ -3561,7 +4045,10 @@ export const Message = memo(function Message({
   }
   const responses = responseMessages ?? [message];
   const localErrors = responses.filter((turn) => turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
-  const responseTurns = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`)).map(splitResponseTurn);
+  const sent = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
+  const responseTurns = sent.map(splitResponseTurn);
+  let latestResponse = sent.length - 1;
+  while (latestResponse > 0 && !startsTurn(sent[latestResponse])) latestResponse--;
   const turns = responseTurns.map((turn) => turn.message);
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
@@ -3587,7 +4074,7 @@ export const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       }} />}
-      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
+      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }, index) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
           part={turnStatus}
@@ -3595,7 +4082,8 @@ export const Message = memo(function Message({
           temporaryApiError={temporaryApiError}
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
-          onRecover={onRecover}
+          onRecover={index === latestResponse ? onRecover : undefined}
+          failure={index === latestResponse ? failure : undefined}
           superseded={statusSuperseded}
         />
       ))}
@@ -3632,6 +4120,90 @@ export const Message = memo(function Message({
   );
 });
 
+interface ReceiptItem {
+  icon: React.ReactNode;
+  label: string;
+}
+
+/** What a finished turn produced, for its fold line: papers it read (or the
+ * searches, when it read none), runs, reports and figures. */
+function turnReceipt(parts: ChatPart[], figures: number, runExperimentName?: (runId: string) => string): ReceiptItem[] {
+  const papers = new Map<string, ShelfPaper>();
+  const runs = new Set<string>();
+  const reports = new Set<string>();
+  let searches = 0;
+  let searchSource: ShelfPaper["source"] | null = null;
+  for (const part of parts) {
+    if (part.type !== "tool") continue;
+    const activity = toolActivity(part);
+    for (const paper of shelvedPapers(part, activity)) papers.set(`${paper.source}:${paper.id}`, paper);
+    searches += literatureSearches(activity);
+    if (literatureSearches(activity) > 0) searchSource ??= activity.litCall?.source ?? null;
+    if (part.state?.status !== "error") for (const runId of knownRunIds(activity, runExperimentName)) runs.add(runId);
+    const report = reportPath(activity);
+    if (report && part.state?.status === "completed") reports.add(report);
+  }
+
+  const icon = (Icon: typeof FlaskConical) => <Icon size={16} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-muted" />;
+  const logo = (source: ShelfPaper["source"]) => <LitSourceLogo source={source} size={16} decorative />;
+  const count = (value: number, one: (params: { count: string }) => string, other: (params: { count: string }) => string) =>
+    pluralMessage(value, one, other)({ count: fmtNumber(value) });
+  const items: ReceiptItem[] = [];
+  const firstPaper = papers.values().next().value;
+  if (firstPaper) items.push({ icon: logo(firstPaper.source), label: count(papers.size, m.chat_receipt_papers_one, m.chat_receipt_papers_other) });
+  else if (searches > 0 && searchSource) items.push({ icon: logo(searchSource), label: count(searches, m.chat_receipt_searches_one, m.chat_receipt_searches_other) });
+  if (runs.size > 0) items.push({ icon: icon(FlaskConical), label: count(runs.size, m.chat_receipt_runs_one, m.chat_receipt_runs_other) });
+  if (reports.size > 0) items.push({ icon: icon(NotebookText), label: count(reports.size, m.chat_receipt_reports_one, m.chat_receipt_reports_other) });
+  if (figures > 0) items.push({ icon: icon(ChartSpline), label: count(figures, m.chat_receipt_figures_one, m.chat_receipt_figures_other) });
+  return items;
+}
+
+/** The papers an answer links, each marked with whether the turn fetched it. */
+function answerSources(answer: ChatPart[], turnParts: ChatPart[]): CitedPaper[] {
+  const read = new Map<string, ShelfPaper>();
+  for (const part of turnParts) {
+    if (part.type !== "tool") continue;
+    for (const paper of shelvedPapers(part, toolActivity(part))) read.set(paperKey(paper.source, paper.id), paper);
+  }
+  const text = answer.flatMap((part) => part.type === "text" && part.text ? [part.text] : []).join("\n");
+  return linkedPapers(text).map((paper) => {
+    const fetched = read.get(paperKey(paper.source, paper.id));
+    return { ...paper, read: Boolean(fetched), output: fetched?.output };
+  });
+}
+
+const TURN_FIGURE_PATH = /\bartifacts\/[^\s"'`)<>]+\.(?:svg|png|jpe?g|gif|webp)\b/i;
+
+/** Images in the artifacts directory a finished turn wrote and named: written
+ * while it ran, and mentioned in its calls or its answer. */
+function useTurnFigures(messages: ChatMessage[], finished: boolean): string[] {
+  const projectId = useContext(FileScopeContext)?.projectId ?? "";
+  const text = useMemo(() => finished
+    ? messages.flatMap((message) => message.parts).map((part) => [
+      part.text,
+      part.state?.output,
+      JSON.stringify(part.state?.input ?? ""),
+    ].join("\n")).join("\n")
+    : "", [messages, finished]);
+  const mentioned = TURN_FIGURE_PATH.test(text);
+  const { getArtifactsQuery } = useWorkspace().queries;
+  const artifacts = useQuery({ ...getArtifactsQuery(projectId), enabled: Boolean(projectId) && mentioned }).data;
+  return useMemo(() => {
+    if (!artifacts || !mentioned) return [];
+    const start = messages[0].createdAt - 1_000;
+    const end = (messages.at(-1)?.completedAt ?? Date.now()) + 5_000;
+    const files: string[] = [];
+    const visit = (entries: ArtifactEntry[]) => {
+      for (const entry of entries) {
+        if (entry.children) visit(entry.children);
+        if (!entry.isDir && entry.presentation === "image" && entry.modifiedAt >= start && entry.modifiedAt <= end && text.includes(entry.path)) files.push(entry.path);
+      }
+    };
+    visit(artifacts.entries);
+    return files;
+  }, [artifacts, mentioned, messages, text]);
+}
+
 function AssistantTurn({ messages, response, options }: {
   messages: ChatMessage[];
   response: ReturnType<typeof splitResponseParts>;
@@ -3651,12 +4223,27 @@ function AssistantTurn({ messages, response, options }: {
     setExpanded(true);
   }, [options.revealNonce, options.expansionState, key]);
   const [, tick] = useState(0);
+  const finished = !streaming || message.completedAt != null;
+  const figures = useTurnFigures(messages, finished && work.length > 0);
+  const { artifactUrl } = useWorkspace().api;
+  const projectId = useContext(FileScopeContext)?.projectId;
   useEffect(() => {
     if (!streaming || message.completedAt != null || work.length === 0) return;
     const timer = window.setInterval(() => tick((value) => value + 1), 1000);
     return () => window.clearInterval(timer);
   }, [streaming, message.completedAt, work.length]);
   if (work.length === 0) return <>{renderParts(answer, answerOptions)}</>;
+  const elapsed = messages.reduce<number | null>((total, turn) => {
+    const end = turn.completedAt ?? (streaming && turn.id === message.id ? Date.now() : null);
+    return end === null ? total : (total ?? 0) + Math.max(0, end - turn.createdAt);
+  }, null);
+  const duration = elapsed === null ? null : elapsed < 60_000 || elapsed >= 3_600_000
+    ? fmtDuration(elapsed)
+    : m.chat_work_duration({ minutes: fmtNumber(Math.floor(elapsed / 60_000)), seconds: fmtNumber(Math.floor(elapsed / 1000) % 60) });
+  const turnParts = [...work.flatMap((turn) => turn.parts), ...answer];
+  const receipt = turnReceipt(work.flatMap((turn) => turn.parts), figures.length, options.runExperimentName);
+  const sources = finished ? answerSources(answer, turnParts) : [];
+  const openFigure = (path: string, intent: TabOpenIntent) => options.onOpenFile?.(`artifacts/${path}`, undefined, undefined, undefined, intent);
   return (
     <>
       <div className="turn-work mb-4">
@@ -3667,7 +4254,18 @@ function AssistantTurn({ messages, response, options }: {
           data-work-toggle
           onClick={() => { setHasOpened(true); options.expansionState?.set(key, !expanded); setExpanded(!expanded); }}
         >
-          <WorkDuration messages={messages} streaming={streaming} />
+          {receipt.length > 0 ? (
+            <span className="min-w-0">
+              {[...receipt, ...(duration === null ? [] : [{ icon: null, label: duration }])].map((item, index) => (
+                <Fragment key={item.label}>
+                  {index > 0 && <span className="text-muted"> · </span>}
+                  <span className="inline-flex items-center gap-1.5 align-top">{item.icon}{item.label}</span>
+                </Fragment>
+              ))}
+            </span>
+          ) : (
+            <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
+          )}
           <ChevronRight size={16} className={`shrink-0 text-muted transition-transform duration-200 ease-standard motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
         </button>
         <div className={`tool-group-disclosure ${expanded ? "open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
@@ -3676,13 +4274,41 @@ function AssistantTurn({ messages, response, options }: {
               {hasOpened && work.map((turn) => (
                 <div key={turn.id}>{renderParts(turn.parts, { ...options, predictTextTail: false, pendingTailToolId: turn.id === message.id ? options.pendingTailToolId : null })}</div>
               ))}
+              {hasOpened && projectId && figures.length > 0 && (
+                <FigureReveal
+                  figures={figures}
+                  src={(path) => artifactUrl(projectId, path)}
+                  onOpen={options.onOpenFile && openFigure}
+                  expansionState={options.expansionState}
+                  expansionKey={`figures:${key}`}
+                />
+              )}
             </div>
           </div>
         </div>
       </div>
-      <div className="turn-answer">{renderParts(answer, answerOptions)}</div>
+      <div className="turn-answer">
+        {renderParts(answer, answerOptions)}
+        {sources.length > 0 && (
+          <SourceStrip
+            papers={sources}
+            discovered={discoveredPapers(turnParts.flatMap((part) => part.type === "tool" && part.state?.output ? [part.state.output] : []))}
+          />
+        )}
+      </div>
     </>
   );
+}
+
+const TURN_MARKER_TOOLS = new Set(["provider_switch", "compacted"]);
+
+/** Whether `message` belongs to a turn that takes an earlier failed turn's place: shell
+ * exchanges, local send errors, agent switches, compactions and standalone approvals start none. */
+function startsTurn(message: ChatMessage) {
+  if (message.id.startsWith(LOCAL_PREFIX)) return false;
+  if (message.role === "user") return !shellExchangePart(message);
+  return !message.parts.every((part) => (part.tool && TURN_MARKER_TOOLS.has(part.tool))
+    || (part.type === "prompt" && part.prompt?.kind === "permission"));
 }
 
 function shellExchangePart(message: ChatMessage): ChatPart | null {
@@ -3780,12 +4406,17 @@ function renderParts(
     .at(-1);
   const rendered: React.ReactNode[] = [];
   let toolRun: ChatPart[] = [];
+  let discoveredCache: Map<string, PaperMeta> | null = null;
+  const discovered = () => discoveredCache ??= discoveredPapers(
+    parts.flatMap((part) => part.type === "tool" && part.state?.output ? [part.state.output] : []),
+  );
   const flushTools = () => {
     if (toolRun.length === 0) return;
     rendered.push(
-      <ToolGroup
+      <ResearchToolRun
         key={`tg-${toolRun[0].id}`}
         parts={toolRun}
+        discovered={discovered}
         expansionState={expansionState}
         revealNonce={revealNonce}
         revealPartId={revealPartId}
@@ -4240,9 +4871,12 @@ const Transcript = memo(function Transcript({
   recoveringTurnId,
   onRecover,
   modelSwitchedAfterId = null,
+  failure,
   skills,
   delegates,
   onOpenDelegate,
+  project,
+  session,
   focusedMessageId,
   focusedPartId,
   focusNonce,
@@ -4279,10 +4913,14 @@ const Transcript = memo(function Transcript({
   /** Newest assistant message when the user last picked another model; its
    * failure (and everything older) no longer predicts the next send. */
   modelSwitchedAfterId?: string | null;
+  failure?: FailureActions;
   skills?: SkillInfo[];
   /** Chats this one delegated to, oldest first. */
   delegates: DelegateRow[];
   onOpenDelegate?: (sessionId: string) => void;
+  /** The chat and its project, for the projects its agent proposes to create. */
+  project?: Project;
+  session?: ChatSession;
   focusedMessageId?: string | null;
   focusedPartId?: string;
   focusNonce?: number;
@@ -4310,6 +4948,9 @@ const Transcript = memo(function Transcript({
     },
     [messages, activePermissionId],
   );
+  // A later agent turn takes a failed turn's place; shell exchanges and local send errors start none.
+  let latestTurnRow = visibleMessages.length - 1;
+  while (latestTurnRow > 0 && !visibleMessages[latestTurnRow].some(startsTurn)) latestTurnRow--;
   // Each delegate sits under the turn that started it: the last row begun before it was.
   const delegatesByRow = useMemo(() => {
     const rows = new Map<number, DelegateRow[]>();
@@ -4323,6 +4964,11 @@ const Transcript = memo(function Transcript({
     }
     return rows;
   }, [visibleMessages, delegates]);
+  const proposalsByRow = useMemo(() => new Map(visibleMessages.flatMap((group, row) => {
+    const proposals = group.flatMap((message) => message.parts.flatMap((part) =>
+      part.type === "tool" ? toolActivity(part).projectProposal ?? [] : []));
+    return proposals.length ? [[row, proposals] as const] : [];
+  })), [visibleMessages]);
   // forkPositions indexes only non-local ids, so a local bearer would page as 0/1.
   const positions = useMemo(() => {
     const bearers = visibleMessages.filter(
@@ -4363,7 +5009,7 @@ const Transcript = memo(function Transcript({
     const response = user ? null : splitResponseParts(group, false);
     const parts = response?.answer ?? group[0].parts;
     const text = parts.filter((part) => part.type === "text" || part.type === "steer").map((part) => part.text ?? "").join("\n");
-    const width = scrollRef.current?.firstElementChild?.clientWidth ?? 760;
+    const width = scrollRef.current?.querySelector(".chat-thread-inner")?.clientWidth ?? 760;
     const columns = Math.max(20, Math.floor((width - 32) / 8));
     const lines = text.split("\n").reduce((total, line) => total + Math.max(1, Math.ceil(line.length / columns)), 0);
 
@@ -4380,6 +5026,7 @@ const Transcript = memo(function Transcript({
   }));
   // Offscreen rows keep their old height through a resize, so each height carries its measuring width.
   const measuredWidths = useRef(new Map<string, number>());
+  const transcriptColumn = scrollRef.current?.querySelector(".chat-thread-inner");
   const virtualizer = useVirtualizer({
     useFlushSync: false,
     count: visibleMessages.length,
@@ -4388,7 +5035,7 @@ const Transcript = memo(function Transcript({
     estimateSize,
     directDomUpdates: true,
     directDomUpdatesMode: "position",
-    scrollMargin: Number.parseFloat(scrollRef.current?.firstElementChild ? getComputedStyle(scrollRef.current.firstElementChild).paddingTop : "0") || 0,
+    scrollMargin: Number.parseFloat(transcriptColumn ? getComputedStyle(transcriptColumn).paddingTop : "0") || 0,
     initialMeasurementsCache,
     measureElement: (element, entry, instance) => {
       const id = element.getAttribute("data-message-id");
@@ -4589,6 +5236,7 @@ const Transcript = memo(function Transcript({
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
         const recoveryDisabled = busy || recoveringTurnId !== null;
+        const latest = item.index === latestTurnRow;
         return (
           <div
             key={rowId}
@@ -4601,7 +5249,7 @@ const Transcript = memo(function Transcript({
             data-message-id={rowId}
             data-search-target={isTarget || undefined}
             ref={virtualizer.measureElement}
-            className={`absolute left-0 w-full pb-4 isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
+            className={`absolute left-0 w-full isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
             onClickCapture={(event) => {
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
               stickToBottom.current = false;
@@ -4614,6 +5262,8 @@ const Transcript = memo(function Transcript({
               if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow((current) => current === rowId ? null : current);
             }}
           >
+          {/* Bleeds to the pane edges: WebKit anchors a press beside an absolutely positioned row at the feed's first character. */}
+          <div className="-mx-[100vw] px-[100vw] pb-4">
           {/* NVDA leaves article names unspoken by default, so a hidden heading names the author. A reply nests under its prompt. */}
           {group[0].role === "user"
             ? <h5 id={headingId} className="sr-only select-none">{userLabel}</h5>
@@ -4647,7 +5297,8 @@ const Transcript = memo(function Transcript({
             onOpenSubagent={onOpenSubagent}
             busy={recoveryDisabled}
             recoveringTurnId={recoveringTurnId}
-            onRecover={onRecover}
+            onRecover={latest ? onRecover : undefined}
+            failure={latest ? failure : undefined}
             statusSuperseded={m.id !== liveStatusMessageId}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
@@ -4660,6 +5311,14 @@ const Transcript = memo(function Transcript({
               ))}
             </div>
           )}
+          {proposalsByRow.has(item.index) && (
+            <div className="mt-3 flex flex-col gap-2">
+              {proposalsByRow.get(item.index)?.map((proposal, index) => (
+                <ProjectProposalCard key={index} proposal={proposal} proposedAt={visibleMessages[item.index][0].createdAt} project={project} session={session} />
+              ))}
+            </div>
+          )}
+          </div>
           </div>
         );
       })}
@@ -4672,6 +5331,13 @@ const Transcript = memo(function Transcript({
 
 type SessionFilter = "active" | "archived" | "all";
 
+const SIDEBAR_GROUPINGS = ["projects", "inbox"] as const;
+type SidebarGrouping = (typeof SIDEBAR_GROUPINGS)[number];
+
+const WORKING_PLACES = ["above", "below", "bottom"] as const;
+/** Where the one-list rail puts Working: before the inbox, right after it, or held at the rail's foot with Done. */
+type WorkingPlace = (typeof WORKING_PLACES)[number];
+
 /** Whether the rail's current filter shows a session in this archived state. */
 const matchesFilter = (filter: SessionFilter, archived: boolean) =>
   filter === "all" ? true : filter === "archived" ? archived : !archived;
@@ -4683,26 +5349,30 @@ const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () =
   { id: "all", label: m.chat_panel_all, railLabel: m.chat_all_sessions },
 ];
 
-/** Filter control beside the "Recents" label: Active (default) / Archived / All. */
-function SessionFilterMenu({
+/** The rail's view options: grouping, then the project filter or where Working sits. */
+function SidebarViewMenu({
   value,
   onChange,
   grouping,
   onGroupingChange,
+  workingPlace,
+  onWorkingPlaceChange,
 }: {
   value: SessionFilter;
   onChange: (next: SessionFilter) => void;
-  grouping: "projects" | "list";
-  onGroupingChange: (next: "projects" | "list") => void;
+  grouping: SidebarGrouping;
+  onGroupingChange: (next: SidebarGrouping) => void;
+  workingPlace: WorkingPlace;
+  onWorkingPlaceChange: (next: WorkingPlace) => void;
 }) {
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="rail-filter relative inline-flex" ref={ref}>
-      <Tooltip interactive content={m.chat_panel_filter_sessions()}>
+      <Tooltip interactive content={m.sidebar_customize_view()}>
         <IconButton size="small"
           className="rail-filter-btn text-subtext"
-          active={value !== "active"}
-          aria-label={m.chat_panel_filter_sessions()}
+          active={grouping === "projects" && value !== "active"}
+          aria-label={m.sidebar_customize_view()}
           onClick={() => setOpen((v) => !v)}
         >
           <SlidersHorizontal size={16} className="text-subtext" />
@@ -4710,29 +5380,43 @@ function SessionFilterMenu({
       </Tooltip>
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-40 p-1 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
-          <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_group_by()}</div>
-          {(["projects", "list"] as const).map((mode) => (
-            <MenuItem size="compact" className="text-sm" key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
+          <div className={MENU_LABEL}>{m.sidebar_group_by()}</div>
+          {SIDEBAR_GROUPINGS.map((mode) => (
+            <MenuItem key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
               <span>{mode === "projects" ? m.projects_home_projects() : m.sidebar_one_list()}</span>
               {grouping === mode && <Check size={14} />}
             </MenuItem>
           ))}
-          <div className="my-1 border-t border-border" />
-          <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_filter()}</div>
-          {SESSION_FILTERS.map((f) => (
-            <MenuItem
-              size="compact" className="text-sm"
-              key={f.id}
+          <div className={MENU_SEPARATOR} />
+          {grouping === "inbox" ? <>
+            <div className={MENU_LABEL}>{m.sidebar_working_section()}</div>
+            {WORKING_PLACES.map((place) => {
+              const item = (
+                <MenuItem key={place} onClick={() => { onWorkingPlaceChange(place); setOpen(false); }}>
+                  <span>{place === "above" ? m.sidebar_working_above() : place === "below" ? m.sidebar_working_below() : m.sidebar_working_bottom()}</span>
+                  {workingPlace === place && <Check size={14} />}
+                </MenuItem>
+              );
+              return place === "bottom"
+                ? <Tooltip key={place} interactive side="end" content={m.sidebar_working_bottom_hint()} className="flex w-full rounded-sm [&>*]:flex-1">{item}</Tooltip>
+                : item;
+            })}
+          </> : <>
+            <div className={MENU_LABEL}>{m.sidebar_filter()}</div>
+            {SESSION_FILTERS.map((f) => (
+              <MenuItem
+                key={f.id}
 
-              onClick={() => {
-                onChange(f.id);
-                setOpen(false);
-              }}
-            >
-              <span>{f.label()}</span>
-              {value === f.id && <Check size={14} />}
-            </MenuItem>
-          ))}
+                onClick={() => {
+                  onChange(f.id);
+                  setOpen(false);
+                }}
+              >
+                <span>{f.label()}</span>
+                {value === f.id && <Check size={14} />}
+              </MenuItem>
+            ))}
+          </>}
         </div>
       )}
       <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
@@ -4754,6 +5438,54 @@ function TitleReveal({ title, animate }: { title: string; animate: boolean }) {
   return <span className="title-reveal">{title}</span>;
 }
 
+/** The right of an inbox row's second line: an icon and what the chat is doing, timed from when it began. */
+function InboxStatus({ status, unread }: { status: ChatStatus; unread: boolean }) {
+  const timed = status.kind === "running" || status.kind === "queued" || status.kind === "background" || (status.kind === "working" && status.since !== null);
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), timed ? 1000 : 30_000);
+    return () => window.clearInterval(timer);
+  }, [timed]);
+
+  const elapsed = "since" in status && status.since !== null ? fmtDuration(now - status.since) : "";
+  const [icon, label, tone, tip] = (() => {
+    switch (status.kind) {
+      case "input":
+        return [<HelpCircle size={12} />, m.chat_status_input(), "text-accent-purple", null];
+      case "running":
+        return [
+          <FlaskConical size={12} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" />,
+          m.chat_status_running({ duration: elapsed }), "text-accent-green",
+          status.runs > 1 ? m.chat_status_experiments_running({ count: fmtNumber(status.runs) }) : m.chat_experiment_running(),
+        ];
+      case "queued":
+        return [<Clock size={12} />, m.chat_status_queued({ duration: elapsed }), "text-subtext", m.chat_status_waiting_compute()];
+      case "working":
+        return [<span className="busy-dot" />, elapsed ? m.chat_status_working_for({ duration: elapsed }) : m.chat_status_working(), "text-subtext", null];
+      case "background":
+        return [
+          <Hourglass size={12} />, m.chat_status_background({ duration: elapsed }), "text-accent-blue",
+          status.tasks > 1 ? m.chat_status_background_tasks({ count: fmtNumber(status.tasks) }) : m.chat_status_background_task(),
+        ];
+      case "limited":
+        return [<Gauge size={12} />, m.chat_status_limited(), "text-accent-amber", null];
+      case "failed":
+        return [<TriangleAlert size={12} />, m.chat_status_failed(), "text-accent-red", status.error && cleanToolError(status.error)];
+      case "done":
+        return unread
+          ? [<CircleCheck size={12} />, m.chat_status_done(), "text-accent-green", timeAgo(status.since)]
+          : [null, timeAgo(status.since), "text-muted", null];
+    }
+  })();
+  const body = (
+    <span className={`flex shrink-0 items-center gap-1.5 tabular-nums ${tone}`}>
+      {icon && <span className="inline-flex size-3 items-center justify-center" aria-hidden="true">{icon}</span>}
+      {label}
+    </span>
+  );
+  return tip ? <Tooltip content={tip} className="shrink-0">{body}</Tooltip> : body;
+}
+
 /** One Recents row. Hover swaps the timestamp for a three-dot menu with
  * Rename, Archive/Unarchive, and Delete (Claude-desktop style). Rename turns
  * the title into an inline input. */
@@ -4763,25 +5495,37 @@ function SessionRow({
   unread,
   busy,
   waiting,
-  experimentRunning,
+  runs,
+  leadRun = null,
+  variant,
   revealTitle,
   onOpen,
   onRename,
   onSetArchived,
+  onMarkBelowDone,
+  onMoveToProject,
   onDelete,
+  onProjectSettings,
   onOpenExperiment,
   modelName,
+  project,
   projectName,
   harnessLogo,
   cardWarmUntil,
 }: {
   session: ChatSession;
+  project: Project;
   active: boolean;
   unread: boolean;
   busy: boolean;
   /** An actionable question or held approval needs the user's attention. */
   waiting: boolean;
-  experimentRunning: boolean;
+  /** The chat's runs above its composer: live, flagged, or ended and not yet answered. */
+  runs: readonly ShownRun[];
+  /** The run an inbox card gives its middle line to. */
+  leadRun?: ShownRun | null;
+  /** `inbox`: title and agent, then project and what the chat is doing. `done`: one line, restored from its hover button. */
+  variant: "list" | "inbox" | "done";
   /** Nonce set while this row's freshly auto-generated title should play its
    * reveal; it doubles as the remount key so a second retitle replays it.
    * Undefined the rest of the time (static title). */
@@ -4789,20 +5533,35 @@ function SessionRow({
   onOpen: () => void;
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
+  /** Marks done the inbox chats listed below this one; only an inbox row in the inbox offers it. */
+  onMarkBelowDone?: () => void;
+  /** Makes the chat a project of its own; labelled for a chat without one. */
+  onMoveToProject?: { label: string; run: () => void };
   onDelete: () => void;
+  onProjectSettings: () => void;
   onOpenExperiment: (projectId: string, experimentId: string) => void;
   modelName: string | null;
   projectName?: string;
   harnessLogo?: string;
   cardWarmUntil: React.RefObject<number>;
 }) {
-  const { open, setOpen, ref } = usePopover();
+  const ref = useRef<HTMLDivElement>(null);
+  const inbox = variant === "inbox";
+  const plain = variant === "list";
+  /** Where the row's menu opens: the cursor for a right-click, the kebab for a click. */
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const open = menuAt !== null;
+  const runMark = sessionRunMark(runs, session.id);
+  const runFlag = runMark === "waiting" || runMark === "flagged";
+  const lead = inbox && leadRun && runModel({ item: leadRun, monitor: null, shown: false, agent: m.chat_the_agent(), now: Date.now(), nextRetryMs: null });
   const title = session.title?.trim() || m.chat_untitled();
-  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}`;
+  const attention = runMark === "waiting" ? m.chat_run_needs_attention() : runMark === "flagged" ? m.chat_run_flagged() : waiting ? m.chat_panel_waiting_for_your_input() : null;
+  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}${attention ? ` · ${attention}` : ""}`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const titleRef = useRef<HTMLSpanElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const cardId = useId();
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
@@ -4810,6 +5569,18 @@ function SessionRow({
   const closeTimer = useRef<number | undefined>(undefined);
   const pointerInside = useRef(false);
   const dismissed = useRef(false);
+
+  useLayoutEffect(() => {
+    const element = titleRef.current;
+    if (!element) return;
+
+    const measure = () => element.toggleAttribute("data-overflow", element.scrollWidth > element.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    if (element.firstElementChild) observer.observe(element.firstElementChild);
+    return () => observer.disconnect();
+  }, [title, editing, variant]);
 
   function closeCard() {
     window.clearTimeout(openTimer.current);
@@ -4871,6 +5642,37 @@ function SessionRow({
     }
   }, [editing]);
 
+  const flagMark = runFlag && !editing && (
+    <Tooltip content={runMark === "waiting" ? m.chat_run_needs_attention() : m.chat_run_flagged()} className="shrink-0 text-ink-amber">
+      <TriangleAlert size={14} aria-hidden="true" />
+    </Tooltip>
+  );
+
+  const titleInput = (
+    <input
+      ref={inputRef}
+      className={!plain
+        ? "-my-1 -ms-1.5 h-6 min-w-0 flex-1 rounded-sm border border-focus-border bg-background ps-1.5 text-text outline-none [font:inherit]"
+        : "session-title-input"}
+      aria-label={m.chat_panel_session_title()}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        } else if (e.key === "Escape") {
+          e.stopPropagation();
+          e.preventDefault();
+          setEditing(false);
+        }
+      }}
+    />
+  );
+
   // Not a <button>: the kebab is a real button and can't nest inside one.
   return (
     <div
@@ -4905,15 +5707,21 @@ function SessionRow({
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
         scheduleClose();
       }}
-      className={`session-row relative flex items-center gap-2 w-full h-8.5 text-start ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${lead ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
+      onContextMenu={(e) => {
+        if (editing) return;
+        e.preventDefault();
+        closeCard();
+        setMenuAt({ x: e.clientX, y: e.clientY });
+      }}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;
         // With the menu open, a body click just dismisses it — switching
         // sessions underneath an open menu would leave it orphaned.
-        if (open) setOpen(false);
+        if (open) setMenuAt(null);
         else { closeCard(); onOpen(); }
       }}
       onKeyDown={(e) => {
@@ -4929,71 +5737,116 @@ function SessionRow({
           closeCard();
           // Mirror the click branch: dismiss an open menu instead of
           // navigating underneath it.
-          if (open) setOpen(false);
+          if (open) setMenuAt(null);
           else onOpen();
         }
       }}
     >
-      {editing ? (
-        <input
-          ref={inputRef}
-          className="session-title-input"
-          aria-label={m.chat_panel_session_title()}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onClick={(e) => e.stopPropagation()}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commit();
-            } else if (e.key === "Escape") {
-              e.stopPropagation();
-              e.preventDefault();
-              setEditing(false);
-            }
-          }}
-        />
+      {variant === "done" ? <>
+        <ProjectIconTile project={project} size="sm" />
+        {editing ? titleInput : (
+          <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
+            <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
+          </span>
+        )}
+        {flagMark}
+        {!editing && <span className="session-logo shrink-0 text-xs tabular-nums text-muted">{timeAgo(session.updatedAt)}</span>}
+        {!editing && (
+          <Tooltip content={m.chat_inbox_restore()} className="session-done-btn -my-1 -me-1 shrink-0">
+            <button
+              className="inline-flex size-6 items-center justify-center rounded-sm text-subtext hover:bg-panel hover:text-text"
+              aria-label={m.chat_inbox_restore()}
+              onClick={(e) => {
+                e.stopPropagation();
+                closeCard();
+                onSetArchived(false);
+              }}
+            >
+              <Undo2 size={14} aria-hidden="true" />
+            </button>
+          </Tooltip>
+        )}
+      </> : editing && plain ? titleInput : inbox ? (
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex items-center gap-2">
+            {editing ? titleInput : (
+              <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread || waiting ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
+                <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
+              </span>
+            )}
+            {flagMark}
+            {!session.archived && !editing && (
+              <button
+                className="session-done-btn -my-1 -me-1 h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-xs text-subtext hover:bg-panel hover:text-text"
+                aria-label={m.chat_inbox_mark_done()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeCard();
+                  onSetArchived(true);
+                }}
+              >
+                <Check size={12} aria-hidden="true" />
+                {m.chat_inbox_done_action()}
+              </button>
+            )}
+          </div>
+          {lead && (
+            <div className={`flex h-4 min-w-0 items-center gap-1.5 text-xs ${lead.tone === "flag" ? "text-ink-amber" : "text-ink-subtext"}`}>
+              {lead.tone !== "flag" && <span className="flex w-4 shrink-0 justify-center"><Mark tone={lead.tone} live={lead.live} label={lead.status} /></span>}
+              <span dir="auto" className="truncate"><Sentence text={cardSentence(lead)} tone={lead.tone} /></span>
+            </div>
+          )}
+          <div className={`${lead ? "mt-0.5" : ""} flex items-center gap-2 text-xs text-subtext`}>
+            <span className="flex min-w-0 flex-1 items-center gap-1.5">
+              <ProjectIconTile project={project} size="sm" />
+              {!project.scratch && <span className="truncate">{projectName}</span>}
+            </span>
+            <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />
+          </div>
+        </div>
       ) : (
-        <span className="session-title">
-          <TitleReveal
-            key={revealTitle ?? "static"}
-            title={title}
-            animate={revealTitle !== undefined}
-          />
+        <span ref={titleRef} className={`session-title ${attention ? "text-ink-amber" : ""}`} onDoubleClick={startEditing}>
+          <span className="inline-block">
+            <TitleReveal
+              key={revealTitle ?? "static"}
+              title={title}
+              animate={revealTitle !== undefined}
+            />
+          </span>
         </span>
       )}
-      {experimentRunning && !editing && (
+      {plain && runMark === "running" && !editing && (
         <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
           <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
         </Tooltip>
       )}
-      {waiting && !editing && (
-        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-accent-amber">
+      {plain && flagMark}
+      {plain && waiting && !editing && (
+        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-ink-amber">
           <HelpCircle size={14} aria-hidden="true" />
         </Tooltip>
       )}
-      <span className="session-dot">
+      {plain && <span className="session-dot">
         {busy && !waiting ? (
           <span className="busy-dot" />
         ) : (
           unread && !waiting && <span className="unread-dot" />
         )}
-      </span>
-      <Tooltip interactive content={m.chat_panel_session_options()} className="session-menu-btn">
+      </span>}
+      {plain && <Tooltip interactive content={m.chat_panel_session_options()} className="session-menu-btn">
         <button
           className="flex w-full h-full items-center justify-center"
           aria-label={m.chat_panel_session_options()}
           onClick={(e) => {
             e.stopPropagation();
             closeCard();
-            setOpen((v) => !v);
+            const button = e.currentTarget.getBoundingClientRect();
+            setMenuAt(open ? null : { x: button.left, y: button.bottom + 4 });
           }}
         >
           <MoreHorizontal size={14} />
         </button>
-      </Tooltip>
+      </Tooltip>}
       {anchor && !open && !editing && (
         <SessionHoverCard
           session={session}
@@ -5008,45 +5861,177 @@ function SessionRow({
           onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
           onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
           onReturnToRow={() => ref.current?.focus()}
-          onContinue={() => { closeCard(); ref.current?.querySelector<HTMLButtonElement>(".session-menu-btn button")?.focus(); }}
+          onContinue={() => {
+            closeCard();
+            const next = ref.current?.querySelector<HTMLButtonElement>(".session-menu-btn button, .session-done-btn");
+            if (next) next.focus();
+            else ref.current?.focus();
+          }}
         />
       )}
-      {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
-          <MenuItem
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              startEditing();
-            }}
-          >
-            <span>{m.chat_panel_rename()}</span>
-          </MenuItem>
-          <MenuItem
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              onSetArchived(!session.archived);
-            }}
-          >
-            <span>{session.archived ? m.chat_unarchive() : m.chat_archive()}</span>
-          </MenuItem>
-          <MenuItem danger
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              onDelete();
-            }}
-          >
-            <span>{m.chat_panel_delete()}</span>
-          </MenuItem>
-        </div>
+      {menuAt && (
+        <SessionMenu
+          at={menuAt}
+          label={title}
+          archiveLabel={!plain
+            ? session.archived ? m.chat_inbox_restore() : m.chat_inbox_mark_done()
+            : session.archived ? m.chat_unarchive() : m.chat_archive()}
+          onClose={() => setMenuAt(null)}
+          onRename={startEditing}
+          onSetArchived={() => onSetArchived(!session.archived)}
+          onMarkBelowDone={onMarkBelowDone}
+          onMoveToProject={onMoveToProject}
+          onProjectSettings={project.scratch ? undefined : onProjectSettings}
+          onDelete={onDelete}
+        />
       )}
-      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
       <EscapeScope enabled={!!anchor && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); closeCard(); }} />
     </div>
   );
 }
+
+/** A chat's actions, opened at a point: the cursor, or below the row's kebab. */
+function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived, onMarkBelowDone, onMoveToProject, onProjectSettings, onDelete }: {
+  at: { x: number; y: number };
+  label: string;
+  archiveLabel: string;
+  onClose: () => void;
+  onRename: () => void;
+  onSetArchived: () => void;
+  onMarkBelowDone?: () => void;
+  onMoveToProject?: { label: string; run: () => void };
+  /** Absent for a chat without a project, which has no settings of its own. */
+  onProjectSettings?: () => void;
+  onDelete: () => void;
+}) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+  const item = <MenuItem size="compact" className="data-highlighted:bg-surface" />;
+  return (
+    <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+      <Menu.Root open modal={false} onOpenChange={(open) => { if (!open) onClose(); }}>
+        <Menu.Portal container={portalContainer}>
+          <Menu.Positioner
+            positionMethod="fixed"
+            anchor={{ getBoundingClientRect: () => new DOMRect(at.x, at.y, 0, 0) }}
+            side="bottom"
+            align="start"
+            collisionPadding={8}
+            className="z-100"
+          >
+            <Menu.Popup
+              aria-label={label}
+              className="option-menu min-w-44 max-h-(--available-height) overflow-y-auto rounded-md border border-border bg-background p-1 shadow-menu outline-none"
+              onClick={(event) => event.stopPropagation()}
+              onContextMenu={(event) => event.preventDefault()}
+            >
+              <Menu.Item nativeButton render={item} onClick={onRename}>{m.chat_panel_rename()}</Menu.Item>
+              <Menu.Item nativeButton render={item} onClick={onSetArchived}>{archiveLabel}</Menu.Item>
+              {onMarkBelowDone && <Menu.Item nativeButton render={item} onClick={onMarkBelowDone}>{m.chat_inbox_mark_below_done()}</Menu.Item>}
+              {onMoveToProject && <Menu.Item nativeButton render={item} onClick={onMoveToProject.run}>{onMoveToProject.label}</Menu.Item>}
+              {onProjectSettings && <Menu.Item nativeButton render={item} onClick={onProjectSettings}>{m.sidebar_project_settings()}</Menu.Item>}
+              <Menu.Separator className="my-1 border-t border-border" />
+              <Menu.Item nativeButton render={<MenuItem size="compact" danger className="data-highlighted:bg-surface" />} onClick={onDelete}>{m.chat_panel_delete()}</Menu.Item>
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
+    </DirectionProvider>
+  );
+}
+
+interface SidebarActions {
+  toggleProjectCollapsed: (project: Project) => void;
+  pinProject: (project: Project) => void;
+  projectRemoved: (project: Project) => void;
+  newProjectChat: (project: Project) => void;
+  openProjectSettings: (project: Project) => void;
+  openSession: (session: ChatSession, project: Project) => void;
+  openExperiment: (session: ChatSession, projectId: string, experimentId: string) => void;
+  rename: (session: ChatSession, title: string) => void;
+  setArchived: (session: ChatSession, archived: boolean, working: boolean) => void;
+  markBelowDone: (session: ChatSession) => void;
+  markIdleDone: () => Promise<void>;
+  moveToProject: (session: ChatSession, project: Project) => void;
+  remove: (session: ChatSession) => void;
+}
+
+const RAIL_MOVE_MS = 380;
+/** Whether a rail layout holds chats yet, rather than only its loading or empty state. */
+const railSettled = (layout: Map<string, { row: SidebarRow }>) => [...layout.values()].some(({ row }) => "session" in row);
+const RAIL_FADE_MS = 180;
+/** Eases in gently, then settles on a long tail. */
+const RAIL_CURVE = [0.47, 0.44, 0, 1] as const;
+const RAIL_EASE = `cubic-bezier(${RAIL_CURVE.join(", ")})`;
+
+/** `RAIL_EASE` at time `t`, to sample what a row overlaps along the way. */
+function railEase(t: number) {
+  const [x1, y1, x2, y2] = RAIL_CURVE;
+  const at = (a: number, b: number, s: number) => 3 * a * s * (1 - s) ** 2 + 3 * b * s ** 2 * (1 - s) + s ** 3;
+  let low = 0;
+  let high = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (low + high) / 2;
+    if (at(x1, x2, mid) < t) low = mid;
+    else high = mid;
+  }
+  return at(y1, y2, (low + high) / 2);
+}
+
+// Sidebar rows skip the panel's per-keystroke renders: `actions` is a stable ref
+// the panel refreshes every render, so handlers still reach its current state.
+const SidebarProjectCard = memo(function SidebarProjectCard({
+  actions,
+  project,
+  ...card
+}: Omit<React.ComponentProps<typeof ProjectInfoCard>, "onToggleCollapsed" | "onPin" | "onRemoved" | "onNewChat" | "onOpenSettings"> & {
+  actions: React.RefObject<SidebarActions>;
+}) {
+  useLocale();
+  return (
+    <ProjectInfoCard
+      {...card}
+      project={project}
+      onToggleCollapsed={() => actions.current.toggleProjectCollapsed(project)}
+      onPin={() => actions.current.pinProject(project)}
+      onRemoved={() => actions.current.projectRemoved(project)}
+      onNewChat={() => actions.current.newProjectChat(project)}
+      onOpenSettings={() => actions.current.openProjectSettings(project)}
+    />
+  );
+});
+
+const SidebarSessionRow = memo(function SidebarSessionRow({
+  actions,
+  project,
+  markBelowDone,
+  ...row
+}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onMarkBelowDone" | "onMoveToProject" | "onDelete" | "onProjectSettings"> & {
+  actions: React.RefObject<SidebarActions>;
+  project: Project;
+  /** Whether the row sits in the inbox section, whose menu can mark the chats below it done. */
+  markBelowDone: boolean;
+}) {
+  useLocale();
+  const { session } = row;
+  const working = row.variant !== "list" && chatStatusWorking(chatStatus(session, row.busy, row.waiting, row.runs));
+  return (
+    <SessionRow
+      {...row}
+      project={project}
+      onOpen={() => actions.current.openSession(session, project)}
+      onOpenExperiment={(projectId, experimentId) => actions.current.openExperiment(session, projectId, experimentId)}
+      onRename={(title) => actions.current.rename(session, title)}
+      onSetArchived={(archived) => actions.current.setArchived(session, archived, working)}
+      onMarkBelowDone={markBelowDone ? () => actions.current.markBelowDone(session) : undefined}
+      onMoveToProject={session.pendingProject ? undefined : {
+        label: project.scratch ? m.create_project_menu() : m.create_project_move_menu(),
+        run: () => actions.current.moveToProject(session, project),
+      }}
+      onDelete={() => actions.current.remove(session)}
+      onProjectSettings={() => actions.current.openProjectSettings(project)}
+    />
+  );
+});
 
 // --- panel -------------------------------------------------------------------
 
@@ -5088,6 +6073,7 @@ export function ChatPanel({
   onSelectMainView,
   onOpenFile,
   onOpenRun,
+  onOpenRunPage,
   runExperimentName,
   chatInfo,
   onOpenMessage,
@@ -5135,8 +6121,8 @@ export function ChatPanel({
   /** Run a harness setup command (`path` is its setup route) in the right panel's terminal tab. */
   onRunSetup?: (command: string, path: string) => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
-  mainView: "chat" | "skills" | SettingsTab;
-  onSelectMainView: (view: "chat" | "skills" | SettingsTab) => void;
+  mainView: "chat" | SettingsTab;
+  onSelectMainView: (view: "chat" | SettingsTab) => void;
   /** Open a project file in the right pane (chat tool rows are clickable).
    * `sessionId` is the chat session the click came from, so relative paths
    * can resolve against that session's worktree. */
@@ -5148,9 +6134,10 @@ export function ChatPanel({
     ref: string | undefined,
     intent: TabOpenIntent,
   ) => void;
-  /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips).
+  /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips), at `seek` when given.
    * Run ids are globally unique, so no session context is needed. */
-  onOpenRun?: OpenTranscriptTarget;
+  onOpenRun?: (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
+  onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void;
   /** Resolve a run to the experiment name shown on tool activity links. */
   runExperimentName?: (runId: string) => string;
   /** A chat in this project, or undefined for one elsewhere. */
@@ -5215,8 +6202,10 @@ export function ChatPanel({
     listProjectActivityQuery,
     listChatSessionsQuery,
     listSidebarChatSessionsQuery,
-    listChatActiveRunsQuery,
+    readSidebarChatPage,
+    listChatShownRunsQuery,
     getHarnessesQuery,
+    getUiStateQuery,
     getSkillsQuery,
     getHarnessSetupCommandsQuery,
     getCodeTreeQuery,
@@ -5236,14 +6225,33 @@ export function ChatPanel({
   const switchingAgent = agentSwitch.isOptimisticData;
   const { composerStashes, mountedComposers, composerSeed, forgetComposerSeed } = useWorkspace().composers;
   const { onChatEvent } = useWorkspace().events;
-  const { removeSession: removeCachedSession } = useWorkspace().invalidation;
+  const { removeSession: removeCachedSession, removeProject: removeCachedProject } = useWorkspace().invalidation;
 
   const navigate = useNavigate();
-  const { data: sidebarProjects = [] } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
+  const createProject = useCreateProject();
+  const { data: sidebarProjects = [], isSuccess: projectsLoaded } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
   const { data: projectActivity = [] } = useQuery({ ...listProjectActivityQuery(), enabled: !embedded });
-  const [sidebarGrouping, setSidebarGrouping] = useState<"projects" | "list">(() => {
-    try { return localStorage.getItem("sidebar-grouping") === "list" ? "list" : "projects"; }
-    catch { return "projects"; }
+  // Null until chosen: the inbox for someone new, the project list they knew for someone who used orx before it.
+  const [storedGrouping] = useState<string | null>(() => {
+    try {
+      const stored = localStorage.getItem("sidebar-grouping");
+      // Someone already on the inbox needs no introduction to it.
+      if (stored && stored !== "projects" && !localStorage.getItem("sidebar-inbox-intro")) localStorage.setItem("sidebar-inbox-intro", "seen");
+      return stored;
+    } catch { return "inbox"; }
+  });
+  const [sidebarGrouping, setSidebarGrouping] = useState<SidebarGrouping>(() =>
+    storedGrouping === null ? "projects" : SIDEBAR_GROUPINGS.find((mode) => mode === storedGrouping) ?? "inbox");
+  const [groupingChosen, setGroupingChosen] = useState(storedGrouping !== null);
+  const [workingPlace, setWorkingPlace] = useState<WorkingPlace>(() => {
+    try { return WORKING_PLACES.find((place) => place === localStorage.getItem("sidebar-working-place")) ?? "above"; }
+    catch { return "above"; }
+  });
+  const [collapsedInbox, setCollapsedInbox] = useState<string[]>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-inbox-collapsed") ?? '["done"]');
+      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+    } catch { return []; }
   });
   const machineSuffix = runtime.kind === "ssh" ? `:${encodeURIComponent(runtime.session.host)}` : "";
   const pinnedProjectsKey = `sidebar-pinned-projects${machineSuffix}`;
@@ -5272,22 +6280,68 @@ export function ChatPanel({
     return () => { observer.disconnect(); railBodyRef.current = null; };
   }, [embedded]);
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
-  const sortedProjects = [...sidebarProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
-  const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
-  let shownProjects = sortedProjects.slice(0, candidateLimit);
+  const byRecency = (a: Project, b: Project) => Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt);
   const currentProject = sidebarProjects.find((project) => project.id === projectId);
-  if (currentProject && !shownProjects.some((project) => project.id === projectId)) {
-    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), currentProject];
+  // Each chat without a project has a scratch project of its own; the newest one stands for the group.
+  const chatCounts = new Map(projectActivity.map((activity) => [activity.projectId, activity.totalAgents]));
+  const scratchProjects = sidebarProjects.filter((project) => project.scratch && (project.id === projectId || chatCounts.get(project.id))).sort(byRecency);
+  const scratchGroup = currentProject?.scratch ? currentProject : scratchProjects[0];
+  // Chats without a project stay on top, so opening one never reshuffles the projects below.
+  const sortedProjects = [
+    ...(scratchGroup ? [scratchGroup] : []),
+    ...sidebarProjects.filter((project) => !project.scratch)
+      .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b)),
+  ];
+  const candidateLimit = sidebarGrouping !== "projects" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
+  let shownProjects = sortedProjects.slice(0, candidateLimit);
+  const shownCurrent = currentProject?.scratch ? scratchGroup : currentProject;
+  if (shownCurrent && !shownProjects.includes(shownCurrent)) {
+    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), shownCurrent];
   }
+  const scratchLimit = chatLimits.scratch ?? 6;
+  const queriedScratch = scratchProjects.slice(0, scratchLimit);
+  if (currentProject?.scratch && !queriedScratch.includes(currentProject)) queriedScratch.push(currentProject);
+  const queriedProjects = sidebarGrouping === "projects" ? shownProjects.flatMap((project) => project.scratch ? queriedScratch : [project]) : [];
   const projectSessionsQueries = useQueries({
-    queries: (sidebarGrouping === "projects" ? shownProjects : []).map((project) => ({
+    queries: queriedProjects.map((project) => ({
       ...listChatSessionsQuery(project.id),
       enabled: !embedded,
     })),
   });
   const flatSessions = useInfiniteQuery({
-    ...listSidebarChatSessionsQuery(sessionFilter),
-    enabled: !embedded && sidebarGrouping === "list",
+    ...listSidebarChatSessionsQuery("active"),
+    enabled: !embedded && sidebarGrouping !== "projects",
+  });
+  useEffect(() => {
+    if (groupingChosen || !projectsLoaded) return;
+    // A project older than a day was made before this choice existed; onboarding's, and its demo seeded hours back, are newer.
+    const returning = sidebarProjects.some((project) => project.createdAt < Date.now() - 24 * 60 * 60 * 1000);
+    const grouping = returning ? "projects" : "inbox";
+    try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
+    setSidebarGrouping(grouping);
+    setGroupingChosen(true);
+  }, [groupingChosen, projectsLoaded, sidebarProjects]);
+  const doneExpanded = sidebarGrouping === "inbox" && !collapsedInbox.includes("done");
+  // Done is a place to look something up, not a view to stay in: opening a chat or clicking away closes it.
+  const closeDone = useCallback(() => setCollapsedInbox((collapsed) => {
+    if (collapsed.includes("done")) return collapsed;
+    const next = [...collapsed, "done"];
+    try { localStorage.setItem("sidebar-inbox-collapsed", JSON.stringify(next)); } catch {}
+    return next;
+  }), []);
+  useEffect(() => {
+    if (!doneExpanded) return;
+    const away = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest("[data-done-area], [role=menu], [role=dialog], [data-session-hover-card]")) return;
+      closeDone();
+    };
+    document.addEventListener("pointerdown", away, true);
+    return () => document.removeEventListener("pointerdown", away, true);
+  }, [doneExpanded, closeDone]);
+  const doneSessions = useInfiniteQuery({
+    ...listSidebarChatSessionsQuery("archived"),
+    // Read while Done is folded too: hovering its header shows the count.
+    enabled: !embedded && sidebarGrouping === "inbox",
   });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
   const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
@@ -5424,7 +6478,20 @@ export function ChatPanel({
   const planModeOverrideRef = useRef<boolean | null>(null);
   const queuedPlanOverrideSeen = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { data: activeRuns = [] } = useQuery(listChatActiveRunsQuery());
+  const shownRuns = useQuery(listChatShownRunsQuery()).data?.runs ?? EMPTY_RUNS;
+  // A run that leaves the shown list ended and was answered; the sidebar's own record of each chat's last run catches up.
+  const shownRunIds = useRef(new Set<string>());
+  useEffect(() => {
+    const ids = new Set(shownRuns.map((item) => `${item.sessionId} ${item.run.id}`));
+    const left = [...shownRunIds.current].some((id) => !ids.has(id));
+    shownRunIds.current = ids;
+    if (left) void queryClient.invalidateQueries({ queryKey: listSidebarChatSessionsQuery("active").queryKey });
+  }, [shownRuns]);
+  const runsBySession = useMemo(() => {
+    const bySession = new Map<string, ShownRun[]>();
+    for (const item of shownRuns) bySession.set(item.sessionId, [...bySession.get(item.sessionId) ?? [], item]);
+    return bySession;
+  }, [shownRuns]);
   const [state, dispatch, historyQuery] = useChatState(projectId, mainView === "chat" ? activeId : null);
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const modelName = useModelName();
@@ -5445,6 +6512,8 @@ export function ChatPanel({
   const recoveringTurnRef = useRef(false);
   const activeLeafRef = useRef<string | null>(null);
   const preparingSend = useRef(false);
+  /** A new chat's first message, shown from send until its session can hold it. */
+  const [launch, setLaunch] = useState<{ projectId: string; sessionId: string | null; reached?: boolean; left?: boolean; message: ChatMessage } | null>(null);
   // Sessions whose title was just replaced by a harness-generated one, mapped
   // to a nonce that bumps per reveal so a second retitle remounts the spans and
   // replays the animation instead of sitting on a finished one.
@@ -5493,6 +6562,7 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const programmaticScroll = useRef<number | null>(null);
   const lastTranscriptTop = useRef(0);
+  const lastTranscriptSize = useRef("");
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<ComposerEditorHandle>(null);
   useEffect(() => {
@@ -5684,6 +6754,7 @@ export function ChatPanel({
       ? { ...savedSelection, ...sessionOverride }
       : null;
   const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness, projectId));
+  const { data: uiState } = useQuery(getUiStateQuery());
   const catalogHarness = selectionHarness(harnesses, rawSelection);
   const activeHarness = sessionAcpHarness(openSession, catalogHarness);
   const acpOptions = nativeOptions(openSession?.nativeConfiguration, { model: m.model_picker_model(), mode: m.model_picker_mode() });
@@ -6222,6 +7293,10 @@ export function ChatPanel({
     return onChatEvent((ev) => {
       switch (ev.type) {
         case "session": {
+          if (ev.session.id === composerScopeRef.current.activeId && ev.session.projectId !== projectId) {
+            onActiveSessionChangeRef.current(ev.session.id, { projectId: ev.session.projectId, replace: true });
+            return;
+          }
           if (ev.session.projectId !== projectId) return;
           if (deletedSessionIds.has(ev.session.id)) return;
           // A generated title landing on a session already on screen is the
@@ -6259,7 +7334,7 @@ export function ChatPanel({
   useEffect(() => onChatEvent((event) => {
     if (event.type === "reconnected") void syncSessionList(true);
     if (event.type === "runsChanged") {
-      void queryClient.invalidateQueries({ queryKey: listChatActiveRunsQuery().queryKey });
+      void queryClient.invalidateQueries({ queryKey: listChatShownRunsQuery().queryKey });
     }
   }), [syncSessionList]);
 
@@ -6283,9 +7358,17 @@ export function ChatPanel({
   const canFork = !busy && !!activeHarness?.agentReady;
   const hasPendingTailTool = busy && streamTailTool(messages) != null;
   const hasStreamingText = busy && streamTailIsText(messages);
-  // Messages the user parked behind the running turn (oldest first). Populated
-  // by chat.queued events and the seed snapshot; each runs when its turn ends.
-  const queued = activeId ? (state.queuedBySession[activeId] ?? []) : [];
+  // Messages the user parked behind the running turn (oldest first), and steers
+  // its agent has not read yet. Populated by chat.queued events and the seed
+  // snapshot; a parked one runs when its turn ends.
+  const queueItems = activeId ? state.queuedBySession[activeId] : undefined;
+  const [queued, unreadSteers] = useMemo(() => {
+    const items = queueItems ?? [];
+    return [
+      items.filter((item) => item.dispatchState !== "steering"),
+      items.filter((item) => item.dispatchState === "steering"),
+    ];
+  }, [queueItems]);
   const hasRetryingQueue = queued.some((item) => item.dispatchState === "retrying");
   const firstBlockedQueueIndex = queued.findIndex((item) => item.dispatchState === "blocked");
   const nextQueueRetryAt = queued.reduce<number | null>((latest, item) => {
@@ -6331,6 +7414,7 @@ export function ChatPanel({
   // The live activity strip above the composer replaces the transcript's
   // Thinking / Waiting lines while a turn runs.
   const activityVisible = busy && !!activeSession && !historyLoading;
+  const ancestors = embedded || !onOpenDelegate ? [] : delegateAncestors(sessions, activeSession);
   // Once the user writes in a delegate, whether it still reports to its parent is theirs to decide.
   const steeringDelegate = Boolean(activeSession?.delegate?.notifies) && (draft.trim() !== ""
     || messages.some((message) => message.parts.some((part) =>
@@ -6478,24 +7562,52 @@ export function ChatPanel({
     setSettingsError(null);
   }, [activeId]);
 
+  // A launch belongs to its new-chat route until the created chat's route takes over, and ends once the user leaves either.
+  const launchHere = mainView === "chat" && launch?.projectId === projectId
+    && (activeId === launch.sessionId || (activeId === null && !launch.reached));
+  if (launch && !launch.left && !launchHere) setLaunch({ ...launch, left: true });
+  else if (launch?.sessionId && !launch.reached && activeId === launch.sessionId) setLaunch({ ...launch, reached: true });
+  const launching = launch && !launch.left && launchHere ? launch : null;
+  const launchMessages = useMemo(() => launching ? [launching.message] : null, [launching?.message]);
+  // A chat's first turn sets up its checkout before the agent says anything.
+  const firstTurnStarting = launching !== null || (busy && allMessages.length === 1);
+  const statusLine = firstTurnStarting ? (activeSession?.sideParentSessionId || sideParentSessionId ? m.chat_starting() : m.chat_setting_up_worktree())
+    : busy && !awaitingInput && !hasPendingTailTool && !hasStreamingText ? m.chat_thinking() : null;
+  const statusLineRef = useRef<HTMLDivElement>(null);
+  /** Finds the message a send just added, and keeps finding it as the server's copy replaces the local one. */
+  const sentTail = () => {
+    let sent: string | null = null;
+    return (started: boolean) => {
+      const bubble = [...threadInnerRef.current?.querySelectorAll(".msg-user") ?? []].at(-1);
+      const row = bubble?.closest<HTMLElement>("[data-message-id]");
+      if (!bubble || !row) return null;
+      // Only the local copy starts a rise; after that, only a row with the same text, never another chat's prompt.
+      if (started ? bubble.textContent !== sent : !row.dataset.messageId?.startsWith(LOCAL_PREFIX)) return null;
+      sent = bubble.textContent;
+      const status = statusLineRef.current;
+      return { rising: status ? [row, status] : [row], fading: status };
+    };
+  };
+
   // Opening a session or returning from settings starts pinned at the latest messages.
-  const threadMounted = mainView === "chat" && (messages.length > 0 || busy);
+  const threadMounted = launching !== null || (mainView === "chat" && (messages.length > 0 || busy));
 
   // Keyed by project so a switch never shows another project's prompts; a
   // harness or model switch keeps them, and only a failed harness is retried.
   const starterHarness = composerSelection?.harness ?? null;
   const starterModel = composerSelection?.model ?? null;
   const historyError = !historyQuery.data ? historyQuery.error : null;
-  const starterVisible = mainView === "chat" && !embedded && !threadMounted && !contentLoading && !contentError && !historyLoading && !historyError;
+  // A chat without a project has no project to suggest a start from.
+  const starterVisible = mainView === "chat" && !embedded && !threadMounted && !contentLoading && !contentError && !historyLoading && !historyError && !currentProject?.scratch;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale(), composerSelection?.profile ?? null),
     enabled: starterVisible && starterHarness !== null,
     subscribed: starterVisible && starterHarness !== null,
   });
-  const starterPrompts = starterQuery.data?.blank
-    ? blankStarterPrompts()
-    : (starterQuery.data?.prompts ?? null);
-  const starterLoading = starterHarness !== null && starterQuery.isPending;
+  const starterPrompts = !starterVisible ? null
+    : starterQuery.data?.blank ? blankStarterPrompts()
+      : (starterQuery.data?.prompts ?? null);
+  const starterLoading = starterVisible && starterHarness !== null && starterQuery.isPending;
   // The demo project is the only surface that isn't a user-created project.
   const telemetrySurface: FirstActionSurface =
     projectId === DEMO_PROJECT_ID ? "demo" : "project";
@@ -6529,10 +7641,14 @@ export function ChatPanel({
     // Wheels, keys, focus moves and screen readers scroll unannounced; only the virtualizer's own scrolls are recorded.
     const programmatic = programmaticScroll.current !== null && Math.abs(el.scrollTop - programmaticScroll.current) <= 1;
     const movedUp = el.scrollTop < lastTranscriptTop.current;
+    // Chromium can reset the offset while the pane resizes; that is no user scroll, and the resize re-pins.
+    const size = `${el.clientWidth}x${el.clientHeight}`;
+    const resized = lastTranscriptSize.current !== "" && size !== lastTranscriptSize.current;
     programmaticScroll.current = null;
     lastTranscriptTop.current = el.scrollTop;
+    lastTranscriptSize.current = size;
     // Trackpads scroll a pixel at a time, so any upward scroll lets go before the next resize re-pins it.
-    if (!programmatic) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
+    if (!programmatic && !resized) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
     setTranscriptAtBottom(atBottom);
   }, []);
   const pinTranscriptToBottom = useCallback(() => {
@@ -6770,6 +7886,17 @@ export function ChatPanel({
         return;
       }
       const sid = activeId;
+      if (mode === "steer") {
+        const waiting = () => threadInnerRef.current?.querySelector(".msg-steer-pending");
+        const waitingBefore = waiting()?.childElementCount ?? 0;
+        riseIntoPlace(threadRef, threadInnerRef, () => {
+          const steers = waiting();
+          const label = steers?.lastElementChild;
+          const steer = label?.previousElementSibling;
+          if (!steers || steers.childElementCount <= waitingBefore || !(steer instanceof HTMLElement) || !(label instanceof HTMLElement)) return null;
+          return { rising: [steer, label], fading: waitingBefore === 0 ? label : null };
+        }, 3000);
+      }
       clearComposer();
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
@@ -6838,7 +7965,14 @@ export function ChatPanel({
       preparingSend.current = true;
       try {
         if (!sid) {
-          const session = await openNewSession(effective, independentPlanMode);
+          riseIntoPlace(threadRef, threadInnerRef, sentTail(), 500);
+          const launchMessage = optimisticUserMessage({
+            text: text || m.chat_asked_about_selection(),
+            attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
+            annotations: pendingAnnotations,
+          }, null);
+          setLaunch({ projectId, sessionId: null, message: launchMessage });
+          const session = await openNewSession(effective, independentPlanMode, launchMessage);
           sid = session.id;
           sourceSessionId = session.id;
           sourceStashKey = `${stashScope}${embedded ? `side:${session.id}` : session.id}`;
@@ -6858,10 +7992,13 @@ export function ChatPanel({
         await awaitHistory();
       } finally {
         preparingSend.current = false;
+        // Same tick as the optimistic message below, so the handoff never paints between them.
+        setLaunch(null);
       }
       if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
         || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
       if (!(retry && mode === "steer")) {
+        if (activeId !== null && inSourceScope()) riseIntoPlace(threadRef, threadInnerRef, sentTail(), 500);
         dispatch({
           type: "optimisticUser",
           sessionId: sid,
@@ -6936,7 +8073,7 @@ export function ChatPanel({
   }
 
   /** Create the session a first message (or `!` command) lands in and open it. */
-  async function openNewSession(selection: ModelSelection, planMode: boolean | undefined) {
+  async function openNewSession(selection: ModelSelection, planMode: boolean | undefined, launchMessage?: ChatMessage) {
     const scope = composerScopeRef.current;
     const visit = projectVisitRef.current;
     let session = sideParentSessionId
@@ -6953,12 +8090,16 @@ export function ChatPanel({
     if (sideParentSessionId && sideDraftAutonomy !== null && session.autonomy !== sideDraftAutonomy) {
       session = await patchSession(session, { autonomy: sideDraftAutonomy });
     }
-    if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit) {
+    // A chat without a project can land in a scratch project of its own.
+    const here = session.projectId === projectId;
+    if (here && isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit) {
       setSessions((cur) => [session, ...cur.filter((row) => row.id !== session.id)]);
       if (!queryClient.getQueryData(sessionsOptions.queryKey)) void syncSessionList(true);
     }
     if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit && composerScopeRef.current === scope) {
-      onActiveSessionChangeRef.current(session.id, { replace: true });
+      // Synchronous, so no frame shows the new route without the launch it continues.
+      if (launchMessage) flushSync(() => setLaunch((current) => current?.message === launchMessage ? { ...current, sessionId: session.id } : current));
+      onActiveSessionChangeRef.current(session.id, { replace: true, projectId: session.projectId });
       composerScopeRef.current = { ...scope, activeId: session.id };
     }
     return session;
@@ -7071,6 +8212,37 @@ export function ChatPanel({
     },
     [workspace, activeId, recoveryOverrides, reseedSession],
   );
+  const signIn = useAgentSignIn();
+  const agentName = activeHarness?.profile?.name ?? (activeHarness && harnessDisplayName(activeHarness));
+  const composerSignedOut = activeHarness?.authState === "needsLogin" && (activeHarness.id !== "claude-code" || Boolean(activeHarness.profile) || activeHarness.loginEligible);
+  const signedOutTurn = composerSignedOut && messages.at(-1)?.parts.find((part) => part.id === "turn-recovery" && isSignInFailure(part));
+  const signInTurn = signedOutTurn ? signedOutTurn.state?.input : undefined;
+  const signInRecovery = parseRecoveryAction(signInTurn?.recoveryAction);
+  // Without a sign-in here, the composer keeps the agent's note and its command.
+  const composerSignIn = composerSignedOut ? signIn(activeHarness, () => {
+    if (signInTurn?.turnId && (signInRecovery === "retry" || signInRecovery === "continue")) {
+      void recoverFailedTurn(signInTurn.turnId, signInRecovery);
+    }
+  }) : undefined;
+  /** The agent or account a failure ran on; a failure saved before it was named is the chat's own. */
+  const failedAgent = (input: FailureInput) => input.harness
+    ? selectionHarness(harnesses, { harness: input.harness, profile: input.profile ?? null }) ?? (input.harness === activeHarness?.id ? activeHarness : undefined)
+    : activeHarness;
+  const failureActions: FailureActions | undefined = activeHarness && {
+    agent: failedAgent,
+    fix: (cause, input) => {
+      if (cause === "sign_in") {
+        const agent = failedAgent(input);
+        const action = parseRecoveryAction(input.recoveryAction);
+        // A ready agent may still hold the token the turn saw rejected, so Sign in stays beside Retry.
+        if (agent && harnessKey(agent) === harnessKey(activeHarness) && composerSignIn) return undefined;
+        return signIn(agent, () => { if (input.turnId && (action === "retry" || action === "continue")) void recoverFailedTurn(input.turnId, action); });
+      }
+      if (cause === "model_unavailable") return () => setModelPickerRequest((request) => request + 1);
+      if (cause === "context_full" && activeHarness.supportsCompaction) return () => void compactSession();
+      return undefined;
+    },
+  };
 
   const forkTurn = useCallback(
     (messageId: string, text: string) => {
@@ -7132,6 +8304,28 @@ export function ChatPanel({
     const message = allMessages.find((message) => message.id === focusedMessage.messageId);
     return message && findPartById(message.parts, focusedMessage.partId);
   }, [focusedMessage, activeId, allMessages]);
+  /** Deliver a card answer; resolves `false` when delivery failed (so a
+   * caller can e.g. restore a consumed draft). Stable per session so the
+   * memoized Message rows don't re-render on unrelated state changes. */
+  const respond = useCallback(
+    (answer: PromptAnswer): Promise<boolean> => {
+      if (!activeId) return Promise.resolve(false);
+      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
+        showAlert(error instanceof Error ? error.message : String(error), "error");
+        return false;
+      });
+    },
+    [workspace, activeId, projectId],
+  );
+
+  const questions = useQuestions(activeId, pendingQuestions, respond);
+  const asking = questions.part !== null;
+  const showQuestion = questions.show;
+  const searchedPartId = focusedMessage?.sessionId === activeId ? focusedMessage.partId : undefined;
+  useEffect(() => {
+    if (searchedPartId) showQuestion(searchedPartId);
+  }, [searchedPartId, showQuestion]);
+
   useEffect(() => {
     if (contentLoading || historyLoading || !focusedMessage?.query || focusedMessage.sessionId !== activeId || openedSearchNonce === focusedMessage.nonce) return;
     const message = messages.find((message) => message.id === focusedMessage.messageId);
@@ -7151,7 +8345,7 @@ export function ChatPanel({
     CSS.highlights.set(name, highlight);
     root.scrollIntoView({ block: "nearest" });
     return () => { if (CSS.highlights.get(name) === highlight) CSS.highlights.delete(name); };
-  }, [focusedMessage, activeId, pendingQuestions, embedded]);
+  }, [focusedMessage, activeId, questions.part, embedded]);
 
   function cancelQueued(itemId: string) {
     if (!activeId) return;
@@ -7200,8 +8394,21 @@ export function ChatPanel({
     seenTitles.current.delete(sessionId);
   }
 
-  function setArchived(session: ChatSession, archived: boolean) {
-    mutPatchChatSession.run(workspace, session, { archived });
+  function setArchived(session: ChatSession, archived: boolean, working: boolean) {
+    if (!archived || !working) {
+      mutPatchChatSession.run(workspace, session, { archived });
+      return;
+    }
+    showConfirmDialog({
+      title: m.chat_inbox_stop_done_title(),
+      description: m.chat_inbox_stop_done_description(),
+      confirmLabel: m.chat_inbox_stop_done_confirm(),
+      destructive: true,
+      onCancel: "close",
+      onConfirm: async () => {
+        await mutPatchChatSession.runAsHeadlessPromise(workspace, session, "stop-and-archive", {});
+      },
+    });
   }
 
   function stopNotifyingParent(session: ChatSession) {
@@ -7214,54 +8421,63 @@ export function ChatPanel({
 
   function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
+    const scratch = sidebarProjects.find((project) => project.id === session.projectId)?.scratch;
+    const siblings = queryClient.getQueryData(listChatSessionsQuery(session.projectId).queryKey)?.filter((row) => row.id !== session.id && !row.sideParentSessionId);
+    // The last chat without a project takes its scratch project with it.
+    const lastOfScratch = scratch && !siblings?.length;
     showConfirmDialog({
       title: m.chat_panel_delete(),
-      description: m.chat_delete_session_confirm({ title: autoDir(title) }),
+      description: lastOfScratch
+        ? m.chat_delete_scratch_session_confirm({ title: autoDir(title) })
+        : m.chat_delete_session_confirm({ title: autoDir(title) }),
       confirmLabel: m.chat_panel_delete(),
       destructive: true,
       onCancel: "close",
       onConfirm: () => {
-        if (session.id === activeId) onActiveSessionChangeRef.current(null, { replace: true });
-        mutDeleteChatSession.runWithOptions(workspace, session, { onSuccessData: () => forgetSession(session.id) });
+        const active = session.id === activeId;
+        if (active && !lastOfScratch) onActiveSessionChangeRef.current(null, { replace: true });
+        mutDeleteChatSession.runWithOptions(workspace, session, { onSuccessData: () => {
+          forgetSession(session.id);
+          if (!lastOfScratch) return;
+          setScopedQueryData(listProjectsQuery().queryKey, (rows) => rows?.filter((row) => row.id !== session.projectId));
+          removeCachedProject(session.projectId);
+          if (active) void navigate({ to: "/projects", replace: true });
+        } });
       },
     });
   }
 
-  /** Deliver a card answer; resolves `false` when delivery failed (so a
-   * caller can e.g. restore a consumed draft). Stable per session so the
-   * memoized Message rows don't re-render on unrelated state changes. */
-  const respond = useCallback(
-    (answer: PromptAnswer): Promise<boolean> => {
-      if (!activeId) return Promise.resolve(false);
-      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
-        showAlert(error instanceof Error ? error.message : String(error), "error");
-        return false;
-      });
-    },
-    [workspace, activeId, projectId],
-  );
-
-  const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
-  const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
   const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
     requestNewChatFocus(projectId);
     onActiveSessionChange(null);
   }, [onActiveSessionChange, projectId]);
+  /** A new chat without a project gets a scratch project of its own. */
+  const startScratchChat = useCallback(async () => {
+    try {
+      const project = await mutCreateScratchProject.runAsHeadlessPromise(workspace, {});
+      setSessionFilter("active");
+      requestNewChatFocus(project.id);
+      onActiveSessionChange(null, { projectId: project.id });
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [onActiveSessionChange]);
   const startNewTask = useCallback(async () => {
     try {
       const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
       const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
         !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
-      setSessionFilter("active");
       const targetProject = latest?.projectId ?? projectId;
+      if (sidebarProjects.find((project) => project.id === targetProject)?.scratch) return void startScratchChat();
+      setSessionFilter("active");
       requestNewChatFocus(targetProject);
       onActiveSessionChange(null, { projectId: targetProject });
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
-  }, [projectId, onActiveSessionChange]);
+  }, [projectId, onActiveSessionChange, sidebarProjects, startScratchChat]);
 
   const openSpawnedSession = useCallback(
     async (sessionId: string) => {
@@ -7292,48 +8508,161 @@ export function ChatPanel({
     ? hasPendingInput(messages, busy) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
   const sidebarRows: SidebarRow[] = [];
-  if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {
-    const query = projectSessionsQueries[index];
-    const projectSessions = project.id === projectId ? sessions : query.data ?? EMPTY_SESSIONS;
-    const matching = projectSessions
+  if (sidebarGrouping === "projects") shownProjects.forEach((project) => {
+    const group = sidebarGroup(project);
+    const members = project.scratch ? queriedScratch : [project];
+    const queries = members.map((member) => projectSessionsQueries[queriedProjects.indexOf(member)]);
+    const projectOf = new Map(members.map((member) => [member.id, member]));
+    const matching = members.flatMap((member, index) => member.id === projectId ? sessions : queries[index].data ?? EMPTY_SESSIONS)
       .filter((session) => !session.sideParentSessionId && !session.delegate && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
       .sort((a, b) => b.updatedAt - a.updatedAt);
-    const chatLimit = chatLimits[project.id] ?? 6;
+    const chatLimit = chatLimits[group] ?? 6;
     let visible = matching.slice(0, chatLimit);
     const selected = matching.find((session) => session.id === activeId);
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
-    const collapsed = !openedProjects.includes(project.id);
-    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
+    const collapsed = !openedProjects.includes(group);
+    const rowProject = (session: ChatSession) => projectOf.get(session.projectId) ?? project;
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(rowProject(session), session) && !sessionWaiting(session)) });
     if (collapsed) {
-      if (selected) sidebarRows.push({ kind: "chat", project, session: selected });
+      if (selected) sidebarRows.push({ kind: "chat", project: rowProject(selected), session: selected });
       return;
     }
-    visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
-    if (matching.length > 6) sidebarRows.push({ kind: "more", project });
-    if (!visible.length && (sidebarGrouping === "projects" || query.isPending || query.error)) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => { void query.refetch(); } });
+    visible.forEach((session) => sidebarRows.push({ kind: "chat", project: rowProject(session), session }));
+    if (matching.length > 6 || (project.scratch && scratchProjects.length > 6)) sidebarRows.push({ kind: "more", project });
+    const pending = queries.some((query) => query.isPending);
+    const error = queries.some((query) => query.error);
+    if (!visible.length) sidebarRows.push({ kind: "status", project, pending, error, retry: () => { for (const query of queries) void query.refetch(); } });
   });
-  if (sidebarGrouping === "list") {
-    const flat = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? [];
-    const selected = sessions.find((session) => session.id === activeId);
-    if (selected && !selected.delegate && !flat.some((session) => session.id === selected.id)) flat.push(selected);
-    flat.filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).forEach((session) => {
-      const project = sidebarProjects.find((project) => project.id === session.projectId);
-      if (project) sidebarRows.push({ kind: "chat", project, session });
+  const atWork = ({ project, session }: { project: Project; session: ChatSession }) =>
+    chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS));
+  /** Every open chat not at work, read whole from the server in the inbox's order; throws when a page can't be read. */
+  const inboxChats = async () => {
+    const read: ChatSession[] = [];
+    let next: SidebarChatCursor | null = null;
+    do {
+      const page = await readSidebarChatPage("active", next, new AbortController().signal);
+      read.push(...page.sessions);
+      next = page.next;
+    } while (next);
+    const fetched = new Set(read.map((session) => session.id));
+    return listedChats(read, false).filter((chat) => fetched.has(chat.session.id) && !atWork(chat)).map(({ session }) => session);
+  };
+  const markBelowDone = async (session: ChatSession) => {
+    const chats = await inboxChats().catch((error: unknown) => {
+      showAlert(m.chat_inbox_mark_below_failed({ error: ltr(error instanceof Error ? error.message : String(error)) }), "error");
+      return null;
     });
-    const project = currentProject ?? sidebarProjects[0];
-    if (project && (!sidebarRows.length || flatSessions.isFetchingNextPage || flatSessions.isError)) {
-      sidebarRows.push({ kind: "status", project, pending: flatSessions.isPending || flatSessions.isFetchingNextPage, error: flatSessions.isError,
-        retry: () => { void (flatSessions.isFetchNextPageError ? flatSessions.fetchNextPage() : flatSessions.refetch()); } });
+    const at = chats?.findIndex((chat) => chat.id === session.id) ?? -1;
+    if (at >= 0) chats!.slice(at + 1).forEach((chat) => setArchived(chat, true, false));
+  };
+  const idleChats = async () => {
+    const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    return (await inboxChats()).filter((chat) => chat.updatedAt < cutoff);
+  };
+  const cleanupScanning = useRef(false);
+  // The first time the inbox shows, chats left alone for days can go straight to Done.
+  const offerInboxCleanup = async () => {
+    if (cleanupScanning.current) return;
+    try {
+      if (localStorage.getItem("sidebar-inbox-intro") === "seen") return;
+      // Pending until a scan succeeds, so a failed one is tried again on the next switch.
+      localStorage.setItem("sidebar-inbox-intro", "pending");
+    } catch { return; }
+    // Best-effort: a scan that fails asks again on the next switch.
+    cleanupScanning.current = true;
+    const stale = await idleChats().catch(() => null).finally(() => { cleanupScanning.current = false; });
+    if (!stale) return;
+    try { localStorage.setItem("sidebar-inbox-intro", "seen"); } catch {}
+    if (!stale.length) return;
+    const count = fmtNumber(stale.length);
+    showConfirmDialog({
+      title: m.sidebar_inbox_intro_title(),
+      description: pluralMessage(stale.length, m.sidebar_inbox_intro_body_one, m.sidebar_inbox_intro_body_other)({ count }),
+      confirmLabel: m.sidebar_inbox_intro_confirm({ count }),
+      cancelLabel: m.sidebar_inbox_intro_keep(),
+      onCancel: "close",
+      // Read again from the newest render: a chat that resumed while the dialog was open stays put.
+      onConfirm: () => sidebarActions.current.markIdleDone(),
+    });
+  };
+  const listedChats = (listed: readonly ChatSession[], archived: boolean | null) => {
+    const byId = new Map(listed.map((session) => [session.id, session]));
+    const selected = sessions.find((session) => session.id === activeId);
+    if (selected && !selected.delegate && !byId.has(selected.id) && (archived === null || selected.archived === archived)) byId.set(selected.id, selected);
+    return [...byId.values()].filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).flatMap((session) => {
+      const project = sidebarProjects.find((project) => project.id === session.projectId);
+      return project ? [{ project, session }] : [];
+    });
+  };
+  const statusProject = currentProject ?? sidebarProjects[0];
+  const pushListStatus = (query: typeof flatSessions, empty: boolean, emptyText?: string) => {
+    if (statusProject && (empty || query.isFetchingNextPage || query.isError)) {
+      sidebarRows.push({ kind: "status", project: statusProject, pending: query.isPending || query.isFetchingNextPage, error: query.isError, empty: emptyText,
+        retry: () => { void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch()); } });
     }
+  };
+  // Rows before this index hold at the rail's top while it is short; the rest, at least Done, hold at its foot.
+  let inboxEnd = 0;
+  // Paging the open chats only needs to keep up with the rows above this index.
+  let openEnd = 0;
+  if (sidebarGrouping === "inbox") {
+    const open = listedChats(flatSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS, false);
+    const working = open.filter(atWork);
+    // Newest first by creation, so streaming updates don't reshuffle what's running.
+    working.sort((a, b) => b.session.createdAt - a.session.createdAt);
+    const waiting = open.filter((chat) => !working.includes(chat));
+
+    const pushSection = (section: "inbox" | "working", chats: typeof open, count = chats.length) => {
+      const collapsed = collapsedInbox.includes(section);
+      sidebarRows.push({ kind: "section", section, collapsed, count });
+      if (!collapsed) chats.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", section, project, session, run: sessionLeadRun(runsBySession.get(session.id) ?? EMPTY_RUNS, session.id, session.lastRun) }));
+      return collapsed;
+    };
+    const pushWorking = () => { if (working.length) pushSection("working", working); };
+    const pushWaiting = () => {
+      // The loaded pages reach only as far as the rail has scrolled; the server counts the rest.
+      const openTotal = flatSessions.data?.pages[0]?.total;
+      const count = openTotal === undefined ? waiting.length : Math.max(waiting.length, openTotal - working.length);
+      if (!pushSection("inbox", waiting, count)) pushListStatus(flatSessions, !open.length);
+      openEnd = sidebarRows.length;
+    };
+
+    if (workingPlace === "above") pushWorking();
+    pushWaiting();
+    if (workingPlace === "below") pushWorking();
+    inboxEnd = sidebarRows.length;
+    if (workingPlace === "bottom") pushWorking();
+    const archived = doneSessions.data?.pages;
+    const doneCount = archived?.[0]?.total ?? archived?.flatMap((page) => page.sessions).length ?? 0;
+    sidebarRows.push({ kind: "section", section: "done", collapsed: !doneExpanded, count: doneCount });
+    const doneStart = sidebarRows.length;
+    if (doneExpanded) {
+      const done = listedChats(doneSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS, true);
+      done.forEach(({ project, session }) => sidebarRows.push({ kind: "done", project, session }));
+      pushListStatus(doneSessions, !done.length, m.chat_inbox_done_empty());
+    }
+
+    // Mid-archive a chat is briefly in both lists; it stays where it was until the other list catches up.
+    const seen = new Set<string>();
+    const unique = sidebarRows.filter((row) => !("session" in row) || (!seen.has(row.session.id) && Boolean(seen.add(row.session.id))));
+    sidebarRows.splice(0, sidebarRows.length, ...unique);
+
+    // Holds Working and a preview of Done at the rail's foot while the inbox is short; scrolling closes the gap first.
+    const heightOf = (rows: SidebarRow[]) => rows.reduce((total, row) => total + sidebarRowHeight(row), 0);
+    const height = heightOf(sidebarRows.slice(0, doneStart)) + Math.min(heightOf(sidebarRows.slice(doneStart)), DONE_PREVIEW_HEIGHT);
+    if (height < railHeight) sidebarRows.splice(inboxEnd, 0, { kind: "spacer", height: railHeight - height });
   }
-  const sidebarScrollable = sidebarGrouping === "list" || sidebarExpanded;
+  const sidebarScrollable = sidebarGrouping !== "projects" || sidebarExpanded;
+  const inboxPinned = sidebarScrollable && sidebarRows[inboxEnd]?.kind === "spacer";
   const initialRows = fitSidebarRows(sidebarRows, railHeight, activeId);
   const hasHiddenProjects = initialRows.length < sidebarRows.length || shownProjects.length < sortedProjects.length;
   const defaultRows = sidebarGrouping === "projects" && hasHiddenProjects
     ? fitSidebarRows(sidebarRows, Math.max(0, railHeight - 38), activeId) : initialRows;
   const showProjectMore = sidebarGrouping === "projects" && !sidebarExpanded && hasHiddenProjects;
   const defaultRowsHeight = defaultRows.reduce((height, row) => height + sidebarRowHeight(row), 0);
-  const sidebarRowKey = (row: SidebarRow) => row.kind === "chat" ? row.session.id : `${row.kind}:${row.project.id}`;
+  const sidebarRowKey = (row: SidebarRow) => row.kind === "chat" || row.kind === "inbox" || row.kind === "done" ? row.session.id
+    : row.kind === "section" ? `section:${row.section}` : row.kind === "spacer" ? row.kind
+    : row.kind === "status" ? `status:${row.project.id}:${row.empty ?? ""}` : `${row.kind}:${sidebarGroup(row.project)}`;
   const sidebarVirtualizer = useVirtualizer({
     useFlushSync: false,
     count: sidebarRows.length,
@@ -7342,106 +8671,471 @@ export function ChatPanel({
     estimateSize: (index) => sidebarRowHeight(sidebarRows[index]),
     overscan: 5,
     rangeExtractor: (range) => {
-      const indexes = defaultRangeExtractor(range);
+      // Pinned inbox rows and section headers stay on screen wherever the list is scrolled.
+      const pinned = sidebarRows.flatMap((row, index) => row.kind === "section" || (inboxPinned && index < inboxEnd) ? [index] : []);
+      const indexes = [...new Set([...pinned, ...railFlightIndexes, ...defaultRangeExtractor(range)])].sort((a, b) => a - b);
       const focused = sidebarRows.findIndex((row) => sidebarRowKey(row) === focusedSidebarRow);
       return focused < 0 || indexes.includes(focused) ? indexes : [...indexes, focused].sort((a, b) => a - b);
     },
     enabled: sidebarScrollable && railOpen && !embedded,
   });
 
+  let railTop = 0;
+  const railTops = sidebarRows.map((row) => (railTop += sidebarRowHeight(row)) - sidebarRowHeight(row));
+  // Rows glide between places, fade in when new and fade out where they were when gone.
+  const railLayout = new Map(sidebarRows.map((row, index) => [sidebarRowKey(row), { row, top: railTops[index] }]));
+  const railCommitted = useRef<{ grouping: SidebarGrouping; layout: typeof railLayout; scrollTop: number } | null>(null);
+  const railGhosts = useRef(new Map<string, { row: SidebarRow; top: number }>());
+  const [, setRailGhostsSettled] = useState(0);
+  const railReducedMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const railSameList = railCommitted.current?.grouping === sidebarGrouping && sidebarScrollable && !railReducedMotion;
+  if (!railSameList) railGhosts.current.clear();
+  // A row leaving the screen stays mounted until it has slid out of view.
+  const railFlight = useRef(new Map<string, number>());
+  // Where a row that left and came back in a later update was last drawn, to slide from.
+  const railReturns = useRef(new Map<string, number>());
+  const now = performance.now();
+  for (const [key, until] of railFlight.current) if (until < now) railFlight.current.delete(key);
+  for (const [key, ghost] of railGhosts.current) {
+    if (!railLayout.has(key)) continue;
+    railGhosts.current.delete(key);
+    railReturns.current.set(key, ghost.top);
+    railFlight.current.set(key, now + RAIL_MOVE_MS);
+  }
+  // The first rows to load appear in place, so nothing they replace is left to fade out.
+  if (railSameList && railSettled(railCommitted.current!.layout)) {
+    const viewTop = sidebarVirtualizer.scrollOffset ?? 0;
+    for (const [key, was] of railCommitted.current?.layout ?? []) {
+      const onScreen = was.top < viewTop + railHeight && was.top + sidebarRowHeight(was.row) > viewTop;
+      if (!onScreen || was.row.kind === "spacer") continue;
+      const next = railLayout.get(key);
+      if (!next) railGhosts.current.set(key, was);
+      else if (next.top !== was.top) railFlight.current.set(key, now + RAIL_MOVE_MS);
+    }
+  }
+  const railFlightIndexes = sidebarRows.flatMap((row, index) => railFlight.current.has(sidebarRowKey(row)) ? [index] : []);
   const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
+
+  // A section just opened scrolls into view far enough to show its first rows.
+  const railReveal = useRef<RailSection | null>(null);
+  // Where each row was last drawn at rest, from the top of the rail's viewport.
+  const railRest = useRef(new Map<string, number>());
+  useLayoutEffect(() => {
+    const previous = railCommitted.current;
+    const body = railBodyRef.current;
+    railCommitted.current = { grouping: sidebarGrouping, layout: railLayout, scrollTop: body?.scrollTop ?? 0 };
+    if (!body) return;
+
+    const reveal = railReveal.current;
+    const start = sidebarRows.findIndex((row) => row.kind === "section" && row.section === reveal);
+    if (reveal && start >= 0) {
+      railReveal.current = null;
+      let end = start;
+      while (end + 1 < sidebarRows.length && sidebarRows[end + 1].kind !== "section") end++;
+      const sectionTop = railTops[start];
+      const shown = Math.min(railTops[end] + sidebarRowHeight(sidebarRows[end]), sectionTop + sidebarRowHeight(sidebarRows[start]) + DONE_PREVIEW_HEIGHT);
+      const target = Math.min(sectionTop, shown + railStickyBottom(reveal) - body.clientHeight);
+      if (target > body.scrollTop) body.scrollTo({ top: target, behavior: railReducedMotion ? "instant" : "smooth" });
+    }
+
+    // Rows are measured where they are drawn, so a row held by `sticky` moves from where it sits, not from its slot in the list.
+    const viewTop = body.getBoundingClientRect().top;
+    syncRailPins();
+    const pinned = [...railPins.current?.querySelectorAll<HTMLElement>("[data-pin]") ?? []].filter((pin) => pin.style.visibility === "visible");
+    const shown = [
+      ...[...body.querySelectorAll<HTMLElement>("[data-rail-key]")].filter((el) => el.style.visibility !== "hidden").map((el) => ({ el, key: el.dataset.railKey! })),
+      ...pinned.map((el) => ({ el, key: `section:${el.dataset.pin}` })),
+    ];
+    const rows = shown.map(({ el, key }) => {
+      const transform = el.getAnimations().length ? getComputedStyle(el).transform : "none";
+      const drawn = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
+      return { el, key, drawn, at: el.getBoundingClientRect().top - viewTop - drawn };
+    });
+    const before = railRest.current;
+    railRest.current = new Map(rows.map(({ key, at }) => [key, at]));
+
+    if (!previous || previous.grouping !== sidebarGrouping || previous.layout === railLayout || !railSettled(previous.layout)) return;
+    const changed = previous.layout.size !== railLayout.size || [...railLayout].some(([key, { top }]) => previous.layout.get(key)?.top !== top);
+    if (!changed) return;
+    if (railReducedMotion) return;
+
+    const delay = 0;
+
+    const moves: { el: HTMLElement; key: string; at: number; offset: number; from: number | undefined }[] = [];
+    for (const { el, key, drawn, at } of rows) {
+      const known = previous.layout.get(key)?.top;
+      const returning = railReturns.current.get(key);
+      const was = returning !== undefined ? returning - previous.scrollTop : before.get(key) ?? (known === undefined ? undefined : known - previous.scrollTop);
+      if (was === undefined) {
+        el.animate([{ opacity: 0 }, { opacity: 1 }], { id: "rail-arrive", duration: RAIL_FADE_MS, delay, easing: "ease-out", fill: "backwards" });
+        continue;
+      }
+      // A row still fading in lands where it now belongs rather than flying there.
+      if (el.getAnimations().some((animation) => animation.id === "rail-arrive")) continue;
+      // Start from where the row is drawn now, so a move that interrupts another doesn't jump.
+      moves.push({ el, key, at, offset: was + drawn - at, from: returning ?? known });
+    }
+
+    const move = { duration: RAIL_MOVE_MS, delay, easing: RAIL_EASE, fill: "backwards" } as const;
+    const heightOf = (key: string) => sidebarRowHeight(railLayout.get(key)!.row);
+    const offsets = new Map(moves.map(({ key, offset }) => [key, offset]));
+    for (const { el, key, at, offset, from } of moves) {
+      // A move this one interrupts would otherwise keep sliding the row from where it was headed before.
+      el.getAnimations().forEach((animation) => animation.cancel());
+      if (Math.abs(offset) < 0.5) continue;
+      el.animate([{ transform: `translateY(${offset}px)` }, { transform: "none" }], move);
+
+      // A row passing several others goes behind them: faint where it overlaps them, whole in the gap it lands in.
+      // Rows a mover slides past each pass it once; only the mover passes several.
+      const to = railLayout.get(key)!.top;
+      const passed = from === undefined ? 0 : [...railLayout].filter(([other, { top }]) => {
+        const otherWas = previous.layout.get(other)?.top;
+        return other !== key && otherWas !== undefined && (otherWas < from) !== (top < to);
+      }).length;
+      if (passed < 2) continue;
+      const height = heightOf(key);
+      const frames = Array.from({ length: 25 }, (_, step) => {
+        const progress = railEase(step / 24);
+        const top = at + offset * (1 - progress);
+        const covered = rows.reduce((sum, other) => {
+          if (other.key === key) return sum;
+          const otherTop = other.at + (offsets.get(other.key) ?? 0) * (1 - progress);
+          return sum + Math.max(0, Math.min(top + height, otherTop + heightOf(other.key)) - Math.max(top, otherTop));
+        }, 0);
+        return { offset: step / 24, opacity: 1 - 0.8 * Math.min(1, covered / height) };
+      });
+      el.animate(frames, { ...move, easing: "linear" });
+    }
+
+    railReturns.current.clear();
+
+    // A list that got shorter at its end clamps the scroll; leaving rows hold their place on screen.
+    const scrolled = previous ? previous.scrollTop - body.scrollTop : 0;
+    for (const el of body.querySelectorAll<HTMLElement>("[data-rail-ghost]:not([data-fading])")) {
+      el.dataset.fading = "";
+      const key = el.dataset.railGhost!;
+      const held = `translateY(${-scrolled}px)`;
+      el.animate([{ opacity: 1, transform: held }, { opacity: 0, transform: held }], { duration: RAIL_FADE_MS / 2, easing: "ease-out", fill: "forwards" }).finished.then(() => {
+        railGhosts.current.delete(key);
+        setRailGhostsSettled((settled) => settled + 1);
+      }, () => {});
+    }
+
+    if (railFlight.current.size) {
+      const landed = window.setTimeout(() => setRailGhostsSettled((settled) => settled + 1), RAIL_MOVE_MS + 20);
+      return () => window.clearTimeout(landed);
+    }
+  });
   const pendingSidebarFocus = useRef<number | null>(null);
   useLayoutEffect(() => {
     if (pendingSidebarFocus.current === null) return;
-    const row = railBodyRef.current?.querySelector<HTMLElement>(`[data-index="${pendingSidebarFocus.current}"] [data-sidebar-keyboard-row]`);
+    // A pinned header has a copy in the list and one at the rail's foot; focus the one showing.
+    const rows = railBodyRef.current?.parentElement?.querySelectorAll<HTMLElement>(`[data-index="${pendingSidebarFocus.current}"] [data-sidebar-keyboard-row]`) ?? [];
+    const row = [...rows].find((el) => getComputedStyle(el).visibility !== "hidden");
     if (row) {
       pendingSidebarFocus.current = null;
       row.focus();
     }
   });
-  const lastVisibleIndex = sidebarVirtualItems.at(-1)?.index ?? -1;
+  // The visible range, not the rendered rows: pinned headers are always rendered.
+  const lastVisibleIndex = sidebarVirtualizer.range?.endIndex ?? -1;
   useEffect(() => {
-    if (sidebarGrouping === "list" && railOpen && !embedded && lastVisibleIndex >= sidebarRows.length - 6
-      && flatSessions.hasNextPage && !flatSessions.isFetching && !flatSessions.isError) {
-      void flatSessions.fetchNextPage();
-    }
-  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
+    if (!railOpen || embedded || sidebarGrouping === "projects") return;
+    const page = (query: typeof flatSessions, end: number) => {
+      if (lastVisibleIndex >= end - 6 && query.hasNextPage && !query.isFetching && !query.isError) void query.fetchNextPage();
+    };
+    // A folded inbox never grows, so paging it would only read every page.
+    if (sidebarGrouping !== "inbox" || !collapsedInbox.includes("inbox")) page(flatSessions, openEnd);
+    if (doneExpanded) page(doneSessions, sidebarRows.length);
+  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, openEnd, flatSessions, collapsedInbox, doneExpanded, doneSessions, sidebarRows.length]);
+  const sidebarActions = useRef<SidebarActions>(null!);
+  sidebarActions.current = {
+    toggleProjectCollapsed: (project) => {
+      const group = sidebarGroup(project);
+      const next = openedProjects.includes(group) ? openedProjects.filter((id) => id !== group) : [...openedProjects, group];
+      setOpenedProjects(next);
+      openedSidebarProjects.set(machineSuffix, next);
+    },
+    pinProject: (project) => {
+      const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
+      setPinnedProjects(next);
+      try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
+    },
+    projectRemoved: (project) => { if (project.id === projectId) void navigate({ to: "/projects" }); },
+    openProjectSettings: (project) => void navigate({ href: `/projects/${encodeURIComponent(project.id)}/settings/project` }),
+    newProjectChat: (project) => {
+      if (project.scratch) void startScratchChat();
+      else if (project.id === projectId) startProjectTask();
+      else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
+    },
+    openSession: (s, project) => {
+      closeDone();
+      onActiveSessionChange(s.id, { projectId: project.id });
+      if (project.id === DEMO_PROJECT_ID) {
+        markDemoSessionRead(s.id);
+        const experiment = DEMO_EXPERIMENT_LABELS[s.id];
+        if (experiment) {
+          captureUiEvent({
+            name: "demo_experiment_started",
+            kind: "curated",
+            experiment,
+          });
+          captureUiEvent({
+            name: "first_action",
+            surface: "demo",
+            action: "open_experiment",
+          });
+        }
+      }
+    },
+    openExperiment: (s, targetProjectId, experimentId) => {
+      void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
+    },
+    rename,
+    setArchived,
+    markBelowDone: (session) => void markBelowDone(session),
+    markIdleDone: async () => (await idleChats()).forEach((chat) => setArchived(chat, true, false)),
+    moveToProject: (s, project) => createProject(project, s),
+    remove: (s) => void removeSession(s),
+  };
+  const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
+  const openSettings = useCallback(() => onSelectMainView("settings"), [onSelectMainView]);
 
-  // Rail entries below New Chat, in their default order; the user can drag them.
-  const railNav = useNavOrder("rail-nav-order", ["skills", ...SETTINGS_NAV.map((item) => item.id)]);
+  /** How far above the rail's foot a section header pins: on the headers of the sections after it. */
+  const railStickyBottom = (section: RailSection) => {
+    const start = sidebarRows.findIndex((row) => row.kind === "section" && row.section === section);
+    return sidebarRows.slice(start + 1).reduce((height, row) => height + (row.kind === "section" ? sidebarRowHeight(row) : 0), 0);
+  };
+  const railGap = inboxPinned ? sidebarVirtualizer.measurementsCache[inboxEnd]?.size ?? 0 : 0;
+
+  // Section headers below the fold pin to the rail's foot in a layer outside the scroller, which fades
+  // the rows out beneath them; a mask, unlike a fill, works over the window material. Scrolling updates
+  // which are pinned straight from the scroll event, so the handoff doesn't wait for a render.
+  const railPins = useRef<HTMLDivElement>(null);
+  const railPinState = useRef({ rows: sidebarRows, tops: railTops });
+  railPinState.current = { rows: sidebarRows, tops: railTops };
+  const syncRailPins = useCallback(() => {
+    const body = railBodyRef.current;
+    const pins = railPins.current;
+    if (!body || !pins) return;
+    const { rows, tops } = railPinState.current;
+    const viewBottom = body.scrollTop + body.clientHeight;
+    const pinned = new Set<string>();
+    let below = 0;
+    for (let index = rows.length - 1; index >= 0; index--) {
+      const row = rows[index];
+      if (row.kind !== "section") continue;
+      if (tops[index] + sidebarRowHeight(row) <= viewBottom - below + 0.5) break;
+      pinned.add(row.section);
+      below += sidebarRowHeight(row);
+    }
+    // One copy of a header shows at a time: the pinned one, or the one in the list.
+    for (const pin of pins.querySelectorAll<HTMLElement>("[data-pin]")) {
+      const shown = pinned.has(pin.dataset.pin!);
+      pin.style.visibility = shown ? "visible" : "hidden";
+      const inList = body.querySelector<HTMLElement>(`[data-rail-key="section:${pin.dataset.pin}"]`);
+      if (!inList) continue;
+      inList.style.visibility = shown ? "hidden" : "";
+      const [from, to] = shown ? [inList, pin] : [pin, inList];
+      if (from.contains(document.activeElement)) to.querySelector<HTMLElement>("[data-sidebar-keyboard-row]")?.focus({ preventScroll: true });
+    }
+    body.style.setProperty("--rail-pinned", `${below}px`);
+    body.toggleAttribute("data-pinned", below > 0);
+  }, []);
+  useEffect(() => {
+    const body = railBodyRef.current;
+    body?.addEventListener("scroll", syncRailPins, { passive: true });
+    return () => body?.removeEventListener("scroll", syncRailPins);
+  }, [syncRailPins, railHeight]);
+
+  // Each row sits at the end of a wrapper that starts at the top of the list, so `sticky`
+  // can hold the inbox at the top while the gap below it closes.
+  // Wrappers stack in flow, each pulling the next back to the top with a negative margin;
+  // WebKit doesn't stick inside absolutely positioned boxes.
+  const placeRailRow = (row: SidebarRow, top: number, index: number, ghostKey?: string) => {
+    if (row.kind === "spacer") return null;
+    const key = sidebarRowKey(row);
+    const height = sidebarRowHeight(row);
+    const pinTop = !ghostKey && railGap > 0 && index < inboxEnd;
+    const wrapper = top + height + (pinTop ? railGap : 0);
+    return (
+      <div key={ghostKey ? `ghost:${ghostKey}` : key} className={`pointer-events-none ${ghostKey ? "absolute inset-x-0 top-0" : "relative"}`}
+        style={{ height: wrapper, marginBottom: ghostKey ? undefined : -wrapper }}>
+        {/* A spacer, not a margin: sticky keeps a row's margin box inside its wrapper. */}
+        <div style={{ height: top }} />
+        <div data-rail-key={ghostKey ? undefined : key} data-rail-ghost={ghostKey} inert={Boolean(ghostKey)}
+          data-done-area={row.kind === "done" || (row.kind === "section" && row.section === "done") ? "" : undefined}
+          className={`${pinTop ? "sticky" : "relative"} ${ghostKey ? "" : "pointer-events-auto"}`}
+          style={{ height, top: pinTop ? top : undefined }}>
+          {renderRailRow({ row, top, index })}
+        </div>
+      </div>
+    );
+  };
+
+  const renderRailRow = ({ row, top, index }: { row: SidebarRow; top: number; index: number }) => {
+    if (row.kind === "spacer") return null;
+    if (row.kind === "section") {
+      const setCollapsed = (collapsed: boolean) => {
+        const next = collapsed ? [...collapsedInbox, row.section] : collapsedInbox.filter((id) => id !== row.section);
+        setCollapsedInbox(next);
+        try { localStorage.setItem("sidebar-inbox-collapsed", JSON.stringify(next)); } catch {}
+      };
+      const toggle = () => {
+        const body = railBodyRef.current;
+        // A header pinned to the rail's foot opens and shows its section instead of folding it away unseen.
+        const pinned = body && top + sidebarRowHeight(row) > body.scrollTop + body.clientHeight - railStickyBottom(row.section) + 1;
+        if (row.collapsed || pinned) {
+          setCollapsed(false);
+          railReveal.current = row.section;
+          if (!row.collapsed) setRailGhostsSettled((settled) => settled + 1);
+          return;
+        }
+        setCollapsed(true);
+      };
+      return (
+        <div key={sidebarRowKey(row)} data-index={index} className="relative" style={{ height: sidebarRowHeight(row) }}
+          onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}>
+          <button data-sidebar-keyboard-row aria-expanded={!row.collapsed} onClick={toggle}
+            className="group/section flex h-full w-full items-end gap-1 rounded-md px-2.25 pb-1.5 text-start text-sm font-medium text-subtext hover:text-text">
+            <span>{row.section === "inbox" ? m.sidebar_inbox() : row.section === "working" ? m.chat_inbox_working() : m.chat_inbox_done()}</span>
+            {row.section === "done"
+              ? row.count > 0 && <span className={`tabular-nums text-muted ${row.collapsed ? "hidden group-hover/section:inline group-focus-visible/section:inline" : ""}`}>{fmtNumber(row.count)}</span>
+              : row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
+            <ChevronRight size={14} aria-hidden="true"
+              className={`mb-px shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
+            <span aria-hidden="true" className="mb-2.5 ms-1.5 h-px flex-1 bg-border-variant" />
+          </button>
+        </div>
+      );
+    }
+    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done", leadRun: ShownRun | null, markBelowDone: boolean) => {
+      const sessionHarness = sessionAcpHarness(s, selectionHarness(harnesses, s));
+      const sessionModel = sessionHarness?.models.find((model) => model.id === s.model);
+      return (
+        <SidebarSessionRow
+          key={s.id}
+          actions={sidebarActions}
+          project={project}
+          session={s}
+          cardWarmUntil={cardWarmUntil}
+          projectName={sidebarGrouping !== "projects" ? projectLabel(project) : undefined}
+          harnessLogo={sessionHarness?.logo}
+          modelName={modelName(s) ?? (sessionModel ? harnessModelLabel(sessionModel) : s.model)}
+          active={s.id === activeId && mainView === "chat"}
+          unread={unreadSessionIds.has(s.id)}
+          busy={sessionBusy(project, s)}
+          waiting={sessionWaiting(s)}
+          runs={runsBySession.get(s.id) ?? EMPTY_RUNS}
+          leadRun={leadRun}
+          markBelowDone={markBelowDone}
+          variant={variant}
+          revealTitle={titleReveals.get(s.id)}
+        />
+      );
+    };
+    const project = row.project;
+    const s = row.kind === "chat" || row.kind === "inbox" || row.kind === "done" ? row.session : null;
+    return (
+      <div
+        key={sidebarRowKey(row)}
+        data-index={index}
+        onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget) && !(event.relatedTarget instanceof Element && event.relatedTarget.closest(`[data-session-hover-card="${sidebarRowKey(row)}"]`))) setFocusedSidebarRow(null);
+        }}
+        className="relative"
+        style={{ height: sidebarRowHeight(row) }}
+      >
+        {row.kind === "project" && project.scratch ? (
+          <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
+            <NoProjectGroupHeader
+              collapsed={row.collapsed}
+              busy={row.busy}
+              onToggleCollapsed={() => sidebarActions.current.toggleProjectCollapsed(project)}
+              onNewChat={() => sidebarActions.current.newProjectChat(project)}
+            />
+          </div>
+        ) : row.kind === "project" ? (
+          <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
+            <SidebarProjectCard
+              actions={sidebarActions}
+              project={project}
+              chatCount={projectActivity.find((activity) => activity.projectId === project.id)?.totalAgents}
+              collapsed={row.collapsed}
+              busy={row.busy}
+              pinned={pinnedProjects.includes(project.id)}
+            />
+          </div>
+        ) : s ? (
+          <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
+            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list", row.kind === "inbox" ? row.run : null, row.kind === "inbox" && row.section === "inbox")}
+          </div>
+        ) : row.kind === "more" ? (
+          <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={sidebarGroup(project) in chatLimits} onClick={() => {
+            const group = sidebarGroup(project);
+            setChatLimits((current) => {
+              const next = { ...current };
+              if (group in next) delete next[group];
+              else next[group] = Infinity;
+              return next;
+            });
+          }}>
+            {sidebarGroup(project) in chatLimits ? m.common_show_less() : m.common_show_more()}
+          </Button>
+        ) : row.kind === "status" && (
+          <div className={`flex h-full items-center px-2.25 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
+            {row.error ? <Button size="small" onClick={row.retry}>{m.app_retry()}</Button>
+              : row.pending ? <Spinner />
+                : row.empty ?? (sessionFilter === "archived" ? m.chat_no_archived_sessions() : m.chat_no_sessions_yet())}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const rail = (
-    <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
+    <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-1 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
       {!mobileRail && <div
         className="rail-resizer absolute -end-1 top-0 bottom-0 w-1.5 z-30 cursor-col-resize [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover"
         onPointerDown={onResizeRail}
       />}
       {railHeader}
-      <nav data-keyboard-list onKeyDown={navigateKeyboardList} className="rail-nav flex flex-col gap-0.5 p-2 shrink-0 [&_[data-tip]::after]:left-[calc(100%_+_6px)] [&_[data-tip]::after]:top-1/2 [&_[data-tip]::after]:translate-x-0 [&_[data-tip]::after]:-translate-y-1/2">
-        <button
-          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface"
-          data-onboarding="new-session"
-          data-keyboard-item
-          data-tip={newTaskShortcut}
-          aria-label={m.chat_panel_new_chat()}
-          aria-keyshortcuts="Meta+N Control+N Meta+Shift+Enter Control+Shift+Enter"
-          onClick={startNewTask}
-        >
-          <Plus size={16} />
-          {m.chat_panel_new_chat()}
-        </button>
-        {railNav.order.map((id) => {
-          const item = SETTINGS_NAV.find((entry) => entry.id === id);
-          const active = item
-            ? mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView)
-            : mainView === "skills";
-          const shortcut = id === "settings" ? appHotkeys["settings.open"].hotkey : id === "compute" ? appHotkeys["compute.open"].hotkey : null;
-          return (
-            <button
-              key={id}
-              {...railNav.itemProps(id)}
-              data-keyboard-item
-              className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&[data-dragging]]:opacity-50 ${active ? "active" : ""}`}
-              aria-current={active ? "page" : undefined}
-              data-onboarding={id === "compute" ? "nav-compute" : undefined}
-              data-tip={shortcut ? formatForDisplay(shortcut) : undefined}
-              aria-label={item ? item.label() : undefined}
-              aria-keyshortcuts={id === "settings" ? "Meta+, Control+," : id === "compute" ? "Meta+Alt+C Control+Alt+C" : undefined}
-              onClick={() => onSelectMainView(id)}
-            >
-              {item ? item.icon : <Blocks size={16} />}
-              {item ? item.label() : m.chat_panel_customize()}
-            </button>
-          );
-        })}
-      </nav>
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-3.5 pb-0 ps-4.5">
-        <div className="rail-section-label p-0 text-sm font-medium text-subtext">
-          {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
+      <div data-titlebar-drag className="rail-section-head @container flex items-center justify-between gap-2 shrink-0 pt-0 pe-2 pb-0.5 ps-3.25 select-none mac-titlebar:-mt-1">
+        <div className="rail-section-label min-w-0 truncate p-0 text-sm font-medium text-subtext">
+          {sidebarGrouping === "projects" ? m.projects_home_projects() : m.sidebar_chats()}
         </div>
-        <div className="rail-section-actions flex items-center gap-1">
-          {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+        <div className="rail-section-actions flex shrink-0 items-center gap-1">
+          {sidebarGrouping === "projects" && onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
               <FolderPlus size={16} className="text-subtext" />
             </IconButton>
           </Tooltip>}
-          <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
+          <Button variant="ghost" size="small" className="px-2 font-normal text-subtext hover:text-text" aria-label={m.chat_panel_new_chat()} onClick={startNewTask}>
+            <SquarePen size={14} aria-hidden="true" />
+            {/* Beside the new project button, a rail at its narrowest has room for the icon only. */}
+            <span className={sidebarGrouping === "projects" ? "@max-[14.5rem]:hidden" : undefined}>{m.chat_panel_new_chat()}</span>
+          </Button>
+          <SidebarViewMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
             setSidebarGrouping(grouping);
+            if (grouping === "inbox") void offerInboxCleanup();
             try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
             setSidebarExpandedAll(false);
             setChatLimits({});
             if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
+          }} workingPlace={workingPlace} onWorkingPlaceChange={(place) => {
+            setWorkingPlace(place);
+            try { localStorage.setItem("sidebar-working-place", place); } catch {}
           }} />
         </div>
       </div>
-      <div className="relative flex-1 min-h-0">
-      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}
+      <div className="relative flex-1 min-h-0"
         onKeyDown={(event) => {
           if (event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
           const target = event.target;
-          if (!(target instanceof HTMLElement) || (target !== event.currentTarget && !target.hasAttribute("data-sidebar-keyboard-row"))) return;
+          if (!(target instanceof HTMLElement) || (target !== railBodyRef.current && !target.hasAttribute("data-sidebar-keyboard-row"))) return;
           const rows = sidebarScrollable ? sidebarRows : defaultRows;
-          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "chat" ? [index] : []);
+          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "chat" || row.kind === "inbox" || row.kind === "section" || row.kind === "done" ? [index] : []);
           if (indexes.length === 0) return;
           const rowIndex = Number(target.closest("[data-index]")?.getAttribute("data-index") ?? -1);
           const position = indexes.indexOf(rowIndex);
@@ -7464,117 +9158,28 @@ export function ChatPanel({
           if (index === rowIndex) return;
           pendingSidebarFocus.current = index;
           setFocusedSidebarRow(sidebarRowKey(rows[index]));
-          if (sidebarScrollable) sidebarVirtualizer.scrollToIndex(index, { align: "auto" });
+          const body = railBodyRef.current;
+          if (sidebarScrollable && body && rows[index].kind !== "section") {
+            // Keep the row clear of the headers pinned over the rail's foot.
+            const covered = Number.parseFloat(body.style.getPropertyValue("--rail-pinned")) || 0;
+            const top = railTops[index];
+            const bottom = top + sidebarRowHeight(rows[index]);
+            if (top < body.scrollTop) body.scrollTop = top;
+            else if (bottom > body.scrollTop + body.clientHeight - covered) body.scrollTop = bottom - body.clientHeight + covered;
+          }
         }}>
+      <div ref={setRailBody} tabIndex={-1}
+        className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"} data-pinned:mask-b-from-[calc(100%-var(--rail-pinned)-0.75rem)] data-pinned:mask-b-to-[calc(100%-var(--rail-pinned)+0.25rem)]`}>
         <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) }}>
-          {(sidebarScrollable
-            ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
-            : defaultRows.map((row, index) => ({ row, top: 0, index }))
-          ).map(({ row, top, index }) => {
-            const project = row.project;
-            const s = row.kind === "chat" ? row.session : null;
-            const sessionHarness = s ? sessionAcpHarness(s, selectionHarness(harnesses, s)) : undefined;
-            const sessionModel = sessionHarness?.models.find((model) => model.id === s?.model);
-            return (
-              <div
-                key={sidebarRowKey(row)}
-                data-index={index}
-                onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}
-                onBlurCapture={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget) && !(event.relatedTarget instanceof Element && event.relatedTarget.closest(`[data-session-hover-card="${sidebarRowKey(row)}"]`))) setFocusedSidebarRow(null);
-                }}
-                // A row with an open session menu has to sit above the rows painted after it.
-                className={`${sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"} has-[.option-menu]:z-10`}
-                style={{ height: sidebarRowHeight(row), top: sidebarScrollable ? top : undefined }}
-              >
-                {row.kind === "project" ? (
-                  <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
-                    <ProjectInfoCard
-                      project={project}
-                      chatCount={projectActivity.find((activity) => activity.projectId === project.id)?.totalAgents}
-                      collapsed={row.collapsed}
-                      busy={row.busy}
-                      onToggleCollapsed={() => {
-                        const next = openedProjects.includes(project.id) ? openedProjects.filter((id) => id !== project.id) : [...openedProjects, project.id];
-                        setOpenedProjects(next);
-                        openedSidebarProjects.set(machineSuffix, next);
-                      }}
-                      pinned={pinnedProjects.includes(project.id)}
-                      onPin={() => {
-                        const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
-                        setPinnedProjects(next);
-                        try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
-                      }}
-                      onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
-                      onNewChat={() => {
-                        if (project.id === projectId) startProjectTask();
-                        else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
-                      }}
-                    />
-                  </div>
-                ) : s ? (
-                  <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
-                    <SessionRow
-                      key={s.id}
-                      session={s}
-                      cardWarmUntil={cardWarmUntil}
-                      projectName={sidebarGrouping === "list" ? project.name : undefined}
-                      harnessLogo={sessionHarness?.logo}
-                      modelName={modelName(s) ?? (sessionModel ? harnessModelLabel(sessionModel) : s.model)}
-                      active={s.id === activeId && mainView === "chat"}
-                      unread={unreadSessionIds.has(s.id)}
-                      busy={sessionBusy(project, s)}
-                      waiting={sessionWaiting(s)}
-                      experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
-                      revealTitle={titleReveals.get(s.id)}
-                      onOpenExperiment={(targetProjectId, experimentId) => {
-                        void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
-                      }}
-                      onOpen={() => {
-                        onActiveSessionChange(s.id, { projectId: project.id });
-                        if (project.id === DEMO_PROJECT_ID) {
-                          markDemoSessionRead(s.id);
-                          const experiment = DEMO_EXPERIMENT_LABELS[s.id];
-                          if (experiment) {
-                            captureUiEvent({
-                              name: "demo_experiment_started",
-                              kind: "curated",
-                              experiment,
-                            });
-                            captureUiEvent({
-                              name: "first_action",
-                              surface: "demo",
-                              action: "open_experiment",
-                            });
-                          }
-                        }
-                      }}
-                      onRename={(title) => rename(s, title)}
-                      onSetArchived={(archived) => setArchived(s, archived)}
-                      onDelete={() => void removeSession(s)}
-                    />
-                  </div>
-                ) : row.kind === "more" ? (
-                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={project.id in chatLimits} onClick={() => {
-                    setChatLimits((current) => {
-                      const next = { ...current };
-                      if (project.id in next) delete next[project.id];
-                      else next[project.id] = Infinity;
-                      return next;
-                    });
-                  }}>
-                    {project.id in chatLimits ? m.common_show_less() : m.common_show_more()}
-                  </Button>
-                ) : row.kind === "status" && (
-                  <div className={`flex h-full items-center px-2.5 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
-                    {row.error ? <Button size="small" onClick={row.retry}>{m.app_retry()}</Button>
-                      : row.pending ? <Spinner />
-                        : sessionFilter === "archived" ? m.chat_no_archived_sessions() : m.chat_no_sessions_yet()}
-                  </div>
-                )}
+          {sidebarScrollable
+            ? <>
+              {sidebarVirtualItems.map((item) => placeRailRow(sidebarRows[item.index], item.start, item.index))}
+              {/* Clipped, so leaving rows don't hold the list at its old height. */}
+              <div className="pointer-events-none absolute inset-0 overflow-hidden">
+                {[...railGhosts.current].map(([key, ghost]) => placeRailRow(ghost.row, ghost.top, -1, key))}
               </div>
-            );
-          })}
+            </>
+            : defaultRows.map((row, index) => renderRailRow({ row, top: 0, index }))}
           {(showProjectMore || sidebarExpandedAll) && (
             <div className="absolute start-0 flex h-9.5 w-full items-center pt-1" style={{ top: sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight }}>
               <Button variant="ghost" size="small" className="text-subtext" aria-expanded={sidebarExpandedAll} onClick={() => {
@@ -7592,12 +9197,15 @@ export function ChatPanel({
           )}
         </div>
       </div>
-      {sidebarScrollable && <>
-        {(sidebarVirtualizer.scrollOffset ?? 0) > 0 && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-5 h-3 bg-linear-to-b from-background to-transparent" />}
-        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
-      </>}
+      {sidebarScrollable && (
+        <div ref={railPins} className="pointer-events-none absolute inset-x-0 bottom-0 ps-1 pe-1">
+          {sidebarRows.flatMap((row, index) => row.kind === "section" ? [
+            <div key={sidebarRowKey(row)} data-pin={row.section} data-done-area={row.section === "done" ? "" : undefined} className="pointer-events-auto invisible">{renderRailRow({ row, top: railTops[index], index })}</div>,
+          ] : [])}
+        </div>
+      )}
       </div>
-      <StatusStrip runtime={runtime} onDetails={() => onSelectMainView("openresearch")} />
+      <StatusStrip runtime={runtime} onDetails={openRuntimeDetails} settingsOpen={mainView !== "chat" && mainView !== "project"} onSettings={openSettings} />
     </aside>
   );
 
@@ -7614,13 +9222,23 @@ export function ChatPanel({
   const railReopen = (!railOpen || mobileRail) && !embedded && (
     <SidebarToggle open={false} onClick={onShowRail} className="ms-2.5 max-md:ms-1 mac-titlebar:invisible mac-titlebar:ms-titlebar-inset" />
   );
+  // With the sidebar closed, New chat follows its toggle.
+  const railClosedControls = railReopen && (
+    <div className="flex items-center gap-1">
+      {railReopen}
+      <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-md">
+        <IconButton aria-label={m.chat_panel_new_chat()} onClick={startNewTask}><SquarePen size={16} /></IconButton>
+      </Tooltip>
+    </div>
+  );
 
   if (mainView !== "chat") {
     return (
       <>
         {displayedRail}
         <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          {mainView === "project" && (!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railClosedControls}</div>}
+          {mainView !== "project" && <SettingsHeader active={mainView} onSelect={onSelectMainView} leading={railReopen} />}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -7637,11 +9255,32 @@ export function ChatPanel({
       <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane relative flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2.625rem_minmax(0,1fr)_2.625rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
-          {railReopen}
+        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[4.875rem_minmax(0,1fr)_4.875rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
+          {railClosedControls}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
             {activeSession && <>
+              {ancestors.length > 0 && (
+                <nav aria-label={m.chat_parent_chats()} className="-me-1 flex min-w-0 shrink items-center gap-1">
+                  {ancestors.map((ancestor) => {
+                    const label = ancestor.title?.trim() || (ancestor.delegate ? delegateModelLabel(ancestor, modelName) : m.chat_untitled());
+                    return (
+                      <Fragment key={ancestor.id}>
+                        <button
+                          type="button"
+                          dir="auto"
+                          className="min-w-8 max-w-48 cursor-pointer truncate rounded-sm text-base text-subtext transition-colors duration-120 ease-standard hover:text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
+                          title={label}
+                          onClick={() => onOpenDelegate?.(ancestor.id)}
+                        >
+                          {label}
+                        </button>
+                        <ChevronRight size={14} className="shrink-0 text-muted rtl:rotate-180" aria-hidden="true" />
+                      </Fragment>
+                    );
+                  })}
+                </nav>
+              )}
               {activeSession.title?.trim() ? (
                 <PaperTitle variant="header" className="flex-initial" title={activeSession.title.trim()}>
                   <TitleReveal
@@ -7651,9 +9290,16 @@ export function ChatPanel({
                   />
                 </PaperTitle>
               ) : busy ? <Spinner /> : null}
-              <span className="min-w-0 truncate rounded-md border border-border bg-surface px-2.5 py-0.5 text-sm font-normal text-subtext" title={projectName}>
-                {projectName}
-              </span>
+              {activeSession.pendingProject ? <PendingProjectMove session={activeSession} />
+                : currentProject?.scratch && !embedded ? (
+                  <Button size="small" className="shrink-0 font-normal" onClick={() => createProject(currentProject, activeSession)}>
+                    <FolderPlus size={14} />{m.create_project_button()}
+                  </Button>
+                ) : <>
+                  <span className="min-w-0 truncate rounded-md border border-border bg-surface px-2.5 py-0.5 text-sm font-normal text-subtext" title={projectName}>
+                    {projectName}
+                  </span>
+                </>}
             </>}
           </div>
           {embedded && activeSession && (
@@ -7665,6 +9311,7 @@ export function ChatPanel({
           </div>
         </div>
 
+        <span role="status" className="sr-only">{firstTurnStarting ? statusLine : null}</span>
         {findRequest !== null && <div className="relative z-30 shrink-0 px-4">
           <ChatSearch key={sessionsOptions.queryKey[1]} projectId={projectId} sessionId={activeId} projects={sidebarProjects} assistantLabel={assistantLabel} focusRequest={findRequest} embedded={embedded}
             onOpen={onOpenSearchHit} onClose={closeFind} branchReturn={branchReturn?.sessionId === activeId && !busy ? restoreSearchBranch : undefined}
@@ -7679,7 +9326,7 @@ export function ChatPanel({
             <p>{historyError.message}</p>
             <Button onClick={() => void historyQuery.refetch()}>{m.app_retry()}</Button>
           </div>
-        ) : contentLoading || historyLoading ? (
+        ) : (contentLoading || historyLoading) && !launching ? (
           <div className="chat-loading flex-1 min-h-0 overflow-hidden [scrollbar-gutter:stable_both-edges]" role="status" aria-label={m.chat_panel_loading_conversation()} aria-busy="true">
             <div aria-hidden="true" className="mx-auto flex h-full w-full max-w-readable flex-col gap-6 px-4 pb-8 pt-4 motion-safe:animate-pulse">
               <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
@@ -7698,7 +9345,7 @@ export function ChatPanel({
             </div>
           </div>
         ) : !threadMounted && (activeSession?.sideParentSessionId || sideParentSessionId) ? (
-          <div className="chat-empty flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-subtext">
+          <div className="chat-empty min-h-0 flex flex-1 flex-col items-center justify-center-safe gap-3 overflow-y-auto px-8 before:h-5 before:shrink-0 after:h-5 after:shrink-0 text-center text-subtext">
             <MessagesSquare size={22} />
             <p className="m-0 text-balance">{m.side_chat_empty()}</p>
           </div>
@@ -7790,6 +9437,8 @@ export function ChatPanel({
               transcriptSelection.dismiss();
             }}
           >
+            {/* Clips the rows' bleed, and the launch rise at the composer, since a transform still extends the scroll range. */}
+            <div className="min-h-full overflow-hidden supports-[overflow:clip]:overflow-clip">
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
                 <ChatLinksContext value={chatLinks}>
@@ -7799,9 +9448,9 @@ export function ChatPanel({
                   scrollToEndRef={scrollToEndRef}
                   stickToBottom={stickToBottom}
                   onPinToBottom={pinTranscriptToBottom}
-                  messages={messages}
-                  allMessages={allMessages}
-                  canFork={canFork}
+                  messages={launchMessages ?? messages}
+                  allMessages={launchMessages ?? allMessages}
+                  canFork={canFork && !launching}
                   onFork={forkTurn}
                   onSelectFork={selectBranch}
                   busy={busy}
@@ -7817,9 +9466,12 @@ export function ChatPanel({
                   recoveringTurnId={recoveringTurnId}
                   onRecover={recoverFailedTurn}
                   modelSwitchedAfterId={modelSwitchedAfter?.sessionId === activeId ? modelSwitchedAfter.messageId : null}
+                  failure={failureActions}
                   skills={transcriptSkills}
                   delegates={delegates}
                   onOpenDelegate={onOpenDelegate}
+                  project={currentProject}
+                  session={activeSession}
                   focusedMessageId={focusedMessage?.sessionId === activeId ? focusedMessage.messageId : null}
                   focusedPartId={focusedMessage?.spawnPartId ?? focusedMessage?.partId}
                   focusNonce={focusedMessage?.nonce}
@@ -7830,15 +9482,36 @@ export function ChatPanel({
                   onLeaveFeed={leaveTranscriptFeed}
                 />
                 </ChatLinksContext>
-              </ChatImageScope>
               {busy && !activityVisible && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
-              {busy && !activityVisible && !awaitingInput && !hasPendingTailTool && !hasStreamingText && (
-                <div className="text-base pt-0.5 px-1 pb-2">
-                  <span className="tool-running-shimmer">{m.chat_thinking()}</span>
+              {statusLine && (firstTurnStarting || !activityVisible) && (
+                <div ref={statusLineRef} className="text-base pt-0.5 px-1 pb-2">
+                  <span className="tool-running-shimmer">{statusLine}</span>
                 </div>
               )}
+              {/* Below everything the turn shows until its agent reads them; each then moves to where it did. */}
+              {unreadSteers.length > 0 && (
+                <div className="msg-steer-pending flex flex-col gap-4">
+                  {unreadSteers.map((item) => item.orx ? (
+                    <ChatLinksContext key={item.id} value={chatLinks}>
+                      <AgentMessageCard
+                        part={{ id: item.id, type: "steer", text: item.text, orx: item.orx }}
+                        runExperimentName={runExperimentName}
+                        onOpenFile={openFileInSession}
+                        onOpenRun={onOpenRun}
+                      />
+                    </ChatLinksContext>
+                  ) : (
+                    <div key={item.id} dir="auto" role="note" aria-label={m.chat_panel_you_mid_task()} className={`ms-auto w-fit max-w-[88%] ${USER_MESSAGE_BUBBLE_CLASS_NAME}`}>
+                      {item.text}
+                    </div>
+                  ))}
+                  <span role="status" className="tool-running-shimmer -mt-3 ms-auto px-1 text-xs">{m.chat_steering()}</span>
+                </div>
+              )}
+              </ChatImageScope>
+            </div>
             </div>
           </div>
         )}
@@ -7861,15 +9534,9 @@ export function ChatPanel({
           </Button>
         )}
 
-        {pendingQuestions.length > 0 && (
-          <div inert={contentLoading || Boolean(contentError) || historyLoading || connection !== null} className="chat-prompt-questions mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
-            {pendingQuestions.map((part) => <div key={`${activeId}-${part.id}`} data-part-id={part.id} data-search-target={focusedMessage?.partId === part.id || undefined} tabIndex={-1}><PromptCard part={part} onRespond={respond} /></div>)}
-          </div>
-        )}
-
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto">
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className={`composer flex flex-col px-3 pb-3 ${questions.part ? "min-h-0" : "shrink-0"} relative z-4 bg-background w-full max-w-readable my-0 mx-auto`}>
           {threadMounted && (
             <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
               <IconButton
@@ -7886,12 +9553,16 @@ export function ChatPanel({
               </IconButton>
             </Tooltip>
           )}
-          <ExperimentRunBanner
-            key={activeId}
-            runs={activeRuns.filter((item) => item.sessionId === activeId)}
-            onOpenRun={onOpenRun}
-            onOpenExperiment={onOpenExperiment}
-          />
+          {activeId && (
+            <RunBanner
+              key={activeId}
+              sessionId={activeId}
+              agent={assistantLabel}
+              onOpenRun={onOpenRun}
+              onOpenRunPage={onOpenRunPage}
+            />
+          )}
+          {!busy && activeId && <BackgroundTaskBanner sessionId={activeId} background={activeSession?.background} />}
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
@@ -8005,13 +9676,14 @@ export function ChatPanel({
               </Tooltip>
             </div>
           )}
-          {!embedded && !activeId && onNewProject && (
+          {!embedded && !activeId && !launching && onNewProject && (
             <ComposerProjectPicker
               projects={sidebarProjects}
               activity={projectActivity}
               projectId={projectId}
               projectName={projectName}
               onNewProject={onNewProject}
+              onNoProject={() => void startScratchChat()}
               onSelect={(id) => {
                 if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
               }}
@@ -8030,8 +9702,8 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
-          <div inert={connection !== null} className={`composer-frame flex flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
-            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+          <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+            <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                   <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -8044,9 +9716,16 @@ export function ChatPanel({
                   </button>
                 </div>
               )}
-              {activeHarness && !activeHarness.agentReady && (
-                <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
-                  {activeHarness.catalogPending ? (
+              {activeHarness && (composerSignIn || !activeHarness.agentReady) && (
+                <div className={`composer-harness-warning text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text ${composerSignIn ? "p-1.5 ps-3" : "py-2 px-3"}`}>
+                  {composerSignIn ? (
+                    <div className="flex items-center gap-3">
+                      <span className="flex-1" role="status">{m.chat_failure_signed_out({ name: autoDir(agentName ?? activeHarness.name) })}</span>
+                      <Button type="button" size="small" variant="primary" className="shrink-0" onClick={composerSignIn} disabled={busy || recoveringTurnId !== null} aria-haspopup="dialog">
+                        {m.harness_setup_login()}
+                      </Button>
+                    </div>
+                  ) : activeHarness.catalogPending ? (
                     <span>{activeHarness.name} — {m.onboarding_checking()}</span>
                   ) : (
                     <>
@@ -8064,7 +9743,7 @@ export function ChatPanel({
                   )}
                 </div>
               )}
-              {skillMenuOpen && (
+              {skillMenuOpen && !asking && (
                 <SkillMenu
                   skills={skillMatches}
                   activeIndex={activeSkillIdx}
@@ -8072,7 +9751,7 @@ export function ChatPanel({
                   onHover={setSkillIdx}
                 />
               )}
-              {mentionMenuOpen && (
+              {mentionMenuOpen && !asking && (
                 <MentionMenu
                   matches={mentionMatches}
                   activeIndex={activeMentionIdx}
@@ -8080,7 +9759,7 @@ export function ChatPanel({
                   onHover={setMentionIdx}
                 />
               )}
-              {annotations.length > 0 && (
+              {annotations.length > 0 && !asking && (
                 <ComposerAnnotations
                   annotations={annotations}
                   onClear={() => {
@@ -8106,28 +9785,56 @@ export function ChatPanel({
                   {settingsError}
                 </div>
               )}
-              <div className="composer-input flex min-w-0 items-end">
+              {questions.part && (
+                <QuestionDock
+                  key={questions.part.id}
+                  part={questions.part}
+                  index={questions.index}
+                  total={questions.total}
+                  picked={questions.answer.picked}
+                  disabled={questions.busy}
+                  hotkeys={mainView === "chat" && !contentInert && !contentLoading && !contentError && !historyLoading && connection === null
+                    && (embedded ? searchRegion === "right" : searchRegion !== "right")}
+                  searchTarget={focusedMessage?.partId === questions.part.id}
+                  onPick={questions.pick}
+                />
+              )}
+              {/* The answer lines up with the question's text above it. */}
+              <div className={`composer-input flex min-w-0 items-end ${asking ? "relative [--composer-pad-x:1rem]" : ""}`}>
                 <ComposerEditor
                   ref={composerRef}
-                  value={draft}
+                  value={questions.part ? questions.answer.note : draft}
                   describedBy={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
                   placeholder={
-                    steering && activeHarness
+                    asking
+                      ? questions.answer.picked.length > 0
+                        ? m.chat_question_add_note()
+                        : questions.part?.prompt?.options?.length
+                          ? m.chat_question_custom_response()
+                          : m.chat_question_your_answer()
+                      : steering && activeHarness
                       ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
                       : composerSelection
                         ? activeHarness?.agentReady
                           ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                          : composerSignIn
+                            ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
+                            : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
                         : m.chat_ask_agent_placeholder()
                   }
-                  plain={bashMode}
+                  plain={bashMode && !asking}
+                  readOnly={questions.busy}
                   chipSource={chipSource}
                   projectId={projectId}
-                  draftKey={stashKey}
+                  draftKey={questions.part ? `question:${questions.part.id}` : stashKey}
                   resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
-                  onFiles={addFiles}
-                  onPaste={onComposerPaste}
+                  onFiles={asking ? () => {} : addFiles}
+                  onPaste={asking ? () => {} : onComposerPaste}
                   onChange={(v, cursor, typed) => {
+                    if (asking) {
+                      if (v !== questions.answer.note) questions.setNote(v);
+                      return;
+                    }
                     setComposerCursor(cursor);
                     if (v === draft) return;
                     // Composer commands run rather than send: each fires the moment
@@ -8153,6 +9860,7 @@ export function ChatPanel({
                     setSkillMenuDismissed(false);
                   }}
                   onKeyDown={(e) => {
+                    if (asking) return;
                     if (skillMenuOpen) {
                       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                         e.preventDefault();
@@ -8202,7 +9910,8 @@ export function ChatPanel({
                     }
                   }}
                   onSubmit={(e) => {
-                    if (bashMode) void runShell();
+                    if (asking) questions.next();
+                    else if (bashMode) void runShell();
                     else void send({ queue: matchesKeyboardEvent(e, "Mod+Enter") });
                   }}
                 />
@@ -8218,19 +9927,40 @@ export function ChatPanel({
                       e.target.value = ""; // let the same file be re-picked
                     }}
                   />
-                  <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
-                    <IconButton
-                      type="button"
-                      className="composer-attach"
-                      aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <Paperclip size={16} />
-                    </IconButton>
-                  </Tooltip>
-                  {busy ? (
+                  {!asking && (
+                    <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                      <IconButton
+                        type="button"
+                        className="composer-attach"
+                        aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        <Paperclip size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                  {asking ? (
+                    <>
+                      <Tooltip interactive content={m.chat_question_skip()}>
+                        <IconButton type="button" variant="filled" aria-label={m.chat_question_skip()} disabled={questions.busy} onClick={questions.skip}>
+                          <X size={16} />
+                        </IconButton>
+                      </Tooltip>
+                      {/* Stays put on the first question: Skip must not slide under a second click. */}
+                      {questions.total > 1 && (
+                        <Tooltip interactive content={m.chat_question_back()}>
+                          <IconButton type="button" variant="filled" aria-label={m.chat_question_back()} disabled={questions.busy || questions.index === 0} onClick={questions.back}>
+                            <ChevronLeft size={16} className="rtl:rotate-180" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                      <Button type="button" variant="primary" className="min-w-20" disabled={questions.busy || !questions.answered} onClick={questions.next}>
+                        {questions.last ? m.chat_panel_submit() : m.chat_question_next()}
+                      </Button>
+                    </>
+                  ) : busy ? (
                     <Tooltip interactive content={m.chat_panel_stop()}>
-                      <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
+                      <IconButton className="send-btn" variant="filled" aria-label={m.chat_panel_stop()} onClick={stop}>
                         <X size={16} />
                       </IconButton>
                     </Tooltip>
@@ -8366,8 +10096,8 @@ export function ChatPanel({
                   value={composerSelection}
                   onSelect={selectModel}
                   onStartHarness={startHarness}
-                  onOpenSettings={() => onSelectMainView("harnesses")}
-                  permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
+                  onOpenSettings={() => onSelectMainView("agents")}
+                  permissionChoices={activeHarness?.agentReady ? withAutoReviewer(opts?.permissionModes ?? [], activeHarness, uiState?.opencodeReviewModel, composerSelection?.model) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
                   onSelectPermission={setPermissionMode}
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
@@ -8378,6 +10108,7 @@ export function ChatPanel({
                   disabled={switchingAgent}
                   lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
                   openRequest={modelPickerRequest}
+                  canNudge={!embedded && !contentInert}
                   nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
                   onSelectNativeOption={(optionId, value) => {
                     if (!openSession) return;
@@ -8399,7 +10130,7 @@ export function ChatPanel({
         </div>
       </section>
       <EscapeScope enabled={dataSources.open} onEscape={() => dataSources.setOpen(false)} />
-      <EscapeScope enabled={skillMenuOpen || mentionMenuOpen} onEscape={() => setSkillMenuDismissed(true)} />
+      <EscapeScope enabled={!asking && (skillMenuOpen || mentionMenuOpen)} onEscape={() => setSkillMenuDismissed(true)} />
     </>
   );
 }

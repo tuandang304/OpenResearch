@@ -211,7 +211,10 @@ async fn drive(spec: &ControllerSpec, zone_cell: &std::sync::Mutex<Option<String
         &script,
         spec.timeout_secs,
     ));
-    let mut env = crate::config::launch_env(&spec.run_id);
+    let run = crate::store::Store::open()?
+        .get_run(&spec.run_id)?
+        .ok_or_else(|| anyhow!("Run `{}` is not in the local store", spec.run_id))?;
+    let mut env = crate::config::launch_env(&run)?;
     env.extend(
         crate::jobs::checkpoints::run_env(&spec.run_id)
             .map_err(|e| anyhow!("Checkpoint storage cannot be used: {e}"))?,
