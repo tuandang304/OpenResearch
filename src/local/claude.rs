@@ -2076,10 +2076,18 @@ done
                 &std::fs::read(write_settings(&repo, false).unwrap()).unwrap(),
             )
             .unwrap();
-            assert!(settings["hooks"]["PreToolUse"]
-                .as_array()
-                .unwrap()
-                .is_empty());
+            // The model reaches Bash through the environment, not an input-rewriting hook.
+            let hooks = settings["hooks"]["PreToolUse"].as_array().unwrap();
+            assert!(hooks
+                .iter()
+                .all(|hook| hook["hooks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|command| command["command"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with(" launch-gate"))));
             drop(route);
         }
         host.shutdown().await;

@@ -352,6 +352,16 @@ fn contains_tokens(haystack: &[&str], needle: &[&str]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_hook_denies_only_bash_calls_that_bypass_orx() {
+        let bash = |command: &str| json!({"tool_name": "Bash", "tool_input": {"command": command}});
+        assert!(deny_reason(&bash("sbatch train.sh"))
+            .is_some_and(|reason| reason.contains("orx exp run")));
+        assert!(deny_reason(&bash("git status")).is_none());
+        let edit = json!({"tool_name": "Edit", "tool_input": {"command": "sbatch train.sh"}});
+        assert!(deny_reason(&edit).is_none());
+    }
+
     fn scratch() -> PathBuf {
         let dir = crate::config::test_root().join(format!("launch-gate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
