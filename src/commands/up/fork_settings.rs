@@ -17,10 +17,6 @@ pub(super) fn routes() -> Router<AppState> {
             post(research_tools::import_metrics),
         )
         .route(
-            "/api/projects/{id}/results",
-            get(research_tools::project_results).put(research_tools::set_results_settings),
-        )
-        .route(
             "/api/settings/compute/doctor/{backend}",
             post(research_tools::compute_doctor),
         )

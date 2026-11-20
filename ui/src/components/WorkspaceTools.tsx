@@ -9,7 +9,7 @@ import { statusLabel } from "./StatusBadge";
 
 import { TARGET_LABELS } from "../computeTargets";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, FlaskConical, Trophy, HelpCircle, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, Plus, Search, Terminal } from "lucide-react";
+import { ChevronDown, ChevronRight, FlaskConical, HelpCircle, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, Plus, Search, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { countChanges, parseDiffFiles } from "./diffFiles";
@@ -25,13 +25,13 @@ import { formatForDisplay } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { navigateKeyboardList, navigateKeyboardRow } from "../keyboardNavigation";
 
-export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, findOpen, onFind, onArtifacts, onExperiments, onResults, onSideChat, sessions, onSelectSideChat, onOpenDelegate }: {
+export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, findOpen, onFind, onArtifacts, onExperiments, onSideChat, sessions, onSelectSideChat, onOpenDelegate }: {
   expanded: boolean;
   experiments: Experiment[];
   runs: Run[];
   onOpenExperiment: (id: string, runId: string) => void;
   rightOffset?: number;
-  activeView: "files" | "artifacts" | "experiments" | "terminal" | "results" | null;
+  activeView: "files" | "artifacts" | "experiments" | "terminal" | null;
   projectId: string;
   onCompute: () => void;
   sessionId: string | null;
@@ -43,7 +43,6 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   onFind: () => void;
   onArtifacts: () => void;
   onExperiments: () => void;
-  onResults: () => void;
   /** Absent until there is a chat to branch from. */
   onSideChat?: () => void;
   sessions: ChatSession[];
@@ -61,7 +60,6 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
     { id: "files", label: m.app_files(), Icon: FolderOpen, onClick: onFiles, shortcut: appHotkeys["files.open"].hotkey },
     { id: "artifacts", label: m.app_artifacts(), Icon: Package, onClick: onArtifacts, shortcut: appHotkeys["artifacts.open"].hotkey },
     { id: "experiments", label: m.app_experiments(), Icon: FlaskConical, onClick: onExperiments, shortcut: appHotkeys["experiments.open"].hotkey },
-    { id: "results", label: m.results_tab(), Icon: Trophy, onClick: onResults, shortcut: undefined },
     { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal, shortcut: appHotkeys["terminal.open"].hotkey },
   ].map((item) => ({
     ...item,

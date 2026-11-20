@@ -7,7 +7,7 @@ future upstream change remains compatible.
 | Feature | Implementation owned by this fork | Upstream integration points |
 | --- | --- | --- |
 | Diagnostics | `src/commands/compute_doctor.rs`, `ui/src/features/research/ComputeDoctor.tsx` | Compute subcommand, settings mount, API route, Colab login probe |
-| Measurements and results | `src/store/run_metrics.rs`, `src/store/results.rs`, `src/commands/run_metrics.rs`, `src/commands/results.rs`, `src/local/results.rs`, `ui/src/features/research/ResultsTab.tsx` | Module declarations, `exp metrics` and `results` subcommands, the `results` read verb in `plan_gate.rs`, the record hint in `Store::terminal_notice_body`, the `results` home view in `workspace_state.rs`, `workspaceState.ts`, `workspaceTabs.ts`, `App.tsx` and `WorkspaceTools.tsx`, API routes |
+| Measurements | `src/store/run_metrics.rs`, `src/commands/run_metrics.rs` | Module declarations, `exp metrics` subcommand, API routes |
 | Local API | `src/commands/up/research_tools.rs` | Three routes in `up.rs`; existing workspace/auth handling |
 | Deep research | `agent-skills/orx-deep-research/`, `src/local/deep_research.rs` | Two skill catalogs; scoped exceptions in delegation/literature skills |
 
@@ -66,7 +66,7 @@ the file, and resolve catalog conflicts by keeping both sides.
    of a generated-assets conflict without rebuilding.
 5. Follow `.github/workflows/ci.yml`. Focused regression entry points are
    `cargo test --locked --test research_tools_cli`, the `run_metrics` and
-   `compute_doctor` and `results` Rust unit tests, and `ui/tests/resultsTab.test.mjs`.
+   `compute_doctor` Rust unit tests.
    Also run the full existing checks, including bundled skill tests, because
    source registration changes can affect other harnesses.
 6. Start a disposable instance through `scripts/dev-slot.mjs`, verify diagnostics
