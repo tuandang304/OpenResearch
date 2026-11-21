@@ -3,36 +3,6 @@ name: orx-results
 description: "Interpret and summarize measured experiment results. Invoke before reporting measured results, including summarizing a completed run, comparing runs, evaluating an outcome, or recommending a next experiment from run evidence; retrieve missing output with `orx-logs`."
 ---
 
-## Record every finished run
-
-The Results tab ranks runs against the project's baseline from measurements you
-record. When a run finishes successfully, read its final metrics from the log
-(`orx-logs`) and record them before reporting:
-
-```sh
-orx exp metrics <experimentId> --run <runId> --file metrics.json
-```
-
-```json
-{"version": 1, "dataset": "cifar10-v1", "split": "test", "metrics": {"accuracy": 0.912, "loss": 0.31}, "parameters": {"learning_rate": 0.001}, "seed": 42}
-```
-
-- Copy values from the log; never estimate one. Leave out a metric the run did
-  not report.
-- Keep metric names, units, dataset and split identical across runs, so they
-  stay comparable with the baseline. A run on other data is shown but not
-  compared.
-- Put every hyperparameter that varies between nodes in `parameters`; the seed
-  goes in `seed`.
-- The baseline is the newest measured run of the root experiment unless the
-  user chose another. Record the root's runs too.
-- The command prints how the run compares with the baseline. When it starts
-  with `Warning:`, the run is worse than the baseline on the ranking metric:
-  say so plainly in your summary.
-- `orx results view <projectId>` shows the ranking and anything left
-  unrecorded. Change the baseline or a metric's direction with `orx results
-  set` only when the user asks.
-
 ## Validate before reporting
 
 Never infer a result from run status or memory. Before accepting or reporting a

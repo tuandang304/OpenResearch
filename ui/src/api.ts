@@ -3639,7 +3639,7 @@ export function createApi(
     harnessAccountLoginPath,
     handoffChatSession,
     ...createForkComputeApi(get, post),
-    ...createResearchApi(get, post, put),
+    ...createResearchApi(get, post),
   };
 
   return {

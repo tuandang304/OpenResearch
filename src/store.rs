@@ -13,7 +13,6 @@ mod costs;
 mod env;
 mod flags;
 pub(crate) mod harness_accounts;
-pub(crate) mod results;
 pub(crate) mod run_metrics;
 pub(crate) mod search;
 mod telemetry;
@@ -7600,11 +7599,8 @@ impl Store {
         }
         facts.push_str(&evidence.signals);
         let status = view.display_status();
-        let record = crate::local::results::notice_hint(self, run)?
-            .map(|hint| format!("{hint}\n"))
-            .unwrap_or_default();
         Ok(format!(
-            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\n{reason}{facts}{record}\nRecent log:\n{tail}",
+            "[orx] Run `{}` finished with status **{}**.\nExit code: {code}\nDuration: {duration}\n{reason}{facts}\nRecent log:\n{tail}",
             run.id, status,
             tail = evidence.tail,
         ))

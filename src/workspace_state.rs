@@ -155,11 +155,12 @@ pub enum Pane {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum HomeView {
+    /// `results` is the fork's removed Results tab; saved layouts holding it reopen Experiments.
+    #[serde(alias = "results")]
     Experiments,
     Files,
     Artifacts,
     Terminal,
-    Results,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -421,6 +422,21 @@ mod tests {
             session_id: Some(String::new()),
         }
         .valid());
+    }
+
+    #[test]
+    fn saved_results_tabs_reopen_as_experiments() {
+        let value = json!({"version":1,"lastLocation":"/projects/demo/tasks/new?pane=%7B%22kind%22%3A%22home%22%2C%22view%22%3A%22results%22%7D","tasks":{"new":{
+            "tabs":[{"kind":"home","view":"results"}],"active":{"kind":"home","view":"results"},
+            "previewKey":null,"history":[],"expanded":{},"scroll":{},"sourceModes":{},
+            "filesView":"files","scope":"project","panelMax":false
+        }}});
+        let state = WorkspaceState::from_stored(&value.to_string()).unwrap();
+        let experiments = Pane::Home {
+            view: HomeView::Experiments,
+        };
+        assert_eq!(state.tasks["new"].tabs, vec![experiments.clone()]);
+        assert_eq!(state.tasks["new"].active, Some(experiments));
     }
 
     #[test]

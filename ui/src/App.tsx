@@ -69,7 +69,6 @@ import {
   FileCode,
   Filter,
   FlaskConical,
-  Trophy,
   FolderGit2,
   FolderOpen,
   GitBranch,
@@ -106,7 +105,6 @@ import { SubagentTab } from "./components/SubagentTab";
 import type { CodeView } from "./components/CodeTab";
 import type { WorktreeView } from "./components/WorktreeTab";
 import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
-import { ResultsTab } from "./features/research/ResultsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { TabStrip } from "./components/TabStrip";
 import type { LogSeek } from "./logWindow";
@@ -468,7 +466,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [artifactsTabOpen, setArtifactsTabOpen] = useState(false);
   const [terminalTabOpen, setTerminalTabOpen] = useState(false);
-  const [resultsTabOpen, setResultsTabOpen] = useState(false);
   // Which checkout has a live shell; a restored-but-unselected tab spawns nothing until selected.
   const [terminalStartedFor, setTerminalStartedFor] = useState<string | null>(null);
   // A setup command (e.g. an agent login) from a composer note; shown over the project shell until closed.
@@ -709,7 +706,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     filesTabOpen,
     artifactsTabOpen,
     terminalTabOpen,
-    resultsTabOpen,
     expTabs,
     fileTabs,
     planTabs,
@@ -725,7 +721,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     panelOpen,
     panelMax,
     treeViewport,
-  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, terminalTabOpen, resultsTabOpen, expTabs, fileTabs, planTabs, subagentTabs, sideTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport]);
+  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, terminalTabOpen, expTabs, fileTabs, planTabs, subagentTabs, sideTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport]);
   currentRightPaneStateRef.current = rightPaneState;
   const getFileScroll = useCallback(() => Object.fromEntries(fileScrollPositionsRef.current), []);
   const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -741,7 +737,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     setFilesTabOpen(state.filesTabOpen);
     setArtifactsTabOpen(state.artifactsTabOpen);
     setTerminalTabOpen(state.terminalTabOpen);
-    setResultsTabOpen(state.resultsTabOpen);
     setExpTabs(state.expTabs);
     setFileTabs(state.fileTabs);
     setPlanTabs((current) => current === state.planTabs ? current : state.planTabs.map((tab) => ({ ...tab, plan: current.find((item) => item.sessionId === tab.sessionId && item.promptId === tab.promptId)?.plan ?? "" })));
@@ -961,11 +956,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const openTerminalTab = useCallback(() => {
     setTerminalTabOpen(true);
     selectRightTab("terminal");
-  }, [selectRightTab]);
-
-  const openResultsTab = useCallback(() => {
-    setResultsTabOpen(true);
-    selectRightTab("results");
   }, [selectRightTab]);
   const runSetup = useCallback((command: string, path: string) => {
     setSetupRun((current) => ({ command, path, attempt: (current?.attempt ?? 0) + 1 }));
@@ -1568,9 +1558,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [selectRightTab]);
 
   const closeHomeTab = useCallback(
-    (tab: "experiments" | "files" | "artifacts" | "terminal" | "results") => {
+    (tab: "experiments" | "files" | "artifacts" | "terminal") => {
       if (tab === "experiments") setExperimentsTabOpen(false);
-      else if (tab === "results") setResultsTabOpen(false);
       else if (tab === "files") setFilesTabOpen(false);
       else if (tab === "terminal") {
         setTerminalTabOpen(false);
@@ -1797,11 +1786,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const codeTab = requestedCodeTab
     ? (codeTabs.find((tab) => sameCodeTab(tab, requestedCodeTab)) ?? null)
     : null;
-  let activeWorkspaceView: "files" | "artifacts" | "experiments" | "terminal" | "results" | null = null;
+  let activeWorkspaceView: "files" | "artifacts" | "experiments" | "terminal" | null = null;
   if (panelOpen) {
     if (expTab || codeTab) activeWorkspaceView = "experiments";
     else if (fileTab) activeWorkspaceView = fileTab.source === "artifacts" ? "artifacts" : "files";
-    else if (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal" || rightTab === "results") activeWorkspaceView = rightTab;
+    else if (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") activeWorkspaceView = rightTab;
   }
   const contentTabByKey = new Map<string, ContentTab>();
   for (const tab of [...expTabs, ...fileTabs, ...planTabs, ...subagentTabs, ...sideTabs, ...codeTabs]) {
@@ -1819,7 +1808,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     { id: "terminal" as const, open: terminalTabOpen, label: m.workspace_terminal(), icon: Terminal },
     { id: "artifacts" as const, open: artifactsTabOpen, label: m.app_artifacts(), icon: Package },
     { id: "experiments" as const, open: experimentsTabOpen, label: m.app_experiments(), icon: FlaskConical },
-    { id: "results" as const, open: resultsTabOpen, label: m.results_tab(), icon: Trophy },
   ].filter((tab) => tab.open);
   const visibleRightTabs: RightTab[] = [...leadingFileTabs, ...homeTabs.map((tab) => tab.id), ...orderedContentTabs];
   const canSwitchTabs = panelOpen && mainView === "chat" && visibleRightTabs.length > 0;
@@ -2093,7 +2081,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onFind={() => mainFind[1](Date.now())}
             onArtifacts={() => focusOpenedTab("artifacts", openArtifactsTab)}
             onExperiments={() => focusOpenedTab("experiments", openExperimentsTab)}
-            onResults={() => focusOpenedTab("results", openResultsTab)}
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}
             sessions={sessionsQuery.data ?? []}
             onSelectSideChat={focusSideTab}
@@ -2165,17 +2152,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     canRenameFile={(path) => !fileBuffersRef.current.get(
                       fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
                     )?.needsProtection}
-                  />
-                )}
-              </TabBody>
-            ) : rightTab === "results" ? (
-              <TabBody>
-                {activeProject && (
-                  <ResultsTab
-                    key={activeProject.id}
-                    projectId={activeProject.id}
-                    runs={runs}
-                    onOpenRun={(experimentId, runId) => openExperimentTab(experimentId, "overview", "preview", runId)}
                   />
                 )}
               </TabBody>

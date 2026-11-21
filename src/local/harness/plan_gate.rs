@@ -335,7 +335,7 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
             })))
         ),
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
-        "project" | "results" => matches!(subcommand(&mut rest), Some("view")),
+        "project" => matches!(subcommand(&mut rest), Some("view")),
         "exp" => match subcommand(&mut rest) {
             Some("run") => {
                 use clap::Parser;
