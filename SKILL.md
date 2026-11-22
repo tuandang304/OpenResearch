@@ -96,6 +96,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx create-experiment [projectId] --title "<t>" [...]` | Add a local experiment node; prints its Git branch. |
 | `orx compute status` / `show <backend>` / `test <backend>` | Inspect compute configuration, this project's default target, and readiness. |
 | `orx compute configure <backend> --help` / `default set <backend> [--machine]` / `connect <backend>` | Configure compute or authenticate; load `orx-compute`. |
+| `orx kaggle [--account <name>] <args…>` | Run any Kaggle CLI command as the user's saved Kaggle account. |
 | `orx compute instructions show --json` | Read the machine-wide custom recipe and its revision before configuring or launching. |
 | `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
 | `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |

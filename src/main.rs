@@ -102,6 +102,10 @@ enum Command {
     /// Configure compute backends, test connections, and browse offers.
     Compute(ComputeArgs),
 
+    /// Run any Kaggle CLI command as a saved Kaggle account, e.g.
+    /// `orx kaggle datasets list -s mnist` or `orx kaggle --account alice kernels list --mine`.
+    Kaggle(KaggleArgs),
+
     /// Spin up standalone compute in an organization (no experiment).
     Instance(InstanceArgs),
 
@@ -407,6 +411,16 @@ pub struct CreateExperimentArgs {
     /// Run command for the node. Omit to inherit from the parent/project default.
     #[arg(long = "run-command")]
     pub run_command: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct KaggleArgs {
+    /// Saved Kaggle account to run as (default: the active account). Goes before the Kaggle arguments.
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Arguments passed to `kaggle` unchanged.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+    pub args: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1693,6 +1707,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Metrics(_) => "metrics",
         Command::CreateExperiment(_) => "create-experiment",
         Command::Compute(_) => "compute",
+        Command::Kaggle(_) => "kaggle",
         Command::Instance(_) => "instance",
         Command::SshKey(_) => "ssh-key",
         Command::Exp(_) => "exp",
@@ -1750,6 +1765,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Metrics(args) => commands::metrics::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
+        Command::Kaggle(args) => commands::kaggle::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,
         Command::SshKey(args) => match args.command {
             SshKeyCommand::Add(a) => commands::ssh_key::add(a.path).await,
@@ -1806,6 +1822,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Paper(_)
             | Command::Version(_)
             | Command::Model(_)
+            | Command::Kaggle(_)
             | Command::Delete(_)
             | Command::Telemetry(_)
             | Command::Feedback(_)
