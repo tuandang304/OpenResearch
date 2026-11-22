@@ -90,8 +90,8 @@ fn deny_reason(payload: &Value) -> Option<String> {
 const SCHEDULERS: &[&str] = &["sbatch", "srun", "salloc", "qsub", "bsub"];
 
 /// Provider CLI verbs that start a remote job: program, then its verb words.
+/// The Kaggle CLI is absent on purpose: agents may run any `kaggle` command.
 const PROVIDER_LAUNCHES: &[&[&str]] = &[
-    &["kaggle", "kernels", "push"],
     &["modal", "run"],
     &["ray", "job", "submit"],
     &["hf", "jobs", "run"],
@@ -379,7 +379,6 @@ mod tests {
             "cd /scratch && /usr/bin/sbatch --gres=gpu:1 run.sbatch",
             "srun -p gpu python train.py",
             "qsub job.pbs",
-            "kaggle kernels push -p kernel/",
             "nohup modal run train.py &",
             "ray job submit -- python train.py",
             "hf jobs run pytorch/pytorch python train.py",
@@ -422,6 +421,8 @@ mod tests {
             "grep -rn srun docs/",
             "ssh gpu-box nvidia-smi",
             "kaggle kernels status me/kernel",
+            "kaggle kernels push -p kernel/",
+            "orx kaggle kernels push -p kernel/",
             "modal token new",
             "cat train.py",
         ] {
@@ -433,13 +434,13 @@ mod tests {
     fn a_home_made_launcher_script_is_denied() {
         let dir = scratch();
         std::fs::create_dir(dir.join("infra")).unwrap();
-        let launcher = dir.join("infra/kaggle_run.sh");
+        let launcher = dir.join("infra/modal_run.sh");
         std::fs::write(
             &launcher,
-            "#!/usr/bin/env bash\n# runs bash run.sh as a Kaggle kernel\n\
-             K=$HOME/.local/share/uv/tools/kaggle/bin/kaggle\n\
-             kg() { HOME=$H $K \"$@\" 2>&1; }\n\
-             retry 6 \"successfully pushed\" kernels push -p \"$W/k\"\n",
+            "#!/usr/bin/env bash\n# runs bash run.sh on Modal\n\
+             M=$HOME/.local/share/uv/tools/modal/bin/modal\n\
+             mo() { HOME=$H $M \"$@\" 2>&1; }\n\
+             retry 6 \"App completed\" run \"$W/app.py\"\n",
         )
         .unwrap();
         let slurm = dir.join("submit.sh");
@@ -454,8 +455,8 @@ mod tests {
             format!(
                 "(EXTRA_ENV=\"A=1\" setsid nohup bash {absolute} acct r5 9eb2ebc > out 2>&1 &)"
             ),
-            "bash infra/kaggle_run.sh acct r1 abc".to_string(),
-            "./infra/kaggle_run.sh acct r1 abc".to_string(),
+            "bash infra/modal_run.sh acct r1 abc".to_string(),
+            "./infra/modal_run.sh acct r1 abc".to_string(),
             "sh submit.sh".to_string(),
         ] {
             let reason =
@@ -469,7 +470,7 @@ mod tests {
         let dir = scratch();
         std::fs::write(
             dir.join("plot.sh"),
-            "# not sbatch, not kaggle kernels push\npython plot.py\nkaggle kernels status me/k\n\
+            "# not sbatch, not modal run\npython plot.py\nkaggle kernels push -p k/\n\
              orx compute configure slurm --sbatch-arg=--gres=gpu:1\n",
         )
         .unwrap();

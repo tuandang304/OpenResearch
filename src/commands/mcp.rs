@@ -724,7 +724,7 @@ mod antigravity_tests {
     #[test]
     fn agy_shell_launches_around_orx_are_denied() {
         let call = |command: &str| json!({"modelName": "gemini-3.8-flash-high", "toolCall": {"name": "run_command", "args": {"CommandLine": command, "Cwd": "/w"}}});
-        let reason = launch_bypass(&call("nohup kaggle kernels push -p kernel/ &")).unwrap();
+        let reason = launch_bypass(&call("nohup modal run train.py &")).unwrap();
         assert!(reason.contains("orx exp run"));
         assert_eq!(launch_bypass(&call("orx exp run e")), None);
         let read =

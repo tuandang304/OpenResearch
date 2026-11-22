@@ -595,3 +595,70 @@ fn custom_instructions_survive_reinstall_and_harness_switches_across_projects() 
         saved
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn kaggle_passes_any_command_through_as_a_saved_account() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    let missing = sandbox.run(&["kaggle", "kernels", "list"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("uv tool install kaggle"));
+
+    let kaggle = sandbox.0.join("agent-stand-ins/kaggle");
+    std::fs::write(
+        &kaggle,
+        "#!/bin/sh\necho \"args=$*\"\necho \"config=$KAGGLE_CONFIG_DIR\"\necho \"token=${KAGGLE_API_TOKEN-unset}\"\nexit 3\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&kaggle, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let no_account = sandbox.run(&["kaggle", "kernels", "list"]);
+    assert!(!no_account.status.success());
+    assert!(String::from_utf8_lossy(&no_account.stderr).contains("Add a Kaggle account"));
+
+    let root = sandbox.0.join("data/kaggle");
+    for name in ["alice", "bob"] {
+        std::fs::create_dir_all(root.join("accounts").join(name).join(".kaggle")).unwrap();
+    }
+    std::fs::write(
+        root.join("accounts.json"),
+        r#"{"active":"bob","accounts":[{"username":"alice","method":"token","addedAt":0},{"username":"bob","method":"token","addedAt":0}]}"#,
+    )
+    .unwrap();
+
+    let output = sandbox
+        .command()
+        .env("KAGGLE_API_TOKEN", "leaked")
+        .args([
+            "kaggle",
+            "kernels",
+            "push",
+            "-p",
+            "k/",
+            "--accelerator",
+            "gpu",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("args=kernels push -p k/ --accelerator gpu"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("accounts/bob/.kaggle"), "{stdout}");
+    assert!(stdout.contains("token=unset"), "{stdout}");
+
+    let output = sandbox.run(&["kaggle", "--account", "Alice", "datasets", "list"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("args=datasets list"), "{stdout}");
+    assert!(stdout.contains("accounts/alice/.kaggle"), "{stdout}");
+
+    let unknown = sandbox.run(&["kaggle", "--account", "carol", "datasets", "list"]);
+    assert!(!unknown.status.success());
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(
+        stderr.contains("carol") && stderr.contains("alice, bob"),
+        "{stderr}"
+    );
+}
