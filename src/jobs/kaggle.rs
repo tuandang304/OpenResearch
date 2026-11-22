@@ -360,9 +360,9 @@ fn pick_auto(statuses: &[AccountStatus], kind: &str) -> Option<String> {
         .map(|s| s.username.clone())
 }
 
-/// A `kaggle` command that sees only `username`'s credentials.
-pub fn command(cli: &Path, home: &Path) -> tokio::process::Command {
-    let mut command = crate::process::tokio_command(cli);
+/// A `kaggle` command that sees only the credentials in the account folder `home`.
+fn account_command(cli: &Path, home: &Path) -> std::process::Command {
+    let mut command = crate::process::command(cli);
     for (key, value) in account_env(home) {
         command.env(key, value);
     }
@@ -370,9 +370,47 @@ pub fn command(cli: &Path, home: &Path) -> tokio::process::Command {
         command.env_remove(key);
     }
     command
+}
+
+/// [`account_command`] for orx's own calls: no terminal input, killed with its caller.
+pub fn command(cli: &Path, home: &Path) -> tokio::process::Command {
+    let mut command: tokio::process::Command = account_command(cli, home).into();
+    command
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     command
+}
+
+/// Runs `kaggle <args>` as a saved account, attached to this terminal, and
+/// returns its exit code. `account` names a saved account; `None` is the active one.
+pub async fn passthrough(account: Option<&str>, args: &[String]) -> Result<i32> {
+    let cli = find_cli().ok_or_else(|| anyhow!("{INSTALL_HINT}"))?;
+    let choice = account.map_or(AccountChoice::Active, |name| {
+        AccountChoice::Named(name.to_string())
+    });
+    let username = resolve_account(&choice, "cpu").await?;
+    let mut command: tokio::process::Command =
+        account_command(&cli, &account_home(&username)).into();
+    let status = command
+        .args(args)
+        .status()
+        .await
+        .map_err(|e| anyhow!("Could not run the Kaggle CLI at {}: {e}", cli.display()))?;
+    Ok(exit_code(status))
+}
+
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    1
 }
 
 /// Environment the CLI reads credentials from; removed so the account folder

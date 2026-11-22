@@ -54,8 +54,12 @@ Work that `orx` owns goes through `orx`, never around it:
 
 - Run every experiment with `orx exp run <experimentId>`. Never start the run
   command, a training script, a scheduler (`sbatch`, `srun`, `qsub`), a
-  provider CLI (`kaggle kernels push`, `modal run`) or raw `ssh` yourself: such
-  a run has no recorded commit and its result never reaches this chat.
+  provider CLI (`modal run`) or raw `ssh` yourself: such a run has no recorded
+  commit and its result never reaches this chat.
+- The Kaggle CLI is open to you without limits: `orx kaggle <args>` runs any
+  `kaggle` command (datasets, competitions, models, kernels, submissions) signed
+  in as the user's saved Kaggle account. An experiment still goes through `orx
+  exp run --backend kaggle` so its result is recorded here.
 - Add experiment nodes with `orx create-experiment`, not a hand-made Git branch.
 - Read run output with `orx logs` and record results with `orx exp metrics`.
 - Search for papers with `orx discover` and read them with `orx paper` before

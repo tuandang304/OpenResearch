@@ -27,6 +27,25 @@ orx exp run <expId> --backend kaggle --flavor t4@auto   # the account with the m
 orx exp run <expId> --backend kaggle --flavor tpu@alice --timeout 6h
 ```
 
+## Run any Kaggle CLI command
+
+`orx kaggle <args>` runs the Kaggle CLI with any arguments, signed in as a
+saved account, so you never handle the user's credentials. Nothing is blocked:
+download or create datasets and models, join competitions and submit, list,
+push, check or pull kernels. Put `--account <name>` before the Kaggle
+arguments to use an account other than the active one. The exit code is the
+CLI's own.
+
+```sh
+orx kaggle datasets download -d zalando-research/fashionmnist -p data/ --unzip
+orx kaggle competitions submit -c titanic -f submission.csv -m "baseline"
+orx kaggle --account alice kernels list --mine
+orx kaggle kernels output alice/my-notebook -p out/
+```
+
+A run you want in Experiments, with its result delivered to this chat, still
+uses `orx exp run --backend kaggle`.
+
 ## Choose the accelerator and account
 
 | Flavor | Accelerator | Memory | Typical fit |
