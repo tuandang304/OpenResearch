@@ -185,6 +185,23 @@ test("a checkpoint read error does not claim the log had no metrics", async () =
   assert.ok(!words.includes(m.run_view_source_none()), words);
 });
 
+test("an ended run with incomplete collection explains what was kept and still shows its progress", async () => {
+  const base = pipeline();
+  const monitor = {
+    ...base,
+    availability: { state: "live", reason: "The rental was deleted", collectionIncomplete: true },
+    viewFrom: { ...base.viewFrom, isDefault: true },
+    view: { ...base.view, blocks: [] },
+  };
+  const ended = run("r2", { status: "lost", endedAt: now, monitor: summary(monitor) });
+  const { container } = await overview([ended], () => monitor);
+  const page = container.querySelector('[role="group"]');
+  assert.equal(text(page.querySelector('[role="status"]')), m.run_page_collection_incomplete());
+  assert.equal(page.querySelector('[role="progressbar"]').getAttribute("aria-valuenow"), "50");
+  assert.ok(!text(page).includes(m.run_page_no_signals_ended()));
+  assert.ok(!text(pageDetails(container)).includes(m.run_view_source_none()));
+});
+
 test("the page's clock does not redraw the blocks; new data does", async () => {
   const monitor = pipeline();
   const latest = run("r2", { monitor: summary(monitor) });
@@ -212,7 +229,7 @@ test("the page's clock does not redraw the blocks; new data does", async () => {
 
 test("across a rebuilt view the blocks wait for its monitor, which is read again at once", async () => {
   const old = pipeline();
-  const rebuilt = { ...pipeline(), generation: "g9", rev: 1, asOf: now + 1000, rows: { eval: [{ task: "sst2", score: 99.9 }] } };
+  const rebuilt = { ...old, generation: "g9", rev: old.rev + 1, rows: { eval: [{ task: "sst2", score: 99.9 }] } };
   let answer = () => old;
   const view = await overview([run("r2", { monitor: summary(old) })], () => answer());
   const reads = () => view.requests.filter((path) => path === "/api/runs/r2/monitor").length;

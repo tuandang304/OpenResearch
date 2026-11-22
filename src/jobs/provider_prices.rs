@@ -664,7 +664,7 @@ async fn openresearch() -> Provider {
     let mut provider = empty(
         "openresearch",
         "usage",
-        crate::config::credentials_present(),
+        crate::config::credentials_present().unwrap_or(false),
     );
     provider.note = Some("Marketplace GPUs billed per hour to the OpenResearch account.".into());
     let creds = match crate::config::load_credentials().await {

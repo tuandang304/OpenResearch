@@ -155,6 +155,8 @@ export interface Flag {
   bindings?: Bindings | null;
   evidence: Evidence | null;
   state: FlagState | "kept" | "stopped";
+  /** Journal sequence of the Ask that returned the flag to its waiting state. */
+  handback?: number | null;
   /** The choice that settled it, or the last that sent it to someone. */
   choice?: {
     /** Null when a stop came from an orx that kept no record of who asked. */
@@ -218,7 +220,7 @@ export interface RunMonitorSummary {
   /** When the run's time limit ends; lets a line count down to it without the full monitor. */
   limitEndsAt: number | null;
   /** The unsettled flag only. */
-  flag: { id: string; state: FlagState; template?: string | null; text?: string | null; bindings?: Bindings | null } | null;
+  flag: { id: string; state: FlagState; handback?: number | null; template?: string | null; text?: string | null; bindings?: Bindings | null } | null;
   /** Present until a headline or chart signal has its first point. */
   setup: Setup | null;
   /** For a failed run that recorded no message, the line in its log that says why. */
@@ -317,7 +319,7 @@ export interface RunMonitor {
   generation: string;
   asOf: number;
   /** Anything but live is old data, said as such. */
-  availability: { state: "live" | "stale" | "rebuilding" | "unavailable"; reason: string | null };
+  availability: { state: "live" | "stale" | "rebuilding" | "unavailable"; reason: string | null; collectionIncomplete?: true };
   view: ViewTree;
   /** Where the view comes from: the experiment that stores it, or drawn from the run's first signal. */
   viewFrom: { experimentId: string; markup: string; isDefault: boolean };

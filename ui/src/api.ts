@@ -11,6 +11,8 @@ import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
 import type { ChartEdit, ChatShownRun, Flag, RunMonitor, RunMonitorSummary, RunOutcome } from "./runMonitor/types";
+import type { LitSource } from "./orxCommand";
+export type { LitSource };
 
 export { fmtNumber } from "./i18n";
 
@@ -64,8 +66,10 @@ export interface Project {
   path: string;
   githubEnabled: boolean;
   githubUrl?: string | null;
-  /** A chat without a project yet: orx keeps its code until the user makes it a project. */
+  /** Homeless: orx keeps its code until the user gives the project a folder. */
   scratch?: boolean;
+  /** A scratch project with no name yet; it holds one chat and goes with it. */
+  unnamed?: boolean;
   /** Absolute path of the project's artifacts directory, non-canonical to
    *  match paths agents inline into chat. */
   artifactsDir: string;
@@ -74,8 +78,9 @@ export interface Project {
   runCommand?: string | null;
   /** arXiv or alphaXiv paper id the project starts from (versionless). */
   paperId?: string | null;
-  /** The user's mark for the project; without one it shows its initials. */
   icon?: ProjectIcon;
+  /** The tool call id of the agent proposal it was created from; `""` for none, absent when an older orx or dashboard made it. */
+  proposal?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -985,7 +990,36 @@ export interface ComputeSettings {
   targets: ComputeTargetSummary[];
   configuredDefaultBackend?: ComputeTargetId | null;
   configuredDefaultFlavor?: string | null;
+  /** The project's own default, when the request named a project; absent means it follows the machine's. */
+  projectDefault?: ComputeDefault | null;
 }
+
+export interface ComputeDefault {
+  backend: ComputeTargetId;
+  flavor?: string | null;
+}
+
+/** What a project sets for itself; each absent setting follows the machine's. */
+export interface ProjectSettings {
+  compute?: ComputeDefault;
+  /** The agent new chats in the project start with. */
+  agent?: AgentSelection;
+  disabledLitSources?: LitSource[];
+  /** The autonomy new chats in the project start with. */
+  autonomy?: Autonomy;
+  /** `#SBATCH` defaults over the machine's Slurm settings; each absent one follows them. */
+  slurm?: SlurmDefaults;
+  k8sNamespace?: string;
+}
+
+export interface SlurmDefaults {
+  account?: string;
+  partition?: string;
+  qos?: string;
+}
+
+/** `null` returns a setting to the machine's; `slurm` replaces all three, and `{}` returns them. */
+export type ProjectSettingsEdit = { [Key in Exclude<keyof ProjectSettings, "slurm">]?: ProjectSettings[Key] | null } & { slurm?: SlurmDefaults };
 
 export interface LocalGpu {
   name: string;
@@ -1110,6 +1144,10 @@ export interface GitSettings {
 }
 
 /** Which literature sources discovery and paper reading may use (settings.json). */
+export interface ChatLitSources {
+  disabledLitSources: LitSource[] | null;
+}
+
 export interface LitSourcesSettings {
   alphaxiv: boolean;
   openalex: boolean;
@@ -1479,6 +1517,8 @@ export interface Harness {
    * background — `models` stays empty until `harness.catalog`
    * arrives and a plain re-read swaps in the real list. */
   catalogPending?: boolean;
+  /** Claude Code only: OpenResearch runs as root here and the user has not yet confirmed bypass permissions. */
+  fullAccessNeedsRootConsent?: boolean;
   models: HarnessModel[];
   /** The strongest model in `models`; new chats use it unless one is picked. */
   recommendedModel?: string;
@@ -1820,7 +1860,7 @@ export interface ChatSession {
   id: string;
   projectId: string;
   /** A project the user asked this chat to move into once its turn ends. */
-  pendingProject?: { name: string; path: string } | null;
+  pendingProject?: { name: string; path: string; proposal?: string | null; requestedAt?: number } | null;
   harness: HarnessId;
   /** The account the chat runs on, when it's one OpenResearch keeps. */
   profile?: string | null;
@@ -2534,16 +2574,18 @@ export function createApi(
   const createScratchProject = () =>
     post<{ project: Project }>("/api/projects/scratch", {}).then((r) => r.project);
 
-  /** Make a chat a project of its own at `path`, now or, while it runs, once its turn ends. */
-  const moveChatToProject = (sessionId: string, body: { name: string; path: string }) =>
+  /** Make a chat a project of its own at `path`, now or, while it runs, once its turn ends.
+   * `project` and `scratch` are what the user saw, so a move made elsewhere meanwhile refuses it. */
+  const moveChatToProject = (sessionId: string, body: { name: string; path: string; project?: string; scratch?: boolean; proposal?: string }) =>
     post<{ pending: true } | { pending: false; project: Project }>(`/api/chat/sessions/${sessionId}/project`, body);
 
-  const cancelChatProjectMove = (sessionId: string) =>
-    writeResponse(`/api/chat/sessions/${sessionId}/project`, { method: "DELETE" }).then(async (r) => {
+  /** Cancels the waiting move requested at `requestedAt`, not one that replaced it since. */
+  const cancelChatProjectMove = (sessionId: string, requestedAt?: number) =>
+    writeResponse(`/api/chat/sessions/${sessionId}/project${requestedAt == null ? "" : `?requestedAt=${requestedAt}`}`, { method: "DELETE" }).then(async (r) => {
       if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `cancel failed (${r.status})`);
     });
 
-  const updateProject = (projectId: string, body: { runCommand?: string; name?: string; icon?: ProjectIcon }) =>
+  const updateProject = (projectId: string, body: { runCommand?: string; name?: string; icon?: ProjectIcon | null }) =>
     patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
   /** Start generating starter prompts for a project that is about to be created,
@@ -3027,13 +3069,18 @@ export function createApi(
       signal,
     );
 
-  /** Set (or clear, with backend: null) the default compute target. Responds
+  /** Set (or clear, with backend: null) the machine's default compute target. Responds
    * with the full compute payload so the caller reconciles in one shot. */
   const setComputeDefault = (body: {
     backend: ComputeTargetId | null;
     flavor?: string | null;
-    projectId?: string;
   }) => post<ComputeSettings>("/api/settings/compute/default", body);
+
+  const getProjectSettings = (projectId: string, signal?: AbortSignal) =>
+    get<ProjectSettings>(`/api/projects/${encodeURIComponent(projectId)}/settings`, signal);
+
+  const updateProjectSettings = (projectId: string, edit: ProjectSettingsEdit) =>
+    patch<ProjectSettings>(`/api/projects/${encodeURIComponent(projectId)}/settings`, edit);
 
   const getPublicNetwork = (signal?: AbortSignal) => get<PublicNetwork>("/api/settings/network", signal);
 
@@ -3130,6 +3177,13 @@ export function createApi(
   const setLitSources = (body: LitSourcesSettings) =>
     post<LitSourcesSettings>("/api/settings/lit-sources", body);
 
+  /** `null` sources follow the chat's project. */
+  const getChatLitSources = (sessionId: string, signal?: AbortSignal) =>
+    get<ChatLitSources>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/lit-sources`, signal);
+
+  const setChatLitSources = (sessionId: string, disabledLitSources: LitSource[] | null) =>
+    put<ChatLitSources>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/lit-sources`, { disabledLitSources });
+
   const getProjectDefaults = (signal?: AbortSignal) =>
     get<ProjectDefaultsSettings>("/api/settings/projects", signal);
 
@@ -3141,6 +3195,9 @@ export function createApi(
       githubForNewProjects,
       ...(githubDefaultPromptSeen === undefined ? {} : { githubDefaultPromptSeen }),
     });
+
+  const allowClaudeRootFullAccess = () =>
+    post<Record<string, never>>("/api/harnesses/claude-code/root-full-access");
 
   const getProjectGitStatus = (projectId: string, signal?: AbortSignal) =>
     get<ProjectGitStatus>(`/api/projects/${projectId}/git`, signal);
@@ -3369,7 +3426,7 @@ export function createApi(
   const createChatSession = (
     projectId: string,
     harness: HarnessId,
-    opts: TurnOptions & { autonomy?: Autonomy; profile?: string | null } = {},
+    opts: TurnOptions & { autonomy?: Autonomy; profile?: string | null; disabledLitSources?: LitSource[] } = {},
   ) =>
     post<{ session: ChatSession }>("/api/chat/sessions", { projectId, harness, ...opts }).then(
       (r) => r.session,
@@ -3775,6 +3832,8 @@ export function createApi(
     trackioPreflight,
     getComputeSettings,
     setComputeDefault,
+    getProjectSettings,
+    updateProjectSettings,
     getLocalMachine,
     getPublicNetwork,
     getOpenResearchSettings,
@@ -3794,8 +3853,11 @@ export function createApi(
     saveGitSettings,
     getLitSources,
     setLitSources,
+    getChatLitSources,
+    setChatLitSources,
     getProjectDefaults,
     setProjectDefaults,
+    allowClaudeRootFullAccess,
     getProjectGitStatus,
     initializeProjectGit,
     enableProjectGithub,

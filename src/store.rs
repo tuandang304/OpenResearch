@@ -19,7 +19,10 @@ mod telemetry;
 mod watch;
 pub(crate) use costs::{BilledRun, Per, Quote};
 pub(crate) use env::ProjectEnvVar;
-pub(crate) use flags::{Chosen, FlagChoice, FlagEvent, FlagNotice, NewFlag, Raise, WATCH_FLAG};
+pub(crate) use flags::{
+    flag_ask_dedupe, Chosen, FlagChoice, FlagEvent, FlagNotice, NewFlag, Raise,
+    FLAG_DELIVERY_UNCONFIRMED, WATCH_FLAG,
+};
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
 pub(crate) use watch::{LookResult, WatchCount, WatchLook, WatchLookRun};
 
@@ -309,6 +312,10 @@ pub(crate) struct TerminalEvidence {
 
 pub const TERMINAL: &str = "terminal";
 pub const ATTENTION: &str = "attention";
+pub(crate) const INCOMPLETE_SIGNAL_NOTICE: &str = "signal-collection-incomplete";
+pub(crate) const SIGNAL_AVAILABILITY_PREFIX: &str = "\n\nSignal availability: ";
+const SIGNAL_COLLECTION_FAILED: &str = "'s signal collection could not finish: ";
+const READ_SAVED_OUTPUT: &str = ". Read any saved output with `orx logs ";
 pub const RECOVERED: &str = "recovered";
 pub const NOTIFY: &str = "notify";
 const TERMINAL_LOG_BYTES: u64 = 4 * 1024;
@@ -439,6 +446,73 @@ pub struct RunNotice {
     pub body: String,
     pub created_at: i64,
     pub client_turn_id: String,
+}
+
+impl RunNotice {
+    pub(crate) fn terminal_signal_details(run: &str, reason: &str) -> String {
+        let reason = reason.trim_end_matches(['.', ' ']);
+        format!("{reason}\n\nAny signals already read are kept{READ_SAVED_OUTPUT}{run}`.")
+    }
+
+    pub(crate) fn signal_collection_failed(run: &str, cause: &str, kept: bool) -> String {
+        let kept = if kept {
+            "The signals read before then are kept"
+        } else {
+            "No signals were kept"
+        };
+        format!(
+            "[orx] Run `{run}`{SIGNAL_COLLECTION_FAILED}{cause}. {kept}{READ_SAVED_OUTPUT}{run}`."
+        )
+    }
+
+    fn incomplete_signal_cause(&self) -> Option<&str> {
+        if self.kind != ATTENTION || self.dedupe != INCOMPLETE_SIGNAL_NOTICE {
+            return None;
+        }
+        let prefix = format!("[orx] Run `{}`{SIGNAL_COLLECTION_FAILED}", self.run_id);
+        let (cause_and_kept, _) = self
+            .body
+            .strip_prefix(&prefix)?
+            .rsplit_once(READ_SAVED_OUTPUT)?;
+        cause_and_kept.rsplit_once(". ").map(|(cause, _)| cause)
+    }
+
+    pub(crate) fn is_flag_wake(&self) -> bool {
+        matches!(
+            NoticeOutbox::for_turn(&self.client_turn_id),
+            NoticeOutbox::Flag
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NoticeOutbox {
+    Run,
+    Flag,
+}
+
+impl NoticeOutbox {
+    fn table(self) -> &'static str {
+        match self {
+            Self::Run => "run_notices",
+            Self::Flag => "flag_wakes",
+        }
+    }
+
+    fn turn_prefix(self) -> &'static str {
+        match self {
+            Self::Run => "run-notice:",
+            Self::Flag => "flag-wake:",
+        }
+    }
+
+    fn for_turn(client_turn_id: &str) -> Self {
+        if client_turn_id.starts_with(Self::Flag.turn_prefix()) {
+            Self::Flag
+        } else {
+            Self::Run
+        }
+    }
 }
 
 /// The descriptor a run shows, without secrets. An engine run reads as the 0.2.x descriptor of
@@ -937,12 +1011,22 @@ fn runs_past_newest(runs: &'static str) -> String {
     )
 }
 
+fn remote_collections_settled(run_id: &'static str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM log_collections WHERE run_id = {run_id} AND done = 0)
+        AND NOT EXISTS (SELECT 1 FROM signal_collections WHERE run_id = {run_id} AND done = 0)"
+    )
+}
+
 fn remote_cleanup_eligibility() -> String {
-    format!("NOT EXISTS (SELECT 1 FROM runs WHERE id = run_id AND
+    let settled = remote_collections_settled("remote_cleanups.run_id");
+    format!(
+        "NOT EXISTS (SELECT 1 FROM runs WHERE id = run_id AND
           (contact IS NOT NULL OR status IN ('submitting','starting','running')))
-        AND NOT EXISTS (SELECT 1 FROM log_collections WHERE run_id = remote_cleanups.run_id AND done = 0)
-        AND NOT EXISTS (SELECT 1 FROM signal_collections WHERE run_id = remote_cleanups.run_id AND done = 0)
-        AND (deleted = 1 OR run_id IN (SELECT id FROM ({})))", runs_past_newest(REMOTE_RUNS))
+        AND {settled}
+        AND (deleted = 1 OR run_id IN (SELECT id FROM ({})))",
+        runs_past_newest(REMOTE_RUNS)
+    )
 }
 
 /// Queues the SSH/Slurm runs whose `column` equals `value`; deletion wins over a pending finish.
@@ -1217,6 +1301,47 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_run_notices_pending
                 ON run_notices(chat_session_id, client_turn_id, id) WHERE delivered_at IS NULL;
+            CREATE TABLE IF NOT EXISTS flag_wakes (
+                id INTEGER PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                chat_session_id TEXT NOT NULL,
+                flag_id TEXT NOT NULL,
+                dedupe TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                client_turn_id TEXT,
+                delivered_at INTEGER,
+                delivery_failures INTEGER NOT NULL DEFAULT 0,
+                first_failure_at INTEGER,
+                next_delivery_at INTEGER,
+                delivery_error TEXT,
+                retired_at INTEGER,
+                UNIQUE(run_id, chat_session_id, flag_id, dedupe)
+            );
+            CREATE INDEX IF NOT EXISTS idx_flag_wakes_pending
+                ON flag_wakes(chat_session_id, client_turn_id, id)
+                WHERE delivered_at IS NULL AND retired_at IS NULL;
+            CREATE VIEW IF NOT EXISTS pending_chat_run_outbox AS
+                SELECT id, run_id, chat_session_id, kind, dedupe, body, created_at,
+                       client_turn_id, next_delivery_at, 0 AS is_flag
+                FROM run_notices WHERE delivered_at IS NULL AND retired_at IS NULL
+                UNION ALL
+                SELECT id, run_id, chat_session_id, NULL, dedupe, body, created_at,
+                       client_turn_id, next_delivery_at, 1
+                FROM flag_wakes w WHERE delivered_at IS NULL AND retired_at IS NULL
+                  AND w.dedupe NOT GLOB 'resume:*'
+                  AND (w.client_turn_id IS NULL OR w.client_turn_id GLOB 'flag-wake:*')
+                  AND (EXISTS (
+                      SELECT 1 FROM chat_turns t WHERE t.session_id = w.chat_session_id
+                        AND t.client_turn_id = w.client_turn_id
+                  ) OR (NOT EXISTS (
+                      SELECT 1 FROM run_notices n
+                      WHERE n.run_id = w.run_id AND n.chat_session_id = w.chat_session_id
+                        AND n.kind = 'terminal' AND n.delivered_at IS NULL AND n.retired_at IS NULL
+                  ) AND NOT EXISTS (
+                      SELECT 1 FROM legacy_watches l JOIN runs r ON r.id = l.run_id
+                      WHERE l.run_id = w.run_id AND r.status IN ('done', 'failed', 'lost')
+                  )));
             CREATE TABLE IF NOT EXISTS legacy_watches (
                 run_id TEXT PRIMARY KEY,
                 seen_status TEXT,
@@ -1409,6 +1534,10 @@ impl Store {
                 path         TEXT NOT NULL,
                 requested_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS project_moves_in_flight (
+                project_id TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS chat_turn_leases (
                 chat_session_id TEXT PRIMARY KEY,
                 claim_token     TEXT NOT NULL,
@@ -1567,10 +1696,15 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN context_usage_json TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN bootstrap_context TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN title_source TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN lit_sources_json TEXT",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN github_sync_enabled INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE local_projects ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE local_projects ADD COLUMN icon_json TEXT",
+            "ALTER TABLE local_projects ADD COLUMN settings_json TEXT",
+            "ALTER TABLE local_projects ADD COLUMN proposal_id TEXT",
+            "ALTER TABLE chat_project_moves ADD COLUMN proposal_id TEXT",
+            "ALTER TABLE chat_project_moves ADD COLUMN scratch INTEGER",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE local_experiments ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE local_experiments ADD COLUMN run_monitor_json TEXT",
@@ -1592,6 +1726,7 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN autonomy TEXT",
+            "ALTER TABLE chat_turns ADD COLUMN flag_input TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN side_parent_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN side_parent_leaf_id TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
@@ -1655,6 +1790,12 @@ impl Store {
              CREATE TRIGGER IF NOT EXISTS delete_chat_outbox AFTER DELETE ON chat_sessions BEGIN
                  DELETE FROM run_notices WHERE chat_session_id = OLD.id;
                  DELETE FROM run_subscriptions WHERE chat_session_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_run_flag_wakes AFTER DELETE ON runs BEGIN
+                 DELETE FROM flag_wakes WHERE run_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_chat_flag_wakes AFTER DELETE ON chat_sessions BEGIN
+                 DELETE FROM flag_wakes WHERE chat_session_id = OLD.id;
              END;",
         )?;
         schema.execute_batch(
@@ -1680,6 +1821,35 @@ impl Store {
              CREATE INDEX IF NOT EXISTS idx_run_monitor_flags ON run_monitor_events(run_id) WHERE kind = 'flag';"
         ))?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_signal_collection AFTER DELETE ON runs BEGIN DELETE FROM signal_collections WHERE run_id = OLD.id; END;")?;
+        let cleanup_guard_installed: bool = schema.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema
+                            WHERE type = 'trigger' AND name = 'protect_remote_cleanup')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !cleanup_guard_installed {
+            let enqueue_settled = remote_collections_settled("NEW.run_id");
+            let queued_settled = remote_collections_settled("remote_cleanups.run_id");
+            // Released writers queue the log before publishing the terminal phase.
+            schema.execute_batch(&format!(
+                "CREATE TRIGGER IF NOT EXISTS queue_remote_signal_collection
+                 AFTER INSERT ON log_collections WHEN NEW.done = 0 BEGIN
+                     INSERT INTO signal_collections (run_id)
+                     SELECT id FROM runs WHERE id = NEW.run_id AND {REMOTE_RUNS}
+                     ON CONFLICT(run_id) DO NOTHING;
+                 END;
+                 CREATE TRIGGER protect_remote_cleanup
+                 BEFORE INSERT ON remote_cleanups
+                 WHEN NEW.deleted = 0 AND NOT ({enqueue_settled}) BEGIN
+                     SELECT RAISE(IGNORE);
+                 END;
+                 INSERT INTO signal_collections (run_id)
+                 SELECT runs.id FROM log_collections JOIN runs ON runs.id = log_collections.run_id
+                 WHERE log_collections.done = 0 AND {REMOTE_RUNS}
+                 ON CONFLICT(run_id) DO NOTHING;
+                 DELETE FROM remote_cleanups WHERE deleted = 0 AND NOT ({queued_settled});"
+            ))?;
+        }
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_state AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_state WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_monitor_events AFTER DELETE ON runs BEGIN DELETE FROM run_monitor_events WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_run_watch_counts AFTER DELETE ON runs BEGIN DELETE FROM watch_counts WHERE run_id = OLD.id; END;")?;
@@ -1698,6 +1868,18 @@ impl Store {
              END;",
         )?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_project_env_vars AFTER DELETE ON local_projects BEGIN DELETE FROM project_env_vars WHERE project_id = OLD.id; END;")?;
+        // Released orx versions write a project's whole row from an earlier read; once a scratch
+        // repository (`scratch/<id>` in any data directory) has moved out, such a write would point
+        // the project back at a folder that is gone.
+        schema.execute_batch(
+            r"CREATE TRIGGER IF NOT EXISTS keep_promoted_repo_path
+             BEFORE UPDATE OF repo_path ON local_projects
+             WHEN substr(NEW.repo_path, -length(NEW.id) - 9) IN ('/scratch/' || NEW.id, '\scratch\' || NEW.id)
+              AND substr(OLD.repo_path, -length(OLD.id) - 9) NOT IN ('/scratch/' || OLD.id, '\scratch\' || OLD.id)
+             BEGIN
+                 SELECT RAISE(ABORT, 'This project moved to its own folder while the change was being made. Run the command again to apply it there.');
+             END;",
+        )?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_log_collection AFTER DELETE ON runs BEGIN DELETE FROM log_collections WHERE run_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         schema.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_project_move AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_project_moves WHERE session_id = OLD.id; END;")?;
@@ -2056,6 +2238,72 @@ impl Store {
         )? > 0)
     }
 
+    /// The literature sources a chat turned off for itself; `None` follows its project.
+    pub fn chat_lit_sources(&self, id: &str) -> Result<Option<Vec<String>>> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT lit_sources_json FROM chat_sessions WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        json.map(|json| {
+            serde_json::from_str(&json).with_context(|| {
+                format!("The literature sources saved for chat {id} are unreadable.")
+            })
+        })
+        .transpose()
+    }
+
+    /// Whether the chat exists to take the choice.
+    pub fn set_chat_lit_sources(&self, id: &str, disabled: Option<&[String]>) -> Result<bool> {
+        let json = disabled.map(serde_json::to_string).transpose()?;
+        Ok(self.conn.execute(
+            "UPDATE chat_sessions SET lit_sources_json = ?2 WHERE id = ?1",
+            params![id, json],
+        )? > 0)
+    }
+
+    /// The project's overrides of machine settings; an unknown project reads as none.
+    pub fn project_settings(&self, id: &str) -> Result<ProjectSettings> {
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT settings_json FROM local_projects WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        json.map_or(Ok(ProjectSettings::default()), |json| {
+            serde_json::from_str(&json)
+                .with_context(|| format!("The settings saved for project {id} are unreadable."))
+        })
+    }
+
+    /// Edits the project's overrides in one write transaction, so concurrent edits of
+    /// different settings keep each other's changes.
+    pub fn update_project_settings(
+        &self,
+        id: &str,
+        edit: impl FnOnce(&mut ProjectSettings),
+    ) -> Result<ProjectSettings> {
+        let tx = self.begin_immediate()?;
+        if self.get_local_project(id)?.is_none() {
+            return Err(anyhow!("Project {id} is not registered in the orx store."));
+        }
+        let mut settings = self.project_settings(id)?;
+        edit(&mut settings);
+        self.conn.execute(
+            "UPDATE local_projects SET settings_json = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(&settings)?],
+        )?;
+        tx.commit()?;
+        Ok(settings)
+    }
+
     pub fn set_tour_completed(&self, completed: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE ui_state SET tour_completed = ?1 WHERE id = 1",
@@ -2293,8 +2541,10 @@ impl Store {
                              json_extract(r.backend_json, '$.kind')),
                     r.launch_spec IS NOT NULL
                         AND json_extract(r.backend_json, '$.handle.type') IS NOT 'Legacy',
-                    EXISTS(SELECT 1 FROM run_notices n WHERE n.run_id = r.id
+                    (EXISTS(SELECT 1 FROM run_notices n WHERE n.run_id = r.id
                            AND n.delivered_at IS NULL AND n.retired_at IS NULL)
+                     OR EXISTS(SELECT 1 FROM flag_wakes w WHERE w.run_id = r.id
+                               AND w.delivered_at IS NULL AND w.retired_at IS NULL))
              FROM runs r
              LEFT JOIN local_experiments e ON e.id = r.experiment_id
              LEFT JOIN local_projects p ON p.id = r.project_id
@@ -2923,7 +3173,7 @@ impl Store {
     ) -> Result<bool> {
         let tx = self.begin()?;
         let inserted = tx.execute(
-            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
             params![
                 project.id,
                 project.name,
@@ -2938,6 +3188,7 @@ impl Store {
                 project.created_at,
                 project.updated_at,
                 project.icon.as_ref().map(|icon| icon.to_string()),
+                project.proposal,
             ],
         )?;
         if inserted == 0 {
@@ -3052,11 +3303,32 @@ impl Store {
         insert_local_project(&self.conn, p)
     }
 
+    /// Whether `table` has `column`: a store an older orx last wrote, opened
+    /// read-only, lacks the columns added since.
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            params![table, column],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn project_cols(&self) -> Result<String> {
+        Ok(if self.has_column("local_projects", "proposal_id")? {
+            PROJECT_COLS.to_string()
+        } else {
+            PROJECT_COLS.replace("proposal_id", "NULL AS proposal_id")
+        })
+    }
+
     pub fn get_local_project(&self, id: &str) -> Result<Option<LocalProject>> {
         let p = self
             .conn
             .query_row(
-                &format!("SELECT {PROJECT_COLS} FROM local_projects WHERE id = ?1"),
+                &format!(
+                    "SELECT {} FROM local_projects WHERE id = ?1",
+                    self.project_cols()?
+                ),
                 params![id],
                 LocalProject::from_row,
             )
@@ -3069,7 +3341,10 @@ impl Store {
         let p = self
             .conn
             .query_row(
-                &format!("SELECT {PROJECT_COLS} FROM local_projects WHERE slug = ?1"),
+                &format!(
+                    "SELECT {} FROM local_projects WHERE slug = ?1",
+                    self.project_cols()?
+                ),
                 params![slug],
                 LocalProject::from_row,
             )
@@ -3079,7 +3354,8 @@ impl Store {
 
     pub fn list_local_projects(&self) -> Result<Vec<LocalProject>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {PROJECT_COLS} FROM local_projects ORDER BY updated_at DESC"
+            "SELECT {} FROM local_projects ORDER BY updated_at DESC",
+            self.project_cols()?
         ))?;
         let rows = stmt.query_map([], LocalProject::from_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -3754,7 +4030,7 @@ impl Store {
             ],
             |r| r.get(0),
         )?;
-        Ok(attempts == LOG_COLLECTION_FAILED_AFTER)
+        Ok(attempts >= LOG_COLLECTION_FAILED_AFTER)
     }
 
     /// A terminal run owes final log and notify collection.
@@ -3859,7 +4135,7 @@ impl Store {
         Ok(attempts == LOG_COLLECTION_FAILED_AFTER)
     }
 
-    /// Queues a finished run's remote dir for removal; non-SSH/Slurm runs are ignored.
+    /// Queues retirement if both collections have settled. Call in the settlement transaction.
     pub(crate) fn queue_finished_remote_cleanup(&self, run_id: &str) -> Result<()> {
         queue_remote_cleanups(&self.conn, "id", run_id, false)
     }
@@ -4041,12 +4317,25 @@ impl Store {
         Ok(())
     }
 
-    /// A chat without a project becomes a project when the user names it.
-    pub fn restamp_local_project_created(&self, id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE local_projects SET created_at = ?2 WHERE id = ?1",
-            params![id, now_ms()],
+    /// A scratch project becomes a project at its new folder, created as of now,
+    /// in one write so a failure leaves the record as it was.
+    pub fn promote_local_project(&self, p: &LocalProject) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET name = ?2, repo_path = ?3, created_at = ?4, updated_at = ?5,
+                    proposal_id = ?6
+             WHERE id = ?1",
+            params![
+                p.id,
+                p.name,
+                p.repo_path,
+                p.created_at,
+                p.updated_at,
+                p.proposal
+            ],
         )?;
+        if changed == 0 {
+            return Err(anyhow!("Project {} was not found.", p.id));
+        }
         Ok(())
     }
 
@@ -4060,29 +4349,60 @@ impl Store {
         Ok(())
     }
 
-    /// Full-row update by id (name / run_command / branch edits).
-    pub fn update_local_project(&self, p: &LocalProject) -> Result<()> {
-        self.conn.execute(
-            "UPDATE local_projects SET name = ?2, slug = ?3, github_owner = ?4, github_repo = ?5,
-                    github_sync_enabled = ?6, baseline_branch = ?7, repo_path = ?8,
-                    run_command = ?9, paper_id = ?10, updated_at = ?11, icon_json = ?12
+    /// The user's edits; `None` leaves a field as it is, `Some(None)` clears it.
+    /// Each writer names only the columns it changes, so one holding an older
+    /// read cannot revert another's write, such as a promotion's new folder.
+    pub fn edit_local_project(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        run_command: Option<Option<&str>>,
+        icon: Option<Option<&serde_json::Value>>,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET name = COALESCE(?2, name),
+                    run_command = CASE WHEN ?3 THEN ?4 ELSE run_command END,
+                    icon_json = CASE WHEN ?5 THEN ?6 ELSE icon_json END,
+                    updated_at = ?7
              WHERE id = ?1",
             params![
-                p.id,
-                p.name,
-                p.slug,
-                p.github_owner,
-                p.github_repo,
-                p.github_sync_enabled,
-                p.baseline_branch,
-                p.repo_path,
-                p.run_command,
-                p.paper_id,
+                id,
+                name,
+                run_command.is_some(),
+                run_command.flatten(),
+                icon.is_some(),
+                icon.flatten().map(|icon| icon.to_string()),
                 now_ms(),
-                p.icon.as_ref().map(|icon| icon.to_string()),
             ],
         )?;
-        Ok(())
+        project_found(id, changed)
+    }
+
+    pub fn set_project_baseline_branch(&self, id: &str, branch: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET baseline_branch = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, branch, now_ms()],
+        )?;
+        project_found(id, changed)
+    }
+
+    /// A project gets a new GitHub repository with syncing off until its first push lands.
+    pub fn set_project_github_repository(&self, id: &str, owner: &str, repo: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET github_owner = ?2, github_repo = ?3,
+                    github_sync_enabled = 0, updated_at = ?4
+             WHERE id = ?1",
+            params![id, owner, repo, now_ms()],
+        )?;
+        project_found(id, changed)
+    }
+
+    pub fn set_project_github_sync(&self, id: &str, enabled: bool) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE local_projects SET github_sync_enabled = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, enabled, now_ms()],
+        )?;
+        project_found(id, changed)
     }
 
     // --- local experiments (orx up) ---
@@ -4598,25 +4918,109 @@ impl Store {
         Ok((deleting, retained))
     }
 
-    /// A new project the user asked a chat to move into once it is idle.
-    pub fn set_chat_project_move(&self, session_id: &str, name: &str, path: &str) -> Result<()> {
+    /// Records a move of `project_id`'s files before it touches any, so a start
+    /// after a crash can finish or undo it.
+    /// Returns `false`, recording nothing, when the request was cancelled or replaced.
+    pub fn begin_project_move(
+        &self,
+        project_id: &str,
+        state_json: &str,
+        session_id: &str,
+        requested_at: i64,
+    ) -> Result<bool> {
+        let tx = self.begin_immediate()?;
+        let unfinished: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_moves_in_flight WHERE project_id = ?1)",
+            params![project_id],
+            |row| row.get(0),
+        )?;
+        if unfinished {
+            return Err(anyhow!(
+                "An earlier move of this project didn't finish. Restart OpenResearch to finish or undo it, then try again."
+            ));
+        }
+        let taken = tx.execute(
+            "DELETE FROM chat_project_moves WHERE session_id = ?1 AND requested_at = ?2",
+            params![session_id, requested_at],
+        )?;
+        if taken == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO project_moves_in_flight (project_id, state_json) VALUES (?1, ?2)",
+            params![project_id, state_json],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn end_project_move(&self, project_id: &str) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO chat_project_moves (session_id, name, path, requested_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, name, path, now_ms()],
+            "DELETE FROM project_moves_in_flight WHERE project_id = ?1",
+            params![project_id],
         )?;
         Ok(())
     }
 
-    pub fn chat_project_move(&self, session_id: &str) -> Result<Option<(String, String)>> {
+    /// Each move still recorded, as its project id and state.
+    pub fn project_moves_in_flight(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT project_id, state_json FROM project_moves_in_flight")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// A new project the user asked a chat to move into once it is idle.
+    pub fn set_chat_project_move(
+        &self,
+        session_id: &str,
+        name: &str,
+        path: &str,
+        proposal: Option<&str>,
+        scratch: Option<bool>,
+    ) -> Result<i64> {
+        // Distinct for every request, even two in one millisecond, so the time names one request.
+        use std::sync::atomic::{AtomicI64, Ordering};
+        static LAST: AtomicI64 = AtomicI64::new(0);
+        let requested_at = loop {
+            let last = LAST.load(Ordering::SeqCst);
+            let next = now_ms().max(last + 1);
+            if LAST
+                .compare_exchange(last, next, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break next;
+            }
+        };
+        self.conn.execute(
+            "INSERT OR REPLACE INTO chat_project_moves (session_id, name, path, requested_at, proposal_id, scratch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session_id, name, path, requested_at, proposal, scratch],
+        )?;
+        Ok(requested_at)
+    }
+
+    pub fn chat_project_move(&self, session_id: &str) -> Result<Option<ChatProjectMove>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT name, path FROM chat_project_moves WHERE session_id = ?1",
+                &format!(
+                    "SELECT name, path, {} FROM chat_project_moves WHERE session_id = ?1",
+                    self.project_move_cols()?
+                ),
                 params![session_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                ChatProjectMove::from_row,
             )
             .optional()?)
+    }
+
+    fn project_move_cols(&self) -> Result<&'static str> {
+        Ok(if self.has_column("chat_project_moves", "scratch")? {
+            "proposal_id, requested_at, scratch"
+        } else {
+            "NULL, requested_at, NULL"
+        })
     }
 
     pub fn chat_project_move_sessions(&self) -> Result<Vec<String>> {
@@ -4627,14 +5031,20 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Removes the waiting move, returning it: whoever takes it owns it.
-    pub fn take_chat_project_move(&self, session_id: &str) -> Result<Option<(String, String)>> {
-        let mut stmt = self
-            .conn
-            .prepare("DELETE FROM chat_project_moves WHERE session_id = ?1 RETURNING name, path")?;
+    /// Removes the waiting move, or only the one requested at `requested_at`,
+    /// returning it: whoever takes it owns it.
+    pub fn take_chat_project_move(
+        &self,
+        session_id: &str,
+        requested_at: Option<i64>,
+    ) -> Result<Option<ChatProjectMove>> {
+        let mut stmt = self.conn.prepare(
+            "DELETE FROM chat_project_moves WHERE session_id = ?1 AND (?2 IS NULL OR requested_at = ?2)
+             RETURNING name, path, proposal_id, requested_at, scratch",
+        )?;
         // Stepped to the end, so the delete has committed before the row is returned.
         let rows = stmt
-            .query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map(params![session_id, requested_at], ChatProjectMove::from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows.into_iter().next())
     }
@@ -5260,9 +5670,9 @@ impl Store {
              (id, session_id, user_message_id, assistant_message_id, client_turn_id,
               request_hash, prepared_input, settings_json, state, delivery_state,
               attempt_count, next_retry_at, error_kind, error_message, recovery_action,
-              recovered_by_turn_id, created_at, updated_at)
+              recovered_by_turn_id, created_at, updated_at, flag_input)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16, ?17, ?18)",
+                     ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 turn.id,
                 turn.session_id,
@@ -5282,6 +5692,7 @@ impl Store {
                 turn.recovered_by_turn_id,
                 turn.created_at,
                 turn.updated_at,
+                turn.flag_input,
             ],
         )?;
         Ok(ChatTurnAdmission::Inserted)
@@ -5533,33 +5944,51 @@ impl Store {
         attempt_count: i64,
         next_retry_at: Option<i64>,
     ) -> Result<()> {
+        let tx = self
+            .conn
+            .is_autocommit()
+            .then(|| self.begin_immediate())
+            .transpose()?;
+        let now = now_ms();
         let changed = self.conn.execute(
             "UPDATE chat_turns SET state = ?2, delivery_state = ?3, attempt_count = ?4,
                  next_retry_at = ?5, updated_at = ?6
              WHERE id = ?1 AND state IN ('preparing', 'retrying', 'running')",
-            params![
-                id,
-                state,
-                delivery_state,
-                attempt_count,
-                next_retry_at,
-                now_ms()
-            ],
+            params![id, state, delivery_state, attempt_count, next_retry_at, now],
         )?;
-        if changed != 0 && state == "running" && delivery_state == "accepted" {
+        let accepted = changed != 0 && state == "running" && delivery_state == "accepted";
+        if accepted {
+            self.confirm_flag_wake_delivery(id, now)?;
+        }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
+        if accepted {
             crate::commands::up::api_v2::flag_turn_changed(self, id);
         }
         Ok(())
     }
 
     pub fn complete_chat_turn(&self, id: &str) -> Result<bool> {
+        let tx = self
+            .conn
+            .is_autocommit()
+            .then(|| self.begin_immediate())
+            .transpose()?;
+        let now = now_ms();
         let changed = self.conn.execute(
             "UPDATE chat_turns SET state = 'completed', delivery_state = 'accepted', next_retry_at = NULL,
                  error_kind = NULL, error_message = NULL, recovery_action = NULL,
                  updated_at = ?2 WHERE id = ?1
                    AND state IN ('preparing', 'retrying', 'running')",
-            params![id, now_ms()],
+            params![id, now],
         )?;
+        if changed != 0 {
+            self.confirm_flag_wake_delivery(id, now)?;
+        }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
         Ok(changed > 0)
     }
 
@@ -6146,6 +6575,56 @@ pub struct StoredAgentSelection {
     pub reasoning_level: Option<String>,
 }
 
+/// Settings a project sets for itself; each absent one follows the machine's.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<ComputeDefault>,
+    /// The agent new chats in the project start with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<StoredAgentSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_lit_sources: Option<Vec<String>>,
+    /// The autonomy id new chats start with; an id this orx doesn't know is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<String>,
+    #[serde(default, skip_serializing_if = "SlurmDefaults::is_empty")]
+    pub slurm: SlurmDefaults,
+    /// The Kubernetes namespace runs go to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub k8s_namespace: Option<String>,
+    /// Fields from a newer orx, kept across this version's saves.
+    #[serde(flatten)]
+    unknown: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `#SBATCH` defaults a project sets over the machine's Slurm settings; each absent one follows them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SlurmDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos: Option<String>,
+}
+
+impl SlurmDefaults {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeDefault {
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flavor: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RunBannerLevel {
@@ -6175,6 +6654,31 @@ pub enum RunDismissal {
     Dismissed,
     NotAssociated,
     Refused(&'static str),
+}
+
+/// A new project a chat waits to move into once its turn ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatProjectMove {
+    pub name: String,
+    pub path: String,
+    /// The proposal the user confirmed, as [`LocalProject::proposal`] records it.
+    pub proposal: Option<String>,
+    pub requested_at: i64,
+    /// Whether the chat had no project when asked; older versions leave it out.
+    pub scratch: Option<bool>,
+}
+
+impl ChatProjectMove {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            name: row.get(0)?,
+            path: row.get(1)?,
+            proposal: row.get(2)?,
+            requested_at: row.get(3)?,
+            scratch: row.get(4)?,
+        })
+    }
 }
 
 pub struct StoredChatShownRun {
@@ -6299,6 +6803,8 @@ pub struct StoredChatTurn {
     pub client_turn_id: String,
     pub request_hash: String,
     pub prepared_input: String,
+    #[serde(skip)]
+    pub flag_input: Option<String>,
     pub settings_json: String,
     pub state: String,
     pub delivery_state: String,
@@ -6332,7 +6838,7 @@ pub enum ChatTurnAdmission {
 const CHAT_TURN_COLS: &str = "id, session_id, user_message_id, assistant_message_id, \
     client_turn_id, request_hash, prepared_input, settings_json, state, delivery_state, \
     attempt_count, next_retry_at, error_kind, error_message, recovery_action, \
-    recovered_by_turn_id, created_at, updated_at";
+    recovered_by_turn_id, created_at, updated_at, flag_input";
 
 fn row_to_chat_turn(
     row: &rusqlite::Row<'_>,
@@ -6345,6 +6851,7 @@ fn row_to_chat_turn(
         client_turn_id: row.get(4)?,
         request_hash: row.get(5)?,
         prepared_input: row.get(6)?,
+        flag_input: row.get(18)?,
         settings_json: row.get(7)?,
         state: row.get(8)?,
         delivery_state: row.get(9)?,
@@ -7155,9 +7662,8 @@ impl Store {
 
     pub fn pending_run_notice_sessions(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT chat_session_id FROM run_notices
-             WHERE delivered_at IS NULL AND retired_at IS NULL
-             AND (next_delivery_at IS NULL OR next_delivery_at <= ?1) ORDER BY chat_session_id",
+            "SELECT DISTINCT chat_session_id FROM pending_chat_run_outbox
+             WHERE next_delivery_at IS NULL OR next_delivery_at <= ?1 ORDER BY chat_session_id",
         )?;
         let rows = stmt.query_map([now_ms()], |row| row.get(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -7172,11 +7678,14 @@ impl Store {
         now: i64,
     ) -> Result<Option<i64>> {
         let tx = self.begin_immediate()?;
+        let table = NoticeOutbox::for_turn(client_turn_id).table();
         let prior: Option<(i64, Option<i64>)> = tx
             .query_row(
-                "SELECT delivery_failures, first_failure_at FROM run_notices
+                &format!(
+                    "SELECT delivery_failures, first_failure_at FROM {table}
              WHERE chat_session_id = ?1 AND client_turn_id = ?2
-             AND delivered_at IS NULL AND retired_at IS NULL LIMIT 1",
+             AND delivered_at IS NULL AND retired_at IS NULL LIMIT 1"
+                ),
                 params![chat, client_turn_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -7203,9 +7712,9 @@ impl Store {
             reason.to_string()
         };
         tx.execute(
-            "UPDATE run_notices SET delivery_failures = ?3, first_failure_at = ?4,
+            &format!("UPDATE {table} SET delivery_failures = ?3, first_failure_at = ?4,
              next_delivery_at = ?5, delivery_error = ?6, retired_at = ?7
-             WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL AND retired_at IS NULL",
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL AND retired_at IS NULL"),
             params![chat, client_turn_id, failures + 1, first, next, reason, retired],
         )?;
         tx.commit()?;
@@ -7217,23 +7726,31 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT delivery_error FROM run_notices WHERE run_id = ?1 AND retired_at IS NOT NULL
+                "SELECT delivery_error FROM (
+                     SELECT delivery_error, retired_at, id FROM run_notices WHERE run_id = ?1
+                     UNION ALL
+                     SELECT delivery_error, retired_at, id FROM flag_wakes WHERE run_id = ?1
+                 ) WHERE retired_at IS NOT NULL AND delivery_error IS NOT NULL
                  ORDER BY retired_at DESC, id DESC LIMIT 1",
                 [run_id],
                 |row| row.get(0),
             )
-            .optional()?
-            .flatten())
+            .optional()?)
     }
 
     pub fn expire_run_notice_batches(&self, now: i64) -> Result<()> {
-        self.conn.execute(
-            "UPDATE run_notices SET retired_at = ?1, next_delivery_at = NULL,
+        for outbox in [NoticeOutbox::Run, NoticeOutbox::Flag] {
+            let table = outbox.table();
+            self.conn.execute(
+                &format!(
+                    "UPDATE {table} SET retired_at = ?1, next_delivery_at = NULL,
              delivery_error = 'Retry window expired after 24 hours: ' || delivery_error
              WHERE delivered_at IS NULL AND retired_at IS NULL
-             AND first_failure_at <= ?1 - ?2",
-            params![now, RUN_NOTICE_RETRY_WINDOW_MS],
-        )?;
+             AND first_failure_at <= ?1 - ?2"
+                ),
+                params![now, RUN_NOTICE_RETRY_WINDOW_MS],
+            )?;
+        }
         Ok(())
     }
 
@@ -7244,44 +7761,67 @@ impl Store {
     pub fn run_notice_batch_at(&self, chat_session_id: &str, now: i64) -> Result<Vec<RunNotice>> {
         let tx = self.begin_immediate()?;
         self.expire_run_notice_batches(now)?;
-        self.retire_stale_flag_wakes(now)?;
-        let assigned: Option<String> = tx
+        self.retire_unadmitted_flag_wakes(now)?;
+        let next: Option<(bool, Option<String>)> = tx
             .query_row(
-                "SELECT client_turn_id FROM run_notices
-             WHERE chat_session_id = ?1 AND delivered_at IS NULL AND client_turn_id IS NOT NULL
-             AND retired_at IS NULL AND (next_delivery_at IS NULL OR next_delivery_at <= ?2)
-             ORDER BY id LIMIT 1",
+                "SELECT is_flag, client_turn_id FROM (
+                     SELECT is_flag, client_turn_id, created_at, id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY is_flag ORDER BY client_turn_id IS NULL, id
+                            ) AS oldest
+                     FROM pending_chat_run_outbox
+                     WHERE chat_session_id = ?1 AND (next_delivery_at IS NULL OR next_delivery_at <= ?2)
+                 ) WHERE oldest = 1
+                 ORDER BY client_turn_id IS NULL, created_at, id, is_flag LIMIT 1",
                 params![chat_session_id, now],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        let Some((is_flag, assigned)) = next else {
+            tx.commit()?;
+            return Ok(Vec::new());
+        };
+        let outbox = if is_flag {
+            NoticeOutbox::Flag
+        } else {
+            NoticeOutbox::Run
+        };
+        let table = outbox.table();
         let client_turn_id = match assigned {
             Some(id) => id,
             None => {
-                let id = format!("run-notice:{}", uuid::Uuid::new_v4());
-                let assigned = tx.execute(
-                    "UPDATE run_notices SET client_turn_id = ?2 WHERE chat_session_id = ?1
-                     AND delivered_at IS NULL AND retired_at IS NULL AND client_turn_id IS NULL",
-                    params![chat_session_id, id],
+                // A released drain can resume a result batch even if it cannot see flag wakes.
+                let id = format!("{}{}", outbox.turn_prefix(), uuid::Uuid::new_v4());
+                tx.execute(
+                    &format!(
+                        "UPDATE {table} SET client_turn_id = ?2 WHERE id IN (
+                         SELECT id FROM pending_chat_run_outbox WHERE chat_session_id = ?1
+                           AND is_flag = ?3 AND client_turn_id IS NULL
+                     )"
+                    ),
+                    params![chat_session_id, id, is_flag],
                 )?;
-                if assigned == 0 {
-                    tx.commit()?;
-                    return Ok(Vec::new());
-                }
                 id
             }
         };
         let notices = {
-            let mut stmt = tx.prepare(
-                "SELECT id, run_id, chat_session_id, kind, dedupe, body, created_at, client_turn_id
-                 FROM run_notices WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL ORDER BY id",
-            )?;
+            let mut stmt = tx.prepare(match outbox {
+                NoticeOutbox::Run => "SELECT id, run_id, chat_session_id, kind, dedupe, body, created_at, client_turn_id
+                     FROM run_notices WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL ORDER BY id",
+                NoticeOutbox::Flag => "SELECT id, run_id, chat_session_id, NULL, dedupe, body, created_at, client_turn_id
+                     FROM flag_wakes WHERE chat_session_id = ?1 AND client_turn_id = ?2
+                     AND delivered_at IS NULL AND retired_at IS NULL ORDER BY id",
+            })?;
             let rows = stmt.query_map(params![chat_session_id, client_turn_id], |row| {
                 Ok(RunNotice {
                     id: row.get(0)?,
                     run_id: row.get(1)?,
                     chat_session_id: row.get(2)?,
-                    kind: row.get(3)?,
+                    kind: if is_flag {
+                        WATCH_FLAG.to_owned()
+                    } else {
+                        row.get(3)?
+                    },
                     dedupe: row.get(4)?,
                     body: row.get(5)?,
                     created_at: row.get(6)?,
@@ -7290,8 +7830,17 @@ impl Store {
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
+        let mut uncovered = Vec::with_capacity(notices.len());
+        for notice in notices {
+            if let Some(cause) = notice.incomplete_signal_cause() {
+                if self.acknowledge_covered_signal_notice(&notice, cause)? {
+                    continue;
+                }
+            }
+            uncovered.push(notice);
+        }
         tx.commit()?;
-        Ok(notices)
+        Ok(uncovered)
     }
 
     pub fn mark_run_notice_batch_delivered(
@@ -7300,12 +7849,40 @@ impl Store {
         client_turn_id: &str,
         delivered_at: i64,
     ) -> Result<()> {
+        let table = NoticeOutbox::for_turn(client_turn_id).table();
         self.conn.execute(
-            "UPDATE run_notices SET delivered_at = ?3, next_delivery_at = NULL WHERE chat_session_id = ?1
-             AND client_turn_id = ?2 AND delivered_at IS NULL",
+            &format!(
+                "UPDATE {table} SET delivered_at = ?3, next_delivery_at = NULL
+             WHERE chat_session_id = ?1 AND client_turn_id = ?2 AND delivered_at IS NULL"
+            ),
             params![chat_session_id, client_turn_id, delivered_at],
         )?;
         Ok(())
+    }
+
+    /// Uses the accepted prompt because the terminal notice can predate collection settling.
+    fn acknowledge_covered_signal_notice(&self, notice: &RunNotice, cause: &str) -> Result<bool> {
+        let details = RunNotice::terminal_signal_details(&notice.run_id, cause);
+        Ok(self.conn.execute(
+            "UPDATE run_notices AS pending SET delivered_at = ?2, next_delivery_at = NULL
+             WHERE pending.id = ?1 AND pending.delivered_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM chat_turns t WHERE t.session_id = pending.chat_session_id
+                     AND t.client_turn_id = pending.client_turn_id
+               )
+               AND EXISTS (
+                   SELECT 1 FROM run_notices n JOIN chat_turns t
+                     ON t.session_id = n.chat_session_id AND t.client_turn_id = n.client_turn_id
+                   WHERE n.run_id = pending.run_id AND n.chat_session_id = pending.chat_session_id
+                     AND n.dedupe = 'terminal' AND t.delivery_state = 'accepted'
+                     AND instr(t.prepared_input, ?3) > 0
+               )",
+            params![
+                notice.id,
+                now_ms(),
+                format!("{SIGNAL_AVAILABILITY_PREFIX}{details}"),
+            ],
+        )? == 1)
     }
 
     /// Run under the engine lock after legacy delivery stops and before notice production.
@@ -7763,16 +8340,24 @@ fn launched_in(chat: &str, run: &str) -> String {
 }
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, github_sync_enabled, \
-                            baseline_branch, repo_path, run_command, paper_id, created_at, updated_at, icon_json";
+                            baseline_branch, repo_path, run_command, paper_id, created_at, updated_at, icon_json, \
+                            proposal_id";
+
+fn project_found(id: &str, changed: usize) -> Result<()> {
+    if changed == 0 {
+        return Err(anyhow!("Project {id} was not found."));
+    }
+    Ok(())
+}
 
 /// The one insert of a project row, so every column `PROJECT_COLS` names gets its value.
 fn insert_local_project(conn: &rusqlite::Connection, p: &LocalProject) -> Result<()> {
     conn.execute(
-        &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+        &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
         params![
             p.id, p.name, p.slug, p.github_owner, p.github_repo,
             p.github_sync_enabled, p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
-            p.created_at, p.updated_at, p.icon.as_ref().map(|icon| icon.to_string()),
+            p.created_at, p.updated_at, p.icon.as_ref().map(|icon| icon.to_string()), p.proposal,
         ],
     )?;
     Ok(())
@@ -7981,6 +8566,18 @@ pub(crate) mod tests {
             .query_row("SELECT value FROM preserved", [], |row| row.get(0))
             .unwrap();
         assert_eq!(preserved, "kept");
+    }
+
+    #[test]
+    fn a_read_only_store_counts_runs_while_a_writer_holds_the_lock() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-read-only-store").unwrap();
+        let writer = Store::open_at(dir.path().to_path_buf()).unwrap();
+        writer.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = std::time::Instant::now();
+        let reader = Store::open_read_only(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reader.count_active_runs().unwrap(), 0);
+        assert!(started.elapsed() < BUSY_TIMEOUT);
     }
 
     #[test]
@@ -10702,6 +11299,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn opening_repairs_remote_cleanup_only_when_installing_the_guard() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-cleanup-repair").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "DROP TRIGGER protect_remote_cleanup;
+                 DROP TRIGGER queue_remote_signal_collection;",
+            )
+            .unwrap();
+        let mut run = run_fixture("remote", "done", None);
+        run.backend_json = r#"{"kind":"ssh_job"}"#.into();
+        store.upsert_run(&run).unwrap();
+        store.queue_log_collection(&run.id).unwrap();
+        assert!(!store.signal_collection_pending(&run.id).unwrap());
+        drop(store);
+
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        assert!(store.signal_collection_pending(&run.id).unwrap());
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_repeated_repair BEFORE INSERT ON signal_collections BEGIN
+                SELECT RAISE(ABORT, 'remote signal repair already ran');
+             END;",
+            )
+            .unwrap();
+        drop(store);
+
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        assert!(store.signal_collection_pending(&run.id).unwrap());
+    }
+
+    #[test]
     fn remote_cleanups_keep_each_projects_newest_runs_until_project_delete() {
         let dir = std::env::temp_dir().join(format!("orx-remote-cleanup-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -10760,6 +11391,7 @@ pub(crate) mod tests {
             .conn
             .execute("UPDATE runs SET status = 'done'", [])
             .unwrap();
+        store.queue_signal_collection("r5").unwrap();
         store.delete_local_project("p").unwrap();
         assert!(store.watch_counts("local").unwrap().is_empty());
         // Deletion marks every SSH/Slurm run, including the newest and one waiting to retry.
@@ -11020,6 +11652,8 @@ pub(crate) mod tests {
         store.queue_log_collection(run).unwrap();
         assert!(!store.remote_cleanup_eligible(run, false).unwrap());
         store.finish_log_collection(run).unwrap();
+        assert!(!store.remote_cleanup_eligible(run, false).unwrap());
+        store.finish_signal_collection(run).unwrap();
         assert!(store.remote_cleanup_eligible(run, false).unwrap());
         store
             .conn
@@ -11733,6 +12367,74 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn project_settings_follow_the_machine_until_set_and_survive_older_writers() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-project-settings-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let project = LocalProject {
+            id: "p".into(),
+            name: "P".into(),
+            slug: "p".into(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            repo_path: dir.join("p").to_string_lossy().into_owned(),
+            run_command: None,
+            paper_id: None,
+            icon: None,
+            created_at: 1,
+            updated_at: 1,
+            proposal: None,
+        };
+        store.create_local_project(&project).unwrap();
+        assert_eq!(
+            store.project_settings("p").unwrap(),
+            ProjectSettings::default()
+        );
+
+        store
+            .update_project_settings("p", |settings| {
+                settings.compute = Some(ComputeDefault {
+                    backend: "slurm".into(),
+                    flavor: Some("h100:1".into()),
+                });
+                settings.disabled_lit_sources = Some(vec!["pubmed".into()]);
+            })
+            .unwrap();
+        // A newer orx's field, and a rename by an orx that predates settings.
+        store
+            .conn
+            .execute(
+                "UPDATE local_projects SET settings_json = json_set(settings_json, '$.future', 7) WHERE id = 'p'",
+                [],
+            )
+            .unwrap();
+        store
+            .edit_local_project("p", Some("Renamed"), None, None)
+            .unwrap();
+        let saved = store
+            .update_project_settings("p", |settings| settings.compute = None)
+            .unwrap();
+        assert_eq!(saved.compute, None);
+        assert_eq!(saved.disabled_lit_sources, Some(vec!["pubmed".to_string()]));
+        assert_eq!(serde_json::to_value(&saved).unwrap()["future"], 7);
+
+        assert!(store.update_project_settings("missing", |_| {}).is_err());
+        store
+            .conn
+            .execute(
+                "UPDATE local_projects SET settings_json = '{' WHERE id = 'p'",
+                [],
+            )
+            .unwrap();
+        assert!(store.project_settings("p").is_err());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn workspace_state_roundtrips_without_touching_project_activity_or_preferences() {
         let dir = std::env::temp_dir().join(format!("orx-workspace-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -11750,6 +12452,7 @@ pub(crate) mod tests {
                     run_command: None,
                     paper_id: None,
                     icon: None,
+                    proposal: None,
                     created_at: 1,
                     updated_at: 2,
                 })
@@ -12794,18 +13497,6 @@ pub(crate) mod tests {
     }
 
     impl Store {
-        pub(crate) fn run_notices_for_tests(&self, run_id: &str) -> Vec<(String, String, String)> {
-            let mut statement = self
-                .conn
-                .prepare("SELECT chat_session_id, kind, body FROM run_notices WHERE run_id = ?1 ORDER BY id")
-                .unwrap();
-            statement
-                .query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                .unwrap()
-                .collect::<rusqlite::Result<_>>()
-                .unwrap()
-        }
-
         pub(crate) fn conn_execute_for_tests(&self, sql: &str) {
             self.conn.execute(sql, []).unwrap();
         }
@@ -12839,18 +13530,6 @@ pub(crate) mod tests {
                 updated_at: 1,
             })
             .unwrap();
-        }
-
-        /// A notice the chat's notice loop claimed into turn `turn`, and whether it was delivered.
-        pub(crate) fn claim_run_notices_for_tests(&self, chat: &str, turn: &str, delivered: bool) {
-            self.conn
-                .execute(
-                    "UPDATE run_notices SET client_turn_id = ?2,
-                            delivered_at = CASE WHEN ?3 THEN 1 ELSE NULL END
-                     WHERE chat_session_id = ?1 AND delivered_at IS NULL",
-                    params![chat, turn, delivered],
-                )
-                .unwrap();
         }
 
         /// A turn of `chat` in `state`, as the chat's own writer leaves it.
@@ -13091,11 +13770,181 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The whole-row write `orx project edit` and the dashboard ran through v0.2.28.
+    fn write_whole_project_row(store: &Store, p: &LocalProject) -> rusqlite::Result<usize> {
+        store.conn.execute(
+            "UPDATE local_projects SET name = ?2, slug = ?3, github_owner = ?4, github_repo = ?5,
+                    github_sync_enabled = ?6, baseline_branch = ?7, repo_path = ?8,
+                    run_command = ?9, paper_id = ?10, updated_at = ?11, icon_json = ?12
+             WHERE id = ?1",
+            params![
+                p.id,
+                p.name,
+                p.slug,
+                p.github_owner,
+                p.github_repo,
+                p.github_sync_enabled,
+                p.baseline_branch,
+                p.repo_path,
+                p.run_command,
+                p.paper_id,
+                now_ms(),
+                p.icon.as_ref().map(|icon| icon.to_string()),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_store_from_before_proposals_still_reads_its_projects_and_moves() {
+        let dir = std::env::temp_dir().join(format!("orx-store-old-cols-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let project = LocalProject {
+            id: "old".into(),
+            name: "Old".into(),
+            slug: "old".into(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            repo_path: "/home/me/old".into(),
+            run_command: None,
+            paper_id: None,
+            icon: None,
+            proposal: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_local_project(&project).unwrap();
+        store
+            .set_chat_project_move("chat", "Probes", "/home/me/probes", None, None)
+            .unwrap();
+        // The shape v0.2.28 left, which a read-only open cannot upgrade.
+        for sql in [
+            "ALTER TABLE local_projects DROP COLUMN proposal_id",
+            "ALTER TABLE chat_project_moves DROP COLUMN proposal_id",
+            "ALTER TABLE chat_project_moves DROP COLUMN scratch",
+        ] {
+            store.conn_execute_for_tests(sql);
+        }
+
+        let read = store.get_local_project("old").unwrap().unwrap();
+        assert_eq!((read.name.as_str(), read.proposal), ("Old", None));
+        assert_eq!(store.list_local_projects().unwrap().len(), 1);
+        let waiting = store.chat_project_move("chat").unwrap().unwrap();
+        assert_eq!(
+            (waiting.name.as_str(), waiting.proposal, waiting.scratch),
+            ("Probes", None, None)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_older_whole_row_write_cannot_undo_a_promotion() {
+        let dir = std::env::temp_dir().join(format!("orx-store-promoted-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for (data, folder) in [
+            (
+                dir.to_string_lossy().into_owned(),
+                dir.join("Fib").to_string_lossy().into_owned(),
+            ),
+            (
+                r"C:\Users\r\openresearch".to_string(),
+                r"C:\Users\r\Fib".to_string(),
+            ),
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let separator = if data.contains('\\') { '\\' } else { '/' };
+            let stale = LocalProject {
+                id: id.clone(),
+                name: "No project".into(),
+                slug: format!("scratch-{}", &id[..8]),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: format!("{data}{separator}scratch{separator}{id}"),
+                run_command: None,
+                paper_id: None,
+                icon: None,
+                proposal: None,
+                created_at: 1,
+                updated_at: 1,
+            };
+            store.create_local_project(&stale).unwrap();
+            let promoted = LocalProject {
+                name: "Fibonacci".into(),
+                repo_path: folder.clone(),
+                ..stale.clone()
+            };
+            store.promote_local_project(&promoted).unwrap();
+
+            let edit = LocalProject {
+                run_command: Some("python fib.py".into()),
+                ..stale.clone()
+            };
+            let refused = write_whole_project_row(&store, &edit).unwrap_err();
+            assert!(
+                refused.to_string().contains("Run the command again"),
+                "{refused}"
+            );
+            let read = store.get_local_project(&id).unwrap().unwrap();
+            assert_eq!(
+                (read.name.as_str(), read.repo_path.as_str()),
+                ("Fibonacci", folder.as_str())
+            );
+            assert_eq!(read.run_command, None);
+
+            // Read again after the promotion, the same write goes through.
+            let edit = LocalProject {
+                run_command: Some("python fib.py".into()),
+                ..read
+            };
+            write_whole_project_row(&store, &edit).unwrap();
+            let read = store.get_local_project(&id).unwrap().unwrap();
+            assert_eq!(read.repo_path, folder);
+            assert_eq!(read.run_command.as_deref(), Some("python fib.py"));
+        }
+
+        // Moving the data directory moves scratch repositories from one scratch folder to another.
+        let id = uuid::Uuid::new_v4().to_string();
+        let old = dir.join("scratch").join(&id).to_string_lossy().into_owned();
+        let new = dir
+            .join("moved")
+            .join("scratch")
+            .join(&id)
+            .to_string_lossy()
+            .into_owned();
+        store
+            .create_local_project(&LocalProject {
+                id: id.clone(),
+                name: "No project".into(),
+                slug: format!("scratch-{}", &id[..8]),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: old.clone(),
+                run_command: None,
+                paper_id: None,
+                icon: None,
+                proposal: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        store.relocate_project_paths(&[(old, new.clone())]).unwrap();
+        assert_eq!(
+            store.get_local_project(&id).unwrap().unwrap().repo_path,
+            new
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn project_icon_survives_updates_that_predate_it() {
         let dir = std::env::temp_dir().join(format!("orx-store-icon-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        let mut project = LocalProject {
+        let project = LocalProject {
             id: "project".into(),
             name: "Project".into(),
             slug: "project".into(),
@@ -13107,12 +13956,15 @@ pub(crate) mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 1,
             updated_at: 1,
         };
         store.create_local_project(&project).unwrap();
-        project.icon = Some(serde_json::json!({ "file": "assets/logo.png", "color": "teal" }));
-        store.update_local_project(&project).unwrap();
+        let icon = serde_json::json!({ "file": "assets/logo.png", "color": "teal" });
+        store
+            .edit_local_project(&project.id, None, None, Some(Some(&icon)))
+            .unwrap();
 
         // The update an older orx runs names only the columns it knows.
         store
@@ -13124,14 +13976,74 @@ pub(crate) mod tests {
             .unwrap();
         let read = store.get_local_project("project").unwrap().unwrap();
         assert_eq!(read.name, "Renamed");
-        assert_eq!(read.icon, project.icon);
+        assert_eq!(read.icon, Some(icon));
 
-        project.icon = None;
-        store.update_local_project(&project).unwrap();
+        store
+            .edit_local_project(&project.id, None, None, Some(None))
+            .unwrap();
         assert_eq!(
             store.get_local_project("project").unwrap().unwrap().icon,
             None
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_proposals_survive_writes_that_predate_them() {
+        let dir = std::env::temp_dir().join(format!("orx-store-proposal-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        // v0.2.28's insert names the columns it knew: the proposal reads as unknown.
+        store
+            .conn
+            .execute(
+                "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled,
+                     baseline_branch, repo_path, run_command, paper_id, created_at, updated_at, icon_json)
+                 VALUES ('old', 'Old', 'old', '', '', 0, 'main', '/home/me/old', NULL, NULL, 1, 1, NULL)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_local_project("old").unwrap().unwrap().proposal,
+            None
+        );
+
+        let promoted = LocalProject {
+            name: "Probes".into(),
+            repo_path: "/home/me/probes".into(),
+            proposal: Some("toolu_create".into()),
+            ..store.get_local_project("old").unwrap().unwrap()
+        };
+        store.promote_local_project(&promoted).unwrap();
+        let edit = LocalProject {
+            name: "Renamed".into(),
+            ..promoted.clone()
+        };
+        write_whole_project_row(&store, &edit).unwrap();
+        let read = store.get_local_project("old").unwrap().unwrap();
+        assert_eq!(read.name, "Renamed");
+        assert_eq!(read.proposal.as_deref(), Some("toolu_create"));
+
+        // A move v0.2.28 queues is a new request, so it names no proposal.
+        store
+            .set_chat_project_move(
+                "chat",
+                "Probes",
+                "/home/me/probes",
+                Some("toolu_create"),
+                None,
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO chat_project_moves (session_id, name, path, requested_at)
+                 VALUES ('chat', 'Other', '/home/me/other', 2)",
+                [],
+            )
+            .unwrap();
+        let waiting = store.chat_project_move("chat").unwrap().unwrap();
+        assert_eq!((waiting.name.as_str(), waiting.proposal), ("Other", None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13153,6 +14065,7 @@ pub(crate) mod tests {
                 run_command: None,
                 paper_id: None,
                 icon: None,
+                proposal: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -13347,6 +14260,7 @@ pub(crate) mod tests {
             client_turn_id: client_turn_id.into(),
             request_hash: "hash-a".into(),
             prepared_input: "prepared".into(),
+            flag_input: None,
             settings_json: "{}".into(),
             state: "preparing".into(),
             delivery_state: "not_sent".into(),
@@ -14270,6 +15184,7 @@ pub(crate) mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -15701,6 +16616,7 @@ pub(crate) mod tests {
                     run_command: None,
                     paper_id: None,
                     icon: None,
+                    proposal: None,
                     created_at: 1,
                     updated_at: 1,
                 })
@@ -15819,6 +16735,7 @@ pub(crate) mod tests {
                 run_command: None,
                 paper_id: None,
                 icon: None,
+                proposal: None,
                 created_at: 1,
                 updated_at: 1,
             })

@@ -108,7 +108,12 @@ impl Api {
             .project_id;
         let admission = (self.admit)(&project)?;
         args.forwarded = true;
-        crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
+        crate::local::apply_compute_default(
+            &self.store(),
+            &project,
+            &mut args.backend,
+            &mut args.flavor,
+        )?;
         args.backend.get_or_insert_with(|| "local".into());
         super::require_caller_settings(&args, &super::absolute_config_dir()).await?;
         self.commands.run(args, admission).await
@@ -809,12 +814,15 @@ async fn choose(
         crate::store::Chosen::Recorded => {}
     }
     let store = api.store();
-    notices_queued(
-        choices
-            .iter()
-            .flat_map(|choice| choice.wakes.iter().map(|(chat, _)| chat.clone()))
-            .collect(),
-    );
+    let woken: Vec<String> = choices
+        .iter()
+        .flat_map(|choice| choice.wakes.iter().map(|(chat, _)| chat.clone()))
+        .collect();
+    // Asking a chat's agent about a flag resumes a chat the user stopped.
+    for chat in &woken {
+        api.chat.stopped.lock().unwrap().remove(chat);
+    }
+    notices_queued(woken);
     for touched in &touched {
         let Some(touched) = &store.get_run(&touched.id).map_err(failed)? else {
             continue;

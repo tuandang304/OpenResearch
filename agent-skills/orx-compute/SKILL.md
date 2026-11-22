@@ -62,8 +62,7 @@ change the configured backend or authorize bypassing the launch contract.
   for editing, Git, orchestration, and lightweight checks; direct jobs are
   untracked and may run code other than the recorded commit.
 - **Keep the run command fixed.** Set it once on the baseline and vary code or
-  configuration on child branches. If none exists, use `orx project edit
-  <projectId> --run-command '<cmd>'` before launching.
+  configuration on child branches. If none exists, use `orx project edit --run-command '<cmd>'` before launching.
 - **Commit before launching.** Every backend runs the recorded commit's
   immutable source snapshot. Uncommitted files are excluded; no backend needs a
   GitHub push.
@@ -98,10 +97,10 @@ change the configured backend or authorize bypassing the launch contract.
 
 ## Resolve the backend, then read one guide
 
-The session playbook states the configured default. A bare `orx exp run
+The session playbook states this project's default. A bare `orx exp run
 <expId>` uses it. Use another backend only when the user names one or the
-playbook says compute routing is on; a connected credential alone is not a
-signal to switch.
+playbook says compute routing is on; a connected credential is not a signal to
+switch.
 
 ## Route runs across providers
 
@@ -183,7 +182,7 @@ can post an interim result by appending a line to
 `$ORX_NOTIFY_FILE` (`>>`) when set; it arrives at most once per run per 10
 minutes, with later lines coalesced.
 
-When a result message arrives, read `orx runs <projectId>` and reconcile every
+When a result message arrives, read `orx runs` and reconcile every
 newly terminal run, including runs that finished while you were analyzing an
 earlier result. Read the file located by `orx logs <runId>` and compare metrics
 before deciding whether to repair, refill a slot, promote a result, or stop.

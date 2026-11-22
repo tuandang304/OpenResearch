@@ -303,6 +303,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     listProjectsQuery,
     getUiStateQuery,
     listExperimentsQuery,
+    getProjectSettingsQuery,
     listRunsQuery,
     getArtifactsQuery,
     getChatMessagesQuery,
@@ -398,6 +399,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const startupError = failedStartupItems.length
     ? m.app_startup_load_failed({ items: new Intl.ListFormat(locale).format(failedStartupItems) })
     : null;
+  const projectSettingsQuery = useQuery(getProjectSettingsQuery(projectId));
+  const projectSettings = projectSettingsQuery.data;
+  // "New chat with…" names the agent its draft starts with, over the project's.
+  const [draftAgent, setDraftAgent] = useState<{ projectId: string; agent: AgentSelection } | null>(null);
+  useEffect(() => { if (activeSessionId) setDraftAgent(null); }, [activeSessionId]);
+  const chosenDraftAgent = draftAgent?.projectId === projectId ? draftAgent.agent : null;
   const experimentsQuery = useQuery(listExperimentsQuery(projectId));
   const experiments = experimentsQuery.data ?? [];
   const experimentDataReady = !experimentsQuery.isPending;
@@ -818,12 +825,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (firstClose) captureUiEvent({ name: "demo_welcome_choice", choice });
     if (choice === "explore_demo") setComposerFocusNonce((n) => n + 1);
   }, []);
-  const openNewProject = () => showCustomDialog({
+  /** `importDraft` marks the form opened from a new project's composer, whose unsent text carries over. */
+  const openNewProject = (importDraft?: string) => showCustomDialog({
     component: NewProjectDialog,
     props: {
       preferredAgent: uiState?.preferredAgent ?? null,
       remote: runtime.kind === "ssh",
-      onCreated: onProjectCreated,
+      importing: importDraft !== undefined,
+      onCreated: (project, publicationError) => {
+        if (importDraft?.trim()) workspace.composers.seedComposer(project.id, importDraft);
+        onProjectCreated(project, publicationError);
+      },
     },
     onConfirm: () => {},
     onCancel: "close",
@@ -2023,7 +2035,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 if (railTemporarilyHidden) closePanel();
               }
             }}
-            onNewProject={() => { setMobileRailOpen(false); openNewProject(); }}
+            onImportProject={(draft) => { setMobileRailOpen(false); openNewProject(draft); }}
             mainView={mainView}
             onSelectMainView={(view) => { setMobileRailOpen(false); selectMainView(view); }}
             onOpenFile={openChatFile}
@@ -2046,9 +2058,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             runtime={runtime}
             activeSessionId={activeSessionId}
             onActiveSessionChange={(...args) => { setMobileRailOpen(false); onActiveSessionChange(...args); }}
-            preferredAgent={uiState.preferredAgent}
+            preferredAgent={chosenDraftAgent ?? (projectSettingsQuery.isSuccess ? projectSettings?.agent ?? uiState.preferredAgent : null)}
             onPreferredAgentChange={persistPreferredAgent}
-            preferredAutonomy={uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
+            onStartHarnessDraft={(agent) => { setDraftAgent({ projectId, agent }); onActiveSessionChange(null, { projectId }); }}
+            preferredAutonomy={projectSettings?.autonomy ?? uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
             onPreferredAutonomyChange={persistPreferredAutonomy}
           >
             {mainView !== "chat" ? (
@@ -2520,7 +2533,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         if (sessionId === null && deleted) forgetSideTab(sideTab);
                         else onActiveSessionChange(sessionId, options);
                       }}
-                      onStartHarnessDraft={() => onActiveSessionChange(null, { projectId })}
+                      onStartHarnessDraft={(agent) => { setDraftAgent({ projectId, agent }); onActiveSessionChange(null, { projectId }); }}
                       preferredAgent={sideTab.sessionId === null ? sideDraftAgent : uiState.preferredAgent}
                       onPreferredAgentChange={persistPreferredAgent}
                       preferredAutonomy={sideTab.sessionId === null ? sideParentSession?.autonomy ?? DEFAULT_AUTONOMY : uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}

@@ -393,7 +393,9 @@ fn availability(fold: &Fold, life: &Lifecycle, now: i64) -> (&'static str, Optio
 pub(crate) fn terminal_signal_note(store: &Store, run: &str) -> Result<Option<String>> {
     let status = super::adapters::signals::read_availability(store.data_dir(), run)?;
     if let Some(reason) = status.as_ref().and_then(|value| value["reason"].as_str()) {
-        return Ok(Some(reason.to_owned()));
+        return Ok(Some(crate::store::RunNotice::terminal_signal_details(
+            run, reason,
+        )));
     }
     Ok(store
         .signal_collection_pending(run)?
@@ -625,8 +627,8 @@ fn first_work_stage(snapshot: &Snapshot, names: &[&str], planned: bool) -> Optio
             .phases
             .iter()
             .find(|phase| {
-                phase.done.is_some()
-                    && (!phase.name.is_empty() || !planned && phase.source == "detected")
+                phase.has_reported_count()
+                    || !planned && phase.source == "detected" && phase.done.is_some()
             })
             .map(|phase| phase.occurrence)
     });
@@ -1443,10 +1445,16 @@ fn evaluate(
         "signals": view["signals"],
         "estimate": summary_estimate,
         "limitEndsAt": life.ends_at(),
-        "flag": open.map(|flag| json!({
-            "id": flag["id"], "state": flag["state"], "template": flag["template"],
-            "text": super::flags::sentence(flag), "bindings": flag["bindings"],
-        })),
+        "flag": open.map(|flag| {
+            let mut summary = json!({
+                "id": flag["id"], "state": flag["state"], "template": flag["template"],
+                "text": super::flags::sentence(flag), "bindings": flag["bindings"],
+            });
+            if let Some(handback) = flag.get("handback") {
+                summary["handback"] = handback.clone();
+            }
+            summary
+        }),
 
         "setup": setup,
         "generation": generation,
@@ -1535,6 +1543,9 @@ fn evaluate(
         "rules": rules.iter().map(super::rules::Rule::shown).collect::<Vec<_>>(),
         "statusText": text,
     });
+    if !life.live() && fold.status["state"] == "incomplete" {
+        body["availability"]["collectionIncomplete"] = json!(true);
+    }
     if !snapshot.is_some_and(|s| s.phases.iter().any(|p| !p.name.is_empty())) {
         if let Some(blocks) = body["view"]["blocks"].as_array_mut() {
             for block in blocks.iter_mut().filter_map(Value::as_object_mut) {
@@ -1989,7 +2000,9 @@ pub(crate) fn current(store: &Store, run: &StoredRun) -> Result<Option<Arc<Proje
             Some("flag") => super::flags::read(store, run).is_ok_and(|flags| {
                 let saved = &published.summary["flag"];
                 super::flags::open(&flags).is_some_and(|flag| {
-                    flag["id"] == saved["id"] && flag["state"] == saved["state"]
+                    flag["id"] == saved["id"]
+                        && flag["state"] == saved["state"]
+                        && flag["handback"] == saved["handback"]
                 })
             }),
             _ => published.summary["tone"] == tone(ended),
@@ -3666,6 +3679,7 @@ mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -4679,6 +4693,29 @@ mod tests {
         assert_eq!(body["availability"]["state"], "live");
         assert!(body["latest"]["loss"].is_number());
         assert!(!body["statusText"].as_str().unwrap().contains("final log"));
+    }
+
+    #[test]
+    fn incomplete_collection_is_exposed_only_for_an_ended_run() {
+        for phase in ["running", "lost"] {
+            let f = Fixture::new("orx-monitor-incomplete-collection");
+            let run = f.run(phase, local());
+            f.signals(&folded(&declared(0..=2, 4)));
+            super::super::adapters::signals::settle_incomplete(
+                f.store.data_dir(),
+                &run.id,
+                "The rental was deleted",
+            )
+            .unwrap();
+
+            let (_, page) = monitor(&f.store, &run).unwrap();
+            assert_eq!(page["availability"]["state"], "live");
+            assert_eq!(
+                page["availability"].get("collectionIncomplete"),
+                (phase == "lost").then_some(&Value::Bool(true))
+            );
+            assert_eq!(page["progress"]["done"], 20.0);
+        }
     }
 
     #[test]
@@ -6804,10 +6841,38 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_step_count_ends_setup_before_any_metrics() {
+        let f = Fixture::new("orx-monitor-bare-count");
+        let run = f.run("running", local());
+        let lines = reports(&[r#"{"of":100}"#, r#"{"step":10,"of":100,"spend":1,"t":10}"#]);
+        f.collect(&folded(&lines[..1]));
+        let (waiting, _) = monitor_at(&f, &run, T0);
+        assert!(waiting["setup"].is_object());
+
+        f.collect(&folded(&lines));
+        let (working, _) = monitor_at(&f, &run, T0 + 1_000);
+        let summary = current(&f.store, &run).unwrap().unwrap();
+        assert!(working["latest"].as_object().unwrap().is_empty());
+        assert_eq!(working["setup"], Value::Null);
+        assert_eq!(summary.summary()["setup"], working["setup"]);
+        assert_eq!(working["stageOrder"]["first"], 0);
+        assert_eq!(working["progress"]["done"], 10.0);
+        mentions(
+            working["statusText"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+            &["running", "step 10 of 100"],
+        );
+    }
+
+    #[test]
     fn setup_stays_ended_when_the_first_counted_stage_leaves_the_checkpoint() {
         let f = Fixture::new("orx-monitor-omitted-count");
         let run = f.run("running", local());
-        f.collect(&folded(&reports(&[r#"{"phase":"train","step":1}"#])));
+        f.collect(&folded(&reports(&[r#"{"step":10,"of":100}"#])));
         let (before, _) = monitor_at(&f, &run, T0);
         assert_eq!(before["setup"], Value::Null);
 
@@ -8106,13 +8171,41 @@ mod tests {
             "agent_looking"
         );
 
-        f.store
-            .mark_run_notice_batch_delivered(chat, turn, T0)
-            .unwrap();
         f.store.complete_chat_turn(turn).unwrap();
         watch(&f.store, None, watched, None).unwrap();
         let after = f.store.run_monitor_state(&run.id).unwrap().unwrap();
         assert_eq!(after["published"]["summary"]["flag"]["state"], "waking");
+    }
+
+    #[test]
+    fn a_finished_runs_waiting_summary_updates_after_an_ask_finishes() {
+        let f = Fixture::new("orx-ended-ask-handback");
+        let run = f.run("done", local());
+        let chat = "reviewer";
+        f.store
+            .put_chat_session(chat, "claude-code", Some("copilot"));
+        f.store.subscribe_run(&run.id, chat, T0).unwrap();
+        let body = json!({"id": "f1", "source": "look", "text": "Loss rose."});
+        let flag = super::super::flags::new_flag(&f.store, &run, body.clone(), true).unwrap();
+        f.store.raise_flags(&[flag], T0).unwrap();
+        let before = advance(&f.store, &run, T0).unwrap();
+        assert_eq!(before.summary()["flag"]["state"], "waiting");
+
+        let ask = crate::store::FlagChoice {
+            run_id: run.id.clone(),
+            body: json!({"flagId": "f1", "c": "ask", "by": "user", "requestId": "first"}),
+            wakes: vec![(chat.into(), super::super::flags::wake(&run, &body, true))],
+        };
+        f.store.record_flag_choices(&[ask], None, T0 + 1).unwrap();
+        let batch = f.store.run_notice_batch_at(chat, T0 + 1).unwrap();
+        let turn = &batch[0].client_turn_id;
+        f.store.put_chat_turn(chat, turn, "running", T0 + 1);
+        assert!(f.store.complete_chat_turn(turn).unwrap());
+
+        let after = current(&f.store, &run).unwrap().unwrap();
+        let ask = f.store.run_flag_events(&run.id).unwrap().pop().unwrap();
+        assert_eq!(after.summary()["flag"]["state"], "waiting");
+        assert_eq!(after.summary()["flag"]["handback"], ask.seq);
     }
 
     #[test]
@@ -8143,14 +8236,7 @@ mod tests {
             .unwrap()
             .cancel_accepted_at
             .is_none());
-        let notices = f.store.run_notices_for_tests("r1");
-        assert_eq!(
-            notices.len(),
-            1,
-            "only the Agentic chat is woken: {notices:?}"
-        );
-        let (chat, kind, body) = &notices[0];
-        assert_eq!((chat.as_str(), kind.as_str()), ("chat-1", "watch_flag"));
+        assert_eq!(f.store.pending_run_notice_sessions().unwrap(), ["chat-1"]);
         let run = f.store.get_run("r1").unwrap().unwrap();
         let flags = super::super::flags::read(&f.store, &run).unwrap();
         assert_eq!(flags.len(), 1);
@@ -8159,6 +8245,18 @@ mod tests {
             (flag["source"].as_str(), flag["rule"].as_str()),
             (Some("rule"), Some("eval-zero"))
         );
+        let summary = advance(&f.store, &run, T0 + 3_000)
+            .unwrap()
+            .summary()
+            .clone();
+        assert_eq!(summary["tone"], "flag");
+        assert_eq!(summary["flag"]["id"], id);
+        assert_eq!(summary["flag"]["state"], "raised");
+
+        let notices = f.store.run_notice_batch("chat-1").unwrap();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].run_id, "r1");
+        let body = &notices[0].body;
         let at = clock_text(flag["at"].as_i64().unwrap());
         mentions(
             body,
@@ -8180,21 +8278,10 @@ mod tests {
                 "orx logs r1",
             ],
         );
-        for (action, reason) in [
-            ("stop", "your confirmed reason"),
-            ("keep", "…"),
-            ("ask", "…"),
-        ] {
-            let command = format!("orx exp flag r1 --flag {id} --{action} --reason '{reason}'");
+        for action in ["stop", "keep", "ask"] {
+            let command = format!("orx exp flag r1 --flag {id} --{action} --reason");
             mentions(body, &[&command]);
         }
-        let summary = advance(&f.store, &run, T0 + 3_000)
-            .unwrap()
-            .summary()
-            .clone();
-        assert_eq!(summary["tone"], "flag");
-        assert_eq!(summary["flag"]["id"], id);
-        assert_eq!(summary["flag"]["state"], "raised");
     }
 
     #[test]

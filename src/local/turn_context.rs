@@ -205,6 +205,7 @@ mod tests {
             recovered_by_turn_id: None,
             created_at: 0,
             updated_at: 0,
+            flag_input: None,
         }
     }
 

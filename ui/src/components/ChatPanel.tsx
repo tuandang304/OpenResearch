@@ -32,16 +32,17 @@ import { chatSearchRanges } from "../chatSearch";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { LibraryPicker } from "./LibraryPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
-import { NoProjectGroupHeader, PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
+import { PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
 import { mutCreateScratchProject } from "../queries/projects";
+import { mutSetChatLitSources } from "../queries/settings";
 import { ProjectIconTile } from "./ProjectIcon";
-import { SessionHoverCard } from "./SessionHoverCard";
+import { CARD_FADE_MS, SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
 import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
-import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
+import { DONE_PREVIEW_HEIGHT, UNNAMED_GROUP, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import {
@@ -82,7 +83,7 @@ import {
   paperToken,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
-import { formatForDisplay, matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
+import { matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
@@ -108,6 +109,7 @@ import {
   FileText,
   FlaskConical,
   FolderPlus,
+  Plus,
   SquarePen,
   CircleCheck,
   Globe,
@@ -213,6 +215,9 @@ import {
 } from "../chatRecovery";
 import {
   attachmentToken,
+  isPictureType,
+  PICTURE_FILE,
+  withoutAttachmentTokens,
   citedAttachments,
   composerStashContent,
   mergeFailedComposer,
@@ -234,10 +239,13 @@ import {
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { FileScopeContext } from "./FileReference";
+import { FILE_CARD_CLASS, FileCardContent } from "./FileTypeIcon";
 import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
 import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMeta } from "../researchActivity";
-import { LitSourcesList } from "./LitSourcesPicker";
+import { ChatLitSources, useChatLitSources } from "./LitSourcesPicker";
+import type { LitSource } from "./LitSourceLogo";
 import { ChatImageScope, Md } from "./Md";
+import { ImageMenu } from "./ImageMenu";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
@@ -3485,15 +3493,16 @@ function PromptCard({
   const { id: elementId } = useContext(WorkspaceDomContext);
   const p = part.prompt;
   const [submitting, setSubmitting] = useState(false);
+  const allowRef = useRef<HTMLButtonElement>(null);
   if (!p) return null;
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
   const done = !onRespond || submitting;
 
   const respond = async (answer: Omit<PromptAnswer, "promptId">) => {
-    if (!onRespond || submitting) return;
+    if (!onRespond || submitting) return false;
     setSubmitting(true);
     try {
-      await onRespond({ promptId: part.id, ...answer });
+      return await onRespond({ promptId: part.id, ...answer });
     } finally {
       setSubmitting(false);
     }
@@ -3665,9 +3674,15 @@ function PromptCard({
                 {m.chat_panel_deny()}
               </Button>
               <Button
+                ref={allowRef}
                 size="small"
                 variant="primary"
-                onClick={() => respond({ approve: true })}
+                // A declined confirmation remounts this button after its dialog let focus go.
+                onClick={() => void respond({ approve: true }).then((delivered) => {
+                  if (!delivered) requestAnimationFrame(() => {
+                    if (document.activeElement === document.body) allowRef.current?.focus();
+                  });
+                })}
               >
                 {m.chat_panel_allow()}
               </Button>
@@ -3699,8 +3714,8 @@ function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | 
  * path — composer keystrokes re-render ChatPanel itself, and the transcript
  * memo stops those from touching the rows at all. */
 /** Resolve an `image` (attachment) part into what the transcript renders: a
- * source URL, whether it's a PDF (file chip vs inline image), and a name. */
-function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isPdf: boolean; name: string } {
+ * source URL, whether it's an image (inline image vs file chip), and a name. */
+function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isImage: boolean; name: string } {
   const raw = p.text ?? "";
   const src = raw.startsWith("data:") ? raw : chatAttachmentUrl(raw);
   // Server file names embed the original after a `__` marker; optimistic parts
@@ -3711,9 +3726,10 @@ function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => st
       ? raw.slice(raw.indexOf("__") + 2)
       : raw;
   const name = p.name || derived || "attachment";
-  const isPdf =
-    raw.startsWith("data:application/pdf") || /\.pdf$/i.test(name) || /\.pdf$/i.test(raw);
-  return { src, isPdf, name };
+  const isImage = raw.startsWith("data:")
+    ? isPictureType(raw.slice("data:".length, raw.indexOf(";")))
+    : PICTURE_FILE.test(raw);
+  return { src, isImage, name };
 }
 
 /** Where a chat moved to another agent, its model named as the picker names it. */
@@ -3934,8 +3950,10 @@ export const Message = memo(function Message({
     const attachments = message.parts
       .filter((p) => p.type === "image" && p.text)
       .map((part) => attachmentPartView(part, chatAttachmentUrl));
-    const images = attachments.filter((a) => !a.isPdf);
-    const files = attachments.filter((a) => a.isPdf);
+    // The agent reads where each attachment sits; the bubble shows the attachments themselves instead.
+    const shownText = attachments.length > 0 ? withoutAttachmentTokens(text) : text;
+    const images = attachments.filter((a) => a.isImage);
+    const files = attachments.filter((a) => !a.isImage);
     const annotations: ComposerAnnotation[] = message.parts
       .filter((part) => part.type === "annotation" && part.text)
       .map((part) => ({
@@ -4001,22 +4019,23 @@ export const Message = memo(function Message({
         )}
         <div dir="auto" className={`msg-user max-w-full ${USER_MESSAGE_BUBBLE_CLASS_NAME} [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border`}>
           {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
-          <MessageWithChips text={text} isCommand={isCommand} />
+          {shownText && <MessageWithChips text={shownText} isCommand={isCommand} />}
           {images.length > 0 && (
-            <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
+            <div className="msg-images flex flex-wrap gap-1.5 mt-2 first:mt-0 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
               {images.map((a, i) => (
-                <a key={i} href={a.src} target="_blank" rel="noreferrer">
-                  <img src={a.src} alt={m.chat_attachment_alt()} />
-                </a>
+                <ImageMenu key={i} src={a.src} name={a.name}>
+                  <a href={a.src} target="_blank" rel="noreferrer">
+                    <img src={a.src} alt={a.name} />
+                  </a>
+                </ImageMenu>
               ))}
             </div>
           )}
           {files.length > 0 && (
-            <div className="msg-files flex flex-wrap gap-1.5 mt-2">
+            <div className="msg-files flex flex-wrap gap-1.5 mt-2 first:mt-0">
               {files.map((a, i) => (
-                <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-border-hover-strong [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
-                  <FileText size={16} />
-                  <span>{a.name}</span>
+                <a key={i} className={`msg-file no-underline [&:hover]:border-border-hover-strong ${FILE_CARD_CLASS}`} title={a.name} href={a.src} target="_blank" rel="noreferrer">
+                  <FileCardContent name={a.name} />
                 </a>
               ))}
             </div>
@@ -4965,8 +4984,10 @@ const Transcript = memo(function Transcript({
     return rows;
   }, [visibleMessages, delegates]);
   const proposalsByRow = useMemo(() => new Map(visibleMessages.flatMap((group, row) => {
-    const proposals = group.flatMap((message) => message.parts.flatMap((part) =>
-      part.type === "tool" ? toolActivity(part).projectProposal ?? [] : []));
+    const proposals = group.flatMap((message) => message.parts.flatMap((part) => {
+      const proposal = part.type === "tool" ? toolActivity(part).projectProposal : undefined;
+      return proposal ? [{ id: part.id, proposal }] : [];
+    }));
     return proposals.length ? [[row, proposals] as const] : [];
   })), [visibleMessages]);
   // forkPositions indexes only non-local ids, so a local bearer would page as 0/1.
@@ -5174,7 +5195,8 @@ const Transcript = memo(function Transcript({
   useLayoutEffect(() => {
     const scroll = scrollRef.current;
     const row = focusedRow ? scroll?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focusedRow)}"]`) : null;
-    if (!scroll || !row || row.contains(document.activeElement)) return;
+    // Focus in a row's portaled menu or viewer still marks the row, which keeps it mounted, but stays where it is.
+    if (!scroll || !row || row.contains(document.activeElement) || !scroll.contains(document.activeElement)) return;
     row.focus({ preventScroll: true });
     const viewport = scroll.getBoundingClientRect();
     const bounds = row.getBoundingClientRect();
@@ -5313,8 +5335,8 @@ const Transcript = memo(function Transcript({
           )}
           {proposalsByRow.has(item.index) && (
             <div className="mt-3 flex flex-col gap-2">
-              {proposalsByRow.get(item.index)?.map((proposal, index) => (
-                <ProjectProposalCard key={index} proposal={proposal} proposedAt={visibleMessages[item.index][0].createdAt} project={project} session={session} />
+              {proposalsByRow.get(item.index)?.map(({ id, proposal }) => (
+                <ProjectProposalCard key={id} id={id} proposal={proposal} proposedAt={visibleMessages[item.index][0].createdAt} project={project} session={session} />
               ))}
             </div>
           )}
@@ -5427,6 +5449,23 @@ function SidebarViewMenu({
 /** How long the reveal flag stays set: the 700ms sweep plus slack. After this
  * a remount (scrolling the rail, switching sessions) shows a static title. */
 const TITLE_REVEAL_CLEAR_MS = 1000;
+/** How long a session card holds for a pointer that has stopped on its way across the rows beside its own. */
+const CARD_AIM_MS = 150;
+
+type Point = { x: number; y: number };
+
+/** Shared by the sidebar's rows: until when a card opens at once, and the pointer on its way to an open one. */
+interface CardHover {
+  warmUntil: number;
+  aim: { owner: string; until: number; stop: () => void } | null;
+}
+
+/** Whether `p` lies in the triangle `a`, `b`, `c`. */
+function inTriangle(p: Point, a: Point, b: Point, c: Point): boolean {
+  const side = (u: Point, v: Point) => (v.x - u.x) * (p.y - u.y) - (v.y - u.y) * (p.x - u.x);
+  const signs = [side(a, b), side(b, c), side(c, a)];
+  return !(signs.some((sign) => sign < 0) && signs.some((sign) => sign > 0));
+}
 
 /** A session title that fades in behind a left-to-right mask when a
  * harness-generated one replaces the first-line placeholder. `animate` is false
@@ -5511,7 +5550,7 @@ function SessionRow({
   project,
   projectName,
   harnessLogo,
-  cardWarmUntil,
+  cardHover,
 }: {
   session: ChatSession;
   project: Project;
@@ -5543,8 +5582,9 @@ function SessionRow({
   modelName: string | null;
   projectName?: string;
   harnessLogo?: string;
-  cardWarmUntil: React.RefObject<number>;
+  cardHover: React.RefObject<CardHover>;
 }) {
+  const workspace = useWorkspace();
   const ref = useRef<HTMLDivElement>(null);
   const inbox = variant === "inbox";
   const plain = variant === "list";
@@ -5565,6 +5605,9 @@ function SessionRow({
   const cardRef = useRef<HTMLDivElement>(null);
   const cardId = useId();
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  /** How the card moves: fading in, appearing at once as the pointer slides over from a neighbour's, or fading out. */
+  const [cardMotion, setCardMotion] = useState<"enter" | "warm" | "leave">("enter");
+  const cardShown = anchor !== null && cardMotion !== "leave";
   const openTimer = useRef<number | undefined>(undefined);
   const closeTimer = useRef<number | undefined>(undefined);
   const pointerInside = useRef(false);
@@ -5587,20 +5630,71 @@ function SessionRow({
     window.clearTimeout(closeTimer.current);
     setAnchor(null);
   }
-  function showCard() {
-    if (!editing && !open && !dismissed.current) setAnchor(ref.current?.getBoundingClientRect() ?? null);
+  function showCard(motion: "enter" | "warm" = "enter") {
+    if (editing || open || dismissed.current) return;
+    window.clearTimeout(closeTimer.current);
+    setCardMotion(motion);
+    setAnchor(ref.current?.getBoundingClientRect() ?? null);
   }
-  function scheduleClose() {
+  function fadeCard() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    setCardMotion("leave");
+    closeTimer.current = window.setTimeout(() => setAnchor(null), CARD_FADE_MS);
+  }
+  /** Whether keyboard focus is on the row or in its card, which holds the card open whatever the pointer does. */
+  function keyboardHeld() {
+    const focused = document.activeElement;
+    return Boolean(focused?.matches(":focus-visible") && (focused === ref.current || cardRef.current?.contains(focused)));
+  }
+  /** Fades the card once the pointer has had time to cross onto it, unless the keyboard holds it open. */
+  function scheduleClose(grace = 150) {
     window.clearTimeout(openTimer.current);
     window.clearTimeout(closeTimer.current);
     closeTimer.current = window.setTimeout(() => {
-      const focused = document.activeElement;
-      if (!pointerInside.current && focused !== ref.current && !cardRef.current?.contains(focused)) setAnchor(null);
-    }, 150);
+      if (!pointerInside.current && !keyboardHeld()) fadeCard();
+    }, grace);
+  }
+  /**
+   * Holds the card while the pointer stays in the triangle between where it left the row and the card's near edge,
+   * so a diagonal path over the rows beside this one reaches the card instead of opening theirs.
+   */
+  function aimAt(from: Point, card: DOMRect) {
+    const edge: [Point, Point] = from.x <= card.left ? [{ x: card.left, y: card.top }, { x: card.left, y: card.bottom }]
+      : from.x >= card.right ? [{ x: card.right, y: card.top }, { x: card.right, y: card.bottom }]
+      : from.y <= card.top ? [{ x: card.left, y: card.top }, { x: card.right, y: card.top }]
+      : [{ x: card.left, y: card.bottom }, { x: card.right, y: card.bottom }];
+    const aim = {
+      owner: session.id,
+      until: 0,
+      stop: () => {
+        document.removeEventListener("mousemove", move);
+        if (cardHover.current.aim === aim) cardHover.current.aim = null;
+      },
+    };
+    const hold = () => {
+      aim.until = Date.now() + CARD_AIM_MS;
+      scheduleClose(CARD_AIM_MS);
+    };
+    const move = (event: MouseEvent) => {
+      if (inTriangle({ x: event.clientX, y: event.clientY }, from, ...edge)) return hold();
+      aim.stop();
+      if (keyboardHeld()) return;
+      if (event.target instanceof Element && event.target.closest(".session-row")) closeCard();
+      else fadeCard();
+    };
+    cardHover.current.aim?.stop();
+    cardHover.current.aim = aim;
+    document.addEventListener("mousemove", move);
+    hold();
+  }
+  function stopAim() {
+    if (cardHover.current.aim?.owner === session.id) cardHover.current.aim.stop();
   }
   useEffect(() => () => {
     window.clearTimeout(openTimer.current);
     window.clearTimeout(closeTimer.current);
+    stopAim();
   }, []);
   useEffect(() => {
     if (!anchor) return;
@@ -5681,33 +5775,46 @@ function SessionRow({
       tabIndex={0}
       data-sidebar-keyboard-row
       aria-label={sessionDescription}
-      aria-describedby={anchor ? cardId : undefined}
+      aria-describedby={cardShown ? cardId : undefined}
+      // The card is a portal inside this row, so React reports the pointer entering and leaving the two as one.
       onMouseEnter={() => {
+        stopAim();
         pointerInside.current = true;
         dismissed.current = false;
         window.clearTimeout(closeTimer.current);
         if (!editing && !open) {
-          if (Date.now() < cardWarmUntil.current) showCard();
+          // Read what the card shows while the pointer settles, so it opens whole instead of growing as it loads.
+          const { queryClient, queries } = workspace;
+          void queryClient.prefetchQuery(queries.getSessionExperimentsQuery(session.id));
+          for (const { run } of runs) if (run.monitor) void queryClient.prefetchQuery(queries.getRunMonitorQuery(run.id));
+          // While the pointer crosses this row on its way to another's card, this one waits for it to settle.
+          const settle = () => {
+            const wait = (cardHover.current.aim?.until ?? 0) - Date.now();
+            if (wait > 0) openTimer.current = window.setTimeout(settle, wait);
+            else showCard("warm");
+          };
+          if (cardHover.current.aim) settle();
+          else if (Date.now() < cardHover.current.warmUntil) showCard("warm");
           else openTimer.current = window.setTimeout(showCard, 350);
         }
       }}
       onMouseLeave={(event) => {
-        if (anchor) cardWarmUntil.current = Date.now() + 500;
+        const card = cardShown && cardRef.current?.getBoundingClientRect();
+        if (cardShown) cardHover.current.warmUntil = Date.now() + 500;
         pointerInside.current = false;
         dismissed.current = false;
-        if (event.relatedTarget instanceof Element && event.relatedTarget.closest(".session-row")) closeCard();
+        if (card) aimAt({ x: event.clientX, y: event.clientY }, card);
         else scheduleClose();
       }}
       onFocus={(event) => {
-        if (event.target === event.currentTarget && !editing && !open) {
-          showCard();
-        }
+        // A click focuses the row too; only the keyboard's focus opens the card.
+        if (event.target === event.currentTarget && event.currentTarget.matches(":focus-visible")) showCard();
       }}
       onBlur={(event) => {
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
         scheduleClose();
       }}
-      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${lead ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${lead ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${cardShown ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       onContextMenu={(e) => {
@@ -5729,7 +5836,7 @@ function SessionRow({
         // rename input are descendants, and preventDefault here would cancel
         // their activation.
         if (e.target !== e.currentTarget) return;
-        if (e.key === "Tab" && !e.shiftKey && anchor && cardRef.current) {
+        if (e.key === "Tab" && !e.shiftKey && cardShown && cardRef.current) {
           e.preventDefault();
           cardRef.current.focus();
         } else if (e.key === "Enter" || e.key === " ") {
@@ -5746,7 +5853,7 @@ function SessionRow({
         <ProjectIconTile project={project} size="sm" />
         {editing ? titleInput : (
           <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-            <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
+            <span className="inline-block align-top"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
           </span>
         )}
         {flagMark}
@@ -5771,7 +5878,7 @@ function SessionRow({
           <div className="flex items-center gap-2">
             {editing ? titleInput : (
               <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread || waiting ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-                <span className="inline-block"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
+                <span className="inline-block align-top"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
               </span>
             )}
             {flagMark}
@@ -5799,14 +5906,15 @@ function SessionRow({
           <div className={`${lead ? "mt-0.5" : ""} flex items-center gap-2 text-xs text-subtext`}>
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               <ProjectIconTile project={project} size="sm" />
-              {!project.scratch && <span className="truncate">{projectName}</span>}
+              {!project.unnamed && <span className="truncate">{projectName}</span>}
             </span>
             <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />
           </div>
         </div>
-      ) : (
+      ) : <>
+        {project.unnamed && <ProjectIconTile project={project} size="sm" />}
         <span ref={titleRef} className={`session-title ${attention ? "text-ink-amber" : ""}`} onDoubleClick={startEditing}>
-          <span className="inline-block">
+          <span className="inline-block align-top">
             <TitleReveal
               key={revealTitle ?? "static"}
               title={title}
@@ -5814,7 +5922,7 @@ function SessionRow({
             />
           </span>
         </span>
-      )}
+      </>}
       {plain && runMark === "running" && !editing && (
         <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
           <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
@@ -5850,15 +5958,14 @@ function SessionRow({
       {anchor && !open && !editing && (
         <SessionHoverCard
           session={session}
+          runs={runs}
+          motion={cardMotion}
           modelName={modelName}
-          projectName={projectName}
           harnessLogo={harnessLogo}
           anchor={anchor}
           cardId={cardId}
           cardRef={cardRef}
           container={ref.current?.closest(".mobile-rail-dialog") ?? document.body}
-          onEnter={() => { pointerInside.current = true; window.clearTimeout(closeTimer.current); }}
-          onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
           onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
           onReturnToRow={() => ref.current?.focus()}
           onContinue={() => {
@@ -5881,11 +5988,11 @@ function SessionRow({
           onSetArchived={() => onSetArchived(!session.archived)}
           onMarkBelowDone={onMarkBelowDone}
           onMoveToProject={onMoveToProject}
-          onProjectSettings={project.scratch ? undefined : onProjectSettings}
+          onProjectSettings={project.unnamed ? undefined : onProjectSettings}
           onDelete={onDelete}
         />
       )}
-      <EscapeScope enabled={!!anchor && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); closeCard(); }} />
+      <EscapeScope enabled={cardShown && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); fadeCard(); }} />
     </div>
   );
 }
@@ -6054,6 +6161,29 @@ const STARTER_TONES = [
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
+/** An empty picture or PDF would fail the agent's read, and can break its session. */
+const isEmptyMedia = (file: File) => file.size === 0 && (isPictureType(file.type) || file.type === "application/pdf");
+
+/** A file as a data URL; a picture is also decoded, so its chip shows at full size the moment it mounts. */
+function readAttachment(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const { result } = reader;
+      if (typeof result !== "string") return reject(new Error(`unexpected read result for ${file.name}`));
+      // An empty file reads as a bare `data:`; the send path needs the comma before its (empty) base64.
+      if (!result.includes(",")) return resolve(`data:${file.type || "application/octet-stream"};base64,`);
+      if (!isPictureType(file.type)) return resolve(result);
+      const preview = new Image();
+      preview.src = result;
+      // A failed decode still attaches; the chip shows whatever the browser can.
+      preview.decode().catch(() => {}).finally(() => resolve(result));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function ChatPanel({
   projectId,
   projectName,
@@ -6068,7 +6198,7 @@ export function ChatPanel({
   onCloseMobileRail,
   contentInert = false,
   onShowRail,
-  onNewProject,
+  onImportProject,
   mainView,
   onSelectMainView,
   onOpenFile,
@@ -6117,7 +6247,8 @@ export function ChatPanel({
   contentInert?: boolean;
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
-  onNewProject?: () => void;
+  /** Opens the form to start the project from a paper, a folder or an .orx file, keeping the unsent `draft`. */
+  onImportProject?: (draft: string) => void;
   /** Run a harness setup command (`path` is its setup route) in the right panel's terminal tab. */
   onRunSetup?: (command: string, path: string) => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
@@ -6177,7 +6308,8 @@ export function ChatPanel({
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
-  onStartHarnessDraft?: () => void;
+  /** Opens the main draft to start `agent`, which it starts with over the project's. */
+  onStartHarnessDraft?: (agent: ModelSelection) => void;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
   preferredAutonomy: Autonomy;
   onPreferredAutonomyChange: (autonomy: Autonomy) => void;
@@ -6265,7 +6397,7 @@ export function ChatPanel({
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [sidebarExpandedAll, setSidebarExpandedAll] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
-  const cardWarmUntil = useRef(0);
+  const cardHover = useRef<CardHover>({ warmUntil: 0, aim: null });
   const [railHeight, setRailHeight] = useState(0);
   const [focusedSidebarRow, setFocusedSidebarRow] = useState<string | null>(null);
   const [chatLimits, setChatLimits] = useState<Record<string, number>>({});
@@ -6282,26 +6414,20 @@ export function ChatPanel({
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
   const byRecency = (a: Project, b: Project) => Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt);
   const currentProject = sidebarProjects.find((project) => project.id === projectId);
-  // Each chat without a project has a scratch project of its own; the newest one stands for the group.
+  // A project nobody named holds one chat, so it lists as a plain chat above the projects, newest first.
   const chatCounts = new Map(projectActivity.map((activity) => [activity.projectId, activity.totalAgents]));
-  const scratchProjects = sidebarProjects.filter((project) => project.scratch && (project.id === projectId || chatCounts.get(project.id))).sort(byRecency);
-  const scratchGroup = currentProject?.scratch ? currentProject : scratchProjects[0];
-  // Chats without a project stay on top, so opening one never reshuffles the projects below.
-  const sortedProjects = [
-    ...(scratchGroup ? [scratchGroup] : []),
-    ...sidebarProjects.filter((project) => !project.scratch)
-      .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b)),
-  ];
+  const unnamedProjects = sidebarProjects.filter((project) => project.unnamed && (project.id === projectId || chatCounts.get(project.id))).sort(byRecency);
+  const sortedProjects = sidebarProjects.filter((project) => !project.unnamed)
+    .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b));
   const candidateLimit = sidebarGrouping !== "projects" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
   let shownProjects = sortedProjects.slice(0, candidateLimit);
-  const shownCurrent = currentProject?.scratch ? scratchGroup : currentProject;
-  if (shownCurrent && !shownProjects.includes(shownCurrent)) {
-    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), shownCurrent];
+  if (currentProject && !currentProject.unnamed && !shownProjects.includes(currentProject)) {
+    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), currentProject];
   }
-  const scratchLimit = chatLimits.scratch ?? 6;
-  const queriedScratch = scratchProjects.slice(0, scratchLimit);
-  if (currentProject?.scratch && !queriedScratch.includes(currentProject)) queriedScratch.push(currentProject);
-  const queriedProjects = sidebarGrouping === "projects" ? shownProjects.flatMap((project) => project.scratch ? queriedScratch : [project]) : [];
+  const unnamedLimit = chatLimits[UNNAMED_GROUP] ?? 6;
+  const shownUnnamed = unnamedProjects.slice(0, unnamedLimit);
+  if (currentProject?.unnamed && !shownUnnamed.includes(currentProject)) shownUnnamed.push(currentProject);
+  const queriedProjects = sidebarGrouping === "projects" ? [...shownUnnamed, ...shownProjects] : [];
   const projectSessionsQueries = useQueries({
     queries: queriedProjects.map((project) => ({
       ...listChatSessionsQuery(project.id),
@@ -6497,14 +6623,16 @@ export function ChatPanel({
   const modelName = useModelName();
   const [selection, setSelection] = useState<ModelSelection | null>(preferredAgent);
   useEffect(() => setSelection(preferredAgent), [preferredAgent]);
+  // A new draft starts from the agent it was given, whatever an open chat was switched to.
+  useEffect(() => { if (activeId === null) setSelection(preferredAgent); }, [activeId]);
   // Unsent composer tweaks (model/mode/reasoning) for the *open* session — the
   // session's harness is fixed, so these override only its mutable settings and
   // are applied (and persisted server-side) on the next send. Cleared when the
   // active session changes. Distinct from `selection`, which is the sticky
   // global preference that seeds *new* sessions.
   const [sessionOverride, setSessionOverride] = useState<Partial<ModelSelection>>({});
-  const [sideDraftAutonomy, setSideDraftAutonomy] = useState<Autonomy | null>(null);
-  useEffect(() => setSideDraftAutonomy(null), [sideParentSessionId]);
+  const [draftAutonomy, setDraftAutonomy] = useState<Autonomy | null>(null);
+  useEffect(() => setDraftAutonomy(null), [sideParentSessionId, projectId]);
   const [recoveryOverrides, setRecoveryOverrides] = useState<
     Partial<ModelSelection> & { planMode?: boolean }
   >(EMPTY_RECOVERY_OVERRIDES);
@@ -6575,6 +6703,10 @@ export function ChatPanel({
   const connection = useRemoteConnection();
   const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
+  const [litDraft, setLitDraft] = useState<{ projectId: string; disabled: LitSource[] | null }>({ projectId, disabled: null });
+  const draftLitSources = litDraft.projectId === projectId ? litDraft.disabled : null;
+  const litSources = useChatLitSources(projectId, activeId, sideParentSessionId ?? null, draftLitSources, (disabled) => setLitDraft({ projectId, disabled }));
+  const sourcesLabel = litSources.sources?.differs ? m.lit_sources_changed_label() : m.chat_panel_data_sources();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
     setAnnotations((current) => [
       ...current,
@@ -6625,8 +6757,7 @@ export function ChatPanel({
   }
 
   /** Queue files (upload button, clipboard paste, or drag-drop) as composer
-   * attachments — images and PDFs, which the harness reads off disk by path —
-   * cited in the draft at the caret. */
+   * attachments, which the harness reads off disk by path, cited in the draft at the caret. */
   function addFiles(
     files: File[],
     target?: { scope: typeof composerScopeRef.current; stashKey: string },
@@ -6641,9 +6772,13 @@ export function ChatPanel({
     let total = cited.attachments.reduce((n, a) => n + a.size, 0);
     const scope = target?.scope ?? composerScopeRef.current;
     const attachmentStashKey = target?.stashKey ?? stashKey;
+    const accepted: File[] = [];
     for (const file of files) {
-      if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
-      if (noImageInputError && file.type.startsWith("image/")) {
+      if (isEmptyMedia(file)) {
+        setAttachError(m.chat_attachment_empty({ name: ltr(file.name) }));
+        continue;
+      }
+      if (noImageInputError && isPictureType(file.type)) {
         setImageRefusedFor(selectedModel?.id ?? null);
         continue;
       }
@@ -6656,17 +6791,25 @@ export function ChatPanel({
         continue;
       }
       total += file.size;
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (!isCurrentScope(sessionsOptions.queryKey)) return;
+      accepted.push(file);
+    }
+    // Read together, inserted in drop order once all are ready, so decoding images can't reorder them.
+    void Promise.allSettled(accepted.map(readAttachment)).then((results) => {
+      if (!isCurrentScope(sessionsOptions.queryKey)) return;
+      results.forEach((result, index) => {
+        const file = accepted[index];
+        if (result.status === "rejected") {
+          setAttachError(m.chat_attachment_unreadable({ name: ltr(file.name) }));
+          return;
+        }
         const attachment = {
           id: nextAttachmentId(),
-          dataUrl: reader.result as string,
-          mediaType: file.type,
+          dataUrl: result.value,
+          mediaType: file.type || "application/octet-stream",
           name: file.name,
           size: file.size,
         };
-        // The decode is async — if the composer moved on, the file belongs to
+        // The read is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
         if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId && composerScopeRef.current.mainView === scope.mainView) {
           setAttachments((cur) => [...cur, attachment]);
@@ -6679,23 +6822,89 @@ export function ChatPanel({
           draft: [stash.draft, attachmentToken(attachment)].filter(Boolean).join(" "),
           attachments: [...stash.attachments, attachment],
         });
-      };
-      reader.readAsDataURL(file);
-    }
+      });
+    });
   }
+
+  /** Attach a drop's files; a folder can't be read as one, so it gets its own message. */
+  function addDropped(transfer: DataTransfer) {
+    const files: File[] = [];
+    const folders: string[] = [];
+    for (const item of Array.from(transfer.items)) {
+      if (item.kind !== "file") continue;
+      // Not every webview implements entries; without one, a folder fails its read and says so.
+      const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+      const file = item.getAsFile();
+      if (entry?.isDirectory) folders.push(entry.name);
+      else if (file) files.push(file);
+    }
+    addFiles(files);
+    // After addFiles, so a size refusal from the same drop isn't hidden behind it.
+    if (folders.length > 0) setAttachError((current) => current ?? m.chat_attachment_folder({ name: ltr(folders[0]) }));
+  }
+
+  const dropFiles = useRef<(transfer: DataTransfer) => void>(() => {});
+  dropFiles.current = addDropped;
+  const acceptsDrops = useRef<() => boolean>(() => false);
+  acceptsDrops.current = () =>
+    !asking && connection === null && !contentInert && composerRef.current !== null
+    // A modal's backdrop has no dialog role, so check for an open modal rather than the target.
+    && document.querySelector('[role=dialog][aria-modal="true"], [role=alertdialog]') === null;
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  // A file dropped in this panel, or for the main chat anywhere outside a side chat or dialog, joins its composer.
+  useEffect(() => {
+    let depth = 0;
+    const carriesFiles = (e: DragEvent) => Boolean(e.dataTransfer?.types.includes("Files"));
+    const claims = (e: DragEvent) => {
+      if (!carriesFiles(e) || !acceptsDrops.current()) return false;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest("[role=dialog], [role=alertdialog]")) return false;
+      return (target?.closest("[data-side-chat]") != null) === embedded;
+    };
+    const dragenter = (e: DragEvent) => {
+      if (carriesFiles(e)) depth += 1;
+    };
+    const dragleave = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDraggingFiles(false);
+    };
+    const dragover = (e: DragEvent) => {
+      const claimed = claims(e);
+      setDraggingFiles(claimed);
+      if (!claimed || !e.dataTransfer) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    };
+    const drop = (e: DragEvent) => {
+      depth = 0;
+      setDraggingFiles(false);
+      if (!e.dataTransfer || e.defaultPrevented || !claims(e)) return;
+      e.preventDefault();
+      dropFiles.current(e.dataTransfer);
+    };
+    window.addEventListener("dragenter", dragenter);
+    window.addEventListener("dragleave", dragleave);
+    // On the document, so these run before the window-wide guard in main.tsx.
+    document.addEventListener("dragover", dragover);
+    document.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragenter", dragenter);
+      window.removeEventListener("dragleave", dragleave);
+      document.removeEventListener("dragover", dragover);
+      document.removeEventListener("drop", drop);
+    };
+  }, [embedded]);
 
   function onComposerPaste(e: ClipboardEvent) {
     const data = e.clipboardData;
     if (!data) return;
     const files = Array.from(data.items)
-      .filter(
-        (item) =>
-          item.kind === "file" &&
-          (item.type.startsWith("image/") || item.type === "application/pdf"),
-      )
+      .filter((item) => item.kind === "file")
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
-    const usable = files.filter((file) => file.size > 0);
+    // An empty picture or PDF is the clipboard's placeholder for one `readClipboardImage` can fetch.
+    const usable = files.filter((file) => !isEmptyMedia(file));
     if (usable.length > 0) {
       e.preventDefault();
       addFiles(usable);
@@ -6856,7 +7065,7 @@ export function ChatPanel({
     ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
     : null;
   const imageInputBlocked =
-    !!noImageInputError && cited.attachments.some((a) => a.mediaType.startsWith("image/"));
+    !!noImageInputError && cited.attachments.some((a) => isPictureType(a.mediaType));
   const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
   const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
   useEffect(() => setImageRefusedFor(null), [selectedModel?.id]);
@@ -6949,10 +7158,11 @@ export function ChatPanel({
     };
     setSelection(next);
     void onPreferredAgentChange(next).catch(() => {});
-    if (onStartHarnessDraft) onStartHarnessDraft();
+    if (onStartHarnessDraft) onStartHarnessDraft(next);
     else onActiveSessionChangeRef.current(null, { projectId });
   }
-  const setPermissionMode = (id: string) => {
+  const setPermissionMode = (id: string) => withFullAccess(id === "bypassPermissions", () => applyPermissionMode(id));
+  const applyPermissionMode = (id: string) => {
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
     if (id === "plan" && activeHarness?.id === "claude-code") {
@@ -6986,12 +7196,31 @@ export function ChatPanel({
         setSettingsError(m.chat_update_permissions_failed());
       });
   };
+  /** Runs `then` once Claude may bypass permissions: as root that first needs the user's confirmation, kept per machine. */
+  const withFullAccess = (bypass: boolean, then: () => void, cancel?: () => void) => {
+    if (!bypass || activeHarness?.id !== "claude-code" || !activeHarness.fullAccessNeedsRootConsent) return then();
+    workspace.dialogs.showConfirmDialog({
+      title: m.chat_root_bypass_title(),
+      description: m.chat_root_bypass_description(),
+      confirmLabel: m.chat_root_bypass_confirm(),
+      destructive: true,
+      onCancel: () => cancel?.(),
+      onConfirm: async () => {
+        await workspace.api.allowClaudeRootFullAccess();
+        setScopedQueryData(getHarnessesQuery().queryKey, (current) =>
+          current?.map((harness) => harness.id === "claude-code" ? { ...harness, fullAccessNeedsRootConsent: false } : harness));
+        then();
+      },
+    });
+  };
+  const withFullAccessRef = useRef(withFullAccess);
+  withFullAccessRef.current = withFullAccess;
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
   const setAutonomy = (autonomy: Autonomy) => {
     if (autonomy !== (openSession?.autonomy ?? preferredAutonomy)) invalidatePendingRetry();
     if (!openSession) {
-      if (sideParentSessionId) setSideDraftAutonomy(autonomy);
-      else onPreferredAutonomyChange(autonomy);
+      setDraftAutonomy(autonomy);
+      if (!sideParentSessionId) onPreferredAutonomyChange(autonomy);
       return;
     }
     const mutation = ++settingsMutationSeq.current;
@@ -7083,7 +7312,7 @@ export function ChatPanel({
         if (embedded) {
           const parent = openSession?.sideParentSessionId ?? sideParentSessionId;
           if (parent) onOpenSideChat?.(parent, "");
-        } else startNewTask();
+        } else startChatIn(projectId);
         return false;
       case "resume":
         showCustomDialog({
@@ -7599,6 +7828,11 @@ export function ChatPanel({
   const historyError = !historyQuery.data ? historyQuery.error : null;
   // A chat without a project has no project to suggest a start from.
   const starterVisible = mainView === "chat" && !embedded && !threadMounted && !contentLoading && !contentError && !historyLoading && !historyError && !currentProject?.scratch;
+  // A new project stays one after the user names it, until it has a chat or they open another; any other empty project is an ordinary one.
+  const newProjectId = useRef<string | undefined>(undefined);
+  if (currentProject?.unnamed) newProjectId.current = currentProject.id;
+  else if (activeId || newProjectId.current !== currentProject?.id) newProjectId.current = undefined;
+  const draftProject = !embedded && !activeId && !launching && currentProject?.scratch && newProjectId.current === currentProject.id && (sessionsLoaded ? sessions.length === 0 : currentProject.unnamed) ? currentProject : undefined;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale(), composerSelection?.profile ?? null),
     enabled: starterVisible && starterHarness !== null,
@@ -8085,10 +8319,17 @@ export function ChatPanel({
         permissionMode: selection.permissionMode,
         planMode,
         reasoningLevel: selection.reasoningLevel,
-        autonomy: preferredAutonomy,
+        // Unset, the server takes the project's autonomy, which may not have loaded here yet.
+        autonomy: draftAutonomy ?? undefined,
+        disabledLitSources: draftLitSources ?? undefined,
       }, {});
-    if (sideParentSessionId && sideDraftAutonomy !== null && session.autonomy !== sideDraftAutonomy) {
-      session = await patchSession(session, { autonomy: sideDraftAutonomy });
+    setLitDraft({ projectId, disabled: null });
+    setDraftAutonomy(null);
+    if (sideParentSessionId && draftAutonomy !== null && session.autonomy !== draftAutonomy) {
+      session = await patchSession(session, { autonomy: draftAutonomy });
+    }
+    if (sideParentSessionId && draftLitSources !== null) {
+      await mutSetChatLitSources.runAsHeadlessPromise(workspace, session.id, draftLitSources, {});
     }
     // A chat without a project can land in a scratch project of its own.
     const here = session.projectId === projectId;
@@ -8307,13 +8548,26 @@ export function ChatPanel({
   /** Deliver a card answer; resolves `false` when delivery failed (so a
    * caller can e.g. restore a consumed draft). Stable per session so the
    * memoized Message rows don't re-render on unrelated state changes. */
+  const allMessagesRef = useRef(allMessages);
+  allMessagesRef.current = allMessages;
   const respond = useCallback(
     (answer: PromptAnswer): Promise<boolean> => {
       if (!activeId) return Promise.resolve(false);
-      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
+      const deliver = () => mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
         showAlert(error instanceof Error ? error.message : String(error), "error");
         return false;
       });
+      // An end-turn Claude approval resumes under bypass permissions.
+      const endTurnApproval = () => {
+        const prompt = allMessagesRef.current
+          .map((message) => findPartById(message.parts, answer.promptId))
+          .find(Boolean)?.prompt;
+        return prompt?.kind === "permission" && !prompt.nativeId;
+      };
+      const bypass = answer.approve === true
+        && (answer.resumeMode === "bypassPermissions" || (!answer.resumeMode && endTurnApproval()));
+      return new Promise((resolve) =>
+        withFullAccessRef.current(bypass, () => void deliver().then(resolve), () => resolve(false)));
     },
     [workspace, activeId, projectId],
   );
@@ -8421,13 +8675,13 @@ export function ChatPanel({
 
   function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
-    const scratch = sidebarProjects.find((project) => project.id === session.projectId)?.scratch;
+    const unnamed = sidebarProjects.find((project) => project.id === session.projectId)?.unnamed;
     const siblings = queryClient.getQueryData(listChatSessionsQuery(session.projectId).queryKey)?.filter((row) => row.id !== session.id && !row.sideParentSessionId);
-    // The last chat without a project takes its scratch project with it.
-    const lastOfScratch = scratch && !siblings?.length;
+    // The last chat of an unnamed project takes the project with it.
+    const lastOfUnnamed = unnamed && !siblings?.length;
     showConfirmDialog({
       title: m.chat_panel_delete(),
-      description: lastOfScratch
+      description: lastOfUnnamed
         ? m.chat_delete_scratch_session_confirm({ title: autoDir(title) })
         : m.chat_delete_session_confirm({ title: autoDir(title) }),
       confirmLabel: m.chat_panel_delete(),
@@ -8435,10 +8689,10 @@ export function ChatPanel({
       onCancel: "close",
       onConfirm: () => {
         const active = session.id === activeId;
-        if (active && !lastOfScratch) onActiveSessionChangeRef.current(null, { replace: true });
+        if (active && !lastOfUnnamed) onActiveSessionChangeRef.current(null, { replace: true });
         mutDeleteChatSession.runWithOptions(workspace, session, { onSuccessData: () => {
           forgetSession(session.id);
-          if (!lastOfScratch) return;
+          if (!lastOfUnnamed) return;
           setScopedQueryData(listProjectsQuery().queryKey, (rows) => rows?.filter((row) => row.id !== session.projectId));
           removeCachedProject(session.projectId);
           if (active) void navigate({ to: "/projects", replace: true });
@@ -8447,7 +8701,6 @@ export function ChatPanel({
     });
   }
 
-  const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
     requestNewChatFocus(projectId);
@@ -8464,20 +8717,24 @@ export function ChatPanel({
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
   }, [onActiveSessionChange]);
+  /** A new chat in `target`; an unnamed project holds one chat, so it gets a new project instead. */
+  const startChatIn = useCallback((target: string) => {
+    if (sidebarProjects.find((project) => project.id === target)?.unnamed) return void startScratchChat();
+    setSessionFilter("active");
+    requestNewChatFocus(target);
+    onActiveSessionChange(null, { projectId: target });
+  }, [onActiveSessionChange, sidebarProjects, startScratchChat]);
+  /** The sidebar's New chat goes where work happened last. */
   const startNewTask = useCallback(async () => {
     try {
       const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
       const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
         !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
-      const targetProject = latest?.projectId ?? projectId;
-      if (sidebarProjects.find((project) => project.id === targetProject)?.scratch) return void startScratchChat();
-      setSessionFilter("active");
-      requestNewChatFocus(targetProject);
-      onActiveSessionChange(null, { projectId: targetProject });
+      startChatIn(latest?.projectId ?? projectId);
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
-  }, [projectId, onActiveSessionChange, sidebarProjects, startScratchChat]);
+  }, [projectId, startChatIn]);
 
   const openSpawnedSession = useCallback(
     async (sessionId: string) => {
@@ -8498,7 +8755,7 @@ export function ChatPanel({
 
   const newTask = () => {
     if (commandRegion() === "right" && document.querySelector(".right-pane [data-side-chat]")) return;
-    startNewTask();
+    startChatIn(projectId);
   };
   useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
   useHotkey(appHotkeys["chat.find"], openFind, { enabled: mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right"), requireReset: true, ignoreInputs: false, capture: true, conflictBehavior: "allow" });
@@ -8508,12 +8765,23 @@ export function ChatPanel({
     ? hasPendingInput(messages, busy) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
   const sidebarRows: SidebarRow[] = [];
+  const projectSessions = (project: Project) => project.id === projectId ? sessions : projectSessionsQueries[queriedProjects.indexOf(project)].data ?? EMPTY_SESSIONS;
+  if (sidebarGrouping === "projects") {
+    shownUnnamed
+      .flatMap((project) => projectSessions(project).map((session) => ({ project, session })))
+      .filter(({ session }) => !session.sideParentSessionId && !session.delegate && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
+      .sort((a, b) => b.session.updatedAt - a.session.updatedAt)
+      .forEach(({ project, session }) => sidebarRows.push({ kind: "chat", project, session }));
+    if (unnamedProjects.length > 6) sidebarRows.push({ kind: "more", project: unnamedProjects[0] });
+    shownUnnamed.forEach((project) => {
+      const query = projectSessionsQueries[queriedProjects.indexOf(project)];
+      if (query.error && !projectSessions(project).length) sidebarRows.push({ kind: "status", project, pending: false, error: true, retry: () => void query.refetch() });
+    });
+  }
   if (sidebarGrouping === "projects") shownProjects.forEach((project) => {
     const group = sidebarGroup(project);
-    const members = project.scratch ? queriedScratch : [project];
-    const queries = members.map((member) => projectSessionsQueries[queriedProjects.indexOf(member)]);
-    const projectOf = new Map(members.map((member) => [member.id, member]));
-    const matching = members.flatMap((member, index) => member.id === projectId ? sessions : queries[index].data ?? EMPTY_SESSIONS)
+    const query = projectSessionsQueries[queriedProjects.indexOf(project)];
+    const matching = projectSessions(project)
       .filter((session) => !session.sideParentSessionId && !session.delegate && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const chatLimit = chatLimits[group] ?? 6;
@@ -8521,17 +8789,14 @@ export function ChatPanel({
     const selected = matching.find((session) => session.id === activeId);
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
     const collapsed = !openedProjects.includes(group);
-    const rowProject = (session: ChatSession) => projectOf.get(session.projectId) ?? project;
-    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(rowProject(session), session) && !sessionWaiting(session)) });
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
     if (collapsed) {
-      if (selected) sidebarRows.push({ kind: "chat", project: rowProject(selected), session: selected });
+      if (selected) sidebarRows.push({ kind: "chat", project, session: selected });
       return;
     }
-    visible.forEach((session) => sidebarRows.push({ kind: "chat", project: rowProject(session), session }));
-    if (matching.length > 6 || (project.scratch && scratchProjects.length > 6)) sidebarRows.push({ kind: "more", project });
-    const pending = queries.some((query) => query.isPending);
-    const error = queries.some((query) => query.error);
-    if (!visible.length) sidebarRows.push({ kind: "status", project, pending, error, retry: () => { for (const query of queries) void query.refetch(); } });
+    visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
+    if (matching.length > 6) sidebarRows.push({ kind: "more", project });
+    if (!visible.length) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => void query.refetch() });
   });
   const atWork = ({ project, session }: { project: Project; session: ChatSession }) =>
     chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS));
@@ -8864,7 +9129,7 @@ export function ChatPanel({
     projectRemoved: (project) => { if (project.id === projectId) void navigate({ to: "/projects" }); },
     openProjectSettings: (project) => void navigate({ href: `/projects/${encodeURIComponent(project.id)}/settings/project` }),
     newProjectChat: (project) => {
-      if (project.scratch) void startScratchChat();
+      if (project.unnamed) void startScratchChat();
       else if (project.id === projectId) startProjectTask();
       else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
     },
@@ -9003,8 +9268,8 @@ export function ChatPanel({
               ? row.count > 0 && <span className={`tabular-nums text-muted ${row.collapsed ? "hidden group-hover/section:inline group-focus-visible/section:inline" : ""}`}>{fmtNumber(row.count)}</span>
               : row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
             <ChevronRight size={14} aria-hidden="true"
-              className={`mb-px shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
-            <span aria-hidden="true" className="mb-2.5 ms-1.5 h-px flex-1 bg-border-variant" />
+              className={`mb-0.5 shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
+            <span aria-hidden="true" className="mb-2.25 ms-1.5 h-px flex-1 bg-border-variant" />
           </button>
         </div>
       );
@@ -9018,7 +9283,7 @@ export function ChatPanel({
           actions={sidebarActions}
           project={project}
           session={s}
-          cardWarmUntil={cardWarmUntil}
+          cardHover={cardHover}
           projectName={sidebarGrouping !== "projects" ? projectLabel(project) : undefined}
           harnessLogo={sessionHarness?.logo}
           modelName={modelName(s) ?? (sessionModel ? harnessModelLabel(sessionModel) : s.model)}
@@ -9047,16 +9312,7 @@ export function ChatPanel({
         className="relative"
         style={{ height: sidebarRowHeight(row) }}
       >
-        {row.kind === "project" && project.scratch ? (
-          <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
-            <NoProjectGroupHeader
-              collapsed={row.collapsed}
-              busy={row.busy}
-              onToggleCollapsed={() => sidebarActions.current.toggleProjectCollapsed(project)}
-              onNewChat={() => sidebarActions.current.newProjectChat(project)}
-            />
-          </div>
-        ) : row.kind === "project" ? (
+        {row.kind === "project" ? (
           <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
             <SidebarProjectCard
               actions={sidebarActions}
@@ -9068,7 +9324,7 @@ export function ChatPanel({
             />
           </div>
         ) : s ? (
-          <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
+          <div className={sidebarGrouping === "projects" && !project.unnamed ? "ms-5.5" : undefined}>
             {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list", row.kind === "inbox" ? row.run : null, row.kind === "inbox" && row.section === "inbox")}
           </div>
         ) : row.kind === "more" ? (
@@ -9106,8 +9362,8 @@ export function ChatPanel({
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.sidebar_chats()}
         </div>
         <div className="rail-section-actions flex shrink-0 items-center gap-1">
-          {sidebarGrouping === "projects" && onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
-            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
+          {sidebarGrouping === "projects" && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={() => void startScratchChat()}>
               <FolderPlus size={16} className="text-subtext" />
             </IconButton>
           </Tooltip>}
@@ -9326,7 +9582,7 @@ export function ChatPanel({
             <p>{historyError.message}</p>
             <Button onClick={() => void historyQuery.refetch()}>{m.app_retry()}</Button>
           </div>
-        ) : (contentLoading || historyLoading) && !launching ? (
+        ) : (historyLoading || (contentLoading && activeId)) && !launching ? (
           <div className="chat-loading flex-1 min-h-0 overflow-hidden [scrollbar-gutter:stable_both-edges]" role="status" aria-label={m.chat_panel_loading_conversation()} aria-busy="true">
             <div aria-hidden="true" className="mx-auto flex h-full w-full max-w-readable flex-col gap-6 px-4 pb-8 pt-4 motion-safe:animate-pulse">
               <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
@@ -9676,15 +9932,18 @@ export function ChatPanel({
               </Tooltip>
             </div>
           )}
-          {!embedded && !activeId && !launching && onNewProject && (
+          {!embedded && !activeId && !launching && onImportProject && (
             <ComposerProjectPicker
               projects={sidebarProjects}
               activity={projectActivity}
               projectId={projectId}
               projectName={projectName}
-              onNewProject={onNewProject}
-              onNoProject={() => void startScratchChat()}
+              draftProject={draftProject}
+              onNewProject={() => void startScratchChat()}
+              onImport={() => onImportProject(draft)}
+              onOpenSettings={(project) => sidebarActions.current.openProjectSettings(project)}
               onSelect={(id) => {
+                requestNewChatFocus(id);
                 if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
               }}
             />
@@ -9704,6 +9963,12 @@ export function ChatPanel({
           <RemoteConnectionStrip />
           <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+              {draggingFiles && !asking && (
+                <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent-blue-border bg-background/85 text-accent-blue-strong">
+                  <Plus size={18} />
+                  <span className="text-sm font-medium">{m.chat_drop_to_attach()}</span>
+                </div>
+              )}
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                   <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -9812,15 +10077,15 @@ export function ChatPanel({
                         : questions.part?.prompt?.options?.length
                           ? m.chat_question_custom_response()
                           : m.chat_question_your_answer()
-                      : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
-                      : composerSelection
-                        ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                          : composerSignIn
-                            ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
-                            : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                        : m.chat_ask_agent_placeholder()
+                      : composerSelection && !activeHarness?.agentReady
+                        ? composerSignIn
+                          ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
+                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                        : draftProject
+                          ? m.chat_new_project_placeholder()
+                          : activeId
+                            ? m.chat_followup_placeholder()
+                            : m.chat_new_chat_placeholder()
                   }
                   plain={bashMode && !asking}
                   readOnly={questions.busy}
@@ -9828,7 +10093,7 @@ export function ChatPanel({
                   projectId={projectId}
                   draftKey={questions.part ? `question:${questions.part.id}` : stashKey}
                   resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
-                  onFiles={asking ? () => {} : addFiles}
+                  onFiles={asking ? () => {} : addDropped}
                   onPaste={asking ? () => {} : onComposerPaste}
                   onChange={(v, cursor, typed) => {
                     if (asking) {
@@ -9919,7 +10184,6 @@ export function ChatPanel({
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
                     multiple
                     hidden
                     onChange={(e) => {
@@ -9928,11 +10192,11 @@ export function ChatPanel({
                     }}
                   />
                   {!asking && (
-                    <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                    <Tooltip interactive content={m.chat_panel_attach_files()}>
                       <IconButton
                         type="button"
                         className="composer-attach"
-                        aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                        aria-label={m.chat_panel_attach_files()}
                         onClick={() => fileInputRef.current?.click()}
                       >
                         <Paperclip size={16} />
@@ -9987,23 +10251,25 @@ export function ChatPanel({
             </div>
             <div className="composer-actions flex min-w-0 items-center gap-1 px-1.5 py-1">
               <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
-                <Tooltip interactive content={m.chat_panel_data_sources()}>
+                <Tooltip interactive content={sourcesLabel}>
                   <IconButton
                     type="button"
                     size="small"
                     className={`composer-bare ${BAR_BUTTON}`}
-                    aria-label={m.chat_panel_data_sources()}
+                    aria-label={sourcesLabel}
                     aria-haspopup="dialog"
                     aria-expanded={dataSources.open}
                     onClick={() => dataSources.setOpen((open) => !open)}
                   >
-                    <LibraryBig size={16} />
+                    <span className="relative inline-flex">
+                      <LibraryBig size={16} />
+                      {litSources.sources?.differs && <span aria-hidden="true" className="absolute -end-1 -top-1 size-1.5 rounded-full bg-accent-blue" />}
+                    </span>
                   </IconButton>
                 </Tooltip>
                 {dataSources.open && (
                   <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-lg border border-border bg-background p-2 shadow-dropdown">
-                    <span className="px-1 text-sm font-medium text-muted">{m.chat_panel_data_sources()}</span>
-                    <LitSourcesList />
+                    <ChatLitSources {...litSources} />
                   </div>
                 )}
               </div>
@@ -10103,7 +10369,7 @@ export function ChatPanel({
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
-                  autonomy={openSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy}
+                  autonomy={openSession?.autonomy ?? draftAutonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
                   disabled={switchingAgent}
                   lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
