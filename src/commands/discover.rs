@@ -11,7 +11,7 @@ use crate::LitSource;
 pub(crate) mod extra_sources;
 
 pub async fn run(args: crate::DiscoverArgs) -> Result<()> {
-    let disabled = crate::config::disabled_lit_sources();
+    let disabled = crate::local::disabled_lit_sources_here()?;
     let results: Vec<LitHit> = match args.command {
         crate::DiscoverCommand::Keyword(args) => {
             ensure_source_enabled(LitSource::Alphaxiv, &disabled)?;
@@ -45,7 +45,11 @@ pub async fn run(args: crate::DiscoverArgs) -> Result<()> {
         }
         crate::DiscoverCommand::Pubmed(args) => {
             ensure_source_enabled(LitSource::Pubmed, &disabled)?;
-            discover_pubmed(&args.query, pubmed_options(&args)).await?
+            let (hits, feedback) = discover_pubmed(&args.query, pubmed_options(&args)).await?;
+            for line in feedback {
+                eprintln!("{line}");
+            }
+            hits
         }
         crate::DiscoverCommand::Arxiv(args) => {
             extra_sources::ensure_enabled(extra_sources::ARXIV, &disabled)?;

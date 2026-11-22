@@ -70,7 +70,9 @@ orx discover semanticscholar "<cross-disciplinary query>"
 - `pubmed` searches PubMed's biomedical and life-science journal literature
   through NCBI E-utilities, ranked by PubMed's Best Match. It
   accepts PubMed query syntax such as field tags (`[ti]`, `[au]`, `[mh]`).
-  Result ids are PMIDs.
+  Result ids are PMIDs. Terms PubMed did not find or ignored are printed to
+  stderr (`PubMed phrases not found: …`) while stdout stays the JSON results;
+  fix the query when a term you relied on is listed.
 - `arxiv` searches arXiv's own API. It covers the same corpus as alphaXiv but
   includes submissions as soon as arXiv lists them and accepts arXiv field
   syntax (`au:`, `ti:`, `abs:`, `cat:cs.LG`, combined with `AND`/`OR`/`ANDNOT`);
