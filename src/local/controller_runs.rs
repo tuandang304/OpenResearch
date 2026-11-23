@@ -62,20 +62,37 @@ fn timeout(args: &crate::ExpRunArgs, default: u64) -> Result<u64> {
 }
 
 /// Names of the variables the run gets, whose values the controller reads from
-/// its own environment at launch.
-fn forwarded_env_keys(run_id: &str) -> Result<Vec<String>> {
-    let mut keys: Vec<String> = crate::config::launch_env(&stored_run(run_id)?)?
-        .into_keys()
-        .collect();
+/// its own environment at launch. Called while preparing, before the run is in
+/// the store, so it reads them for the run the submission is about to insert.
+fn forwarded_env_keys(
+    args: &crate::ExpRunArgs,
+    source: &SourceSnapshot,
+    run_id: &str,
+) -> Result<Vec<String>> {
+    let experiment = Store::open()?
+        .get_local_experiment(&args.exp_id)?
+        .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
+    let run = StoredRun {
+        id: run_id.into(),
+        experiment_id: experiment.id,
+        project_id: experiment.project_id,
+        status: "submitting".into(),
+        backend_json: String::new(),
+        command: String::new(),
+        created_at: 0,
+        updated_at: 0,
+        ended_at: None,
+        exit_code: None,
+        commit_sha: Some(source.revision.clone()),
+        result_markdown: None,
+        cancel_requested: false,
+        cancel_reason: None,
+        chat_session_id: None,
+    };
+    let mut keys: Vec<String> = crate::config::launch_env(&run)?.into_keys().collect();
     keys.sort();
     keys.dedup();
     Ok(keys)
-}
-
-fn stored_run(run_id: &str) -> Result<crate::store::StoredRun> {
-    crate::store::Store::open()?
-        .get_run(run_id)?
-        .ok_or_else(|| anyhow!("Run `{run_id}` is not in the local store"))
 }
 
 /// Synced secrets and the Hugging Face token: what a Kaggle kernel cannot be
@@ -118,7 +135,7 @@ pub async fn colab_launch_spec(
         flavor: &flavor,
         archive: &source.path,
         timeout_secs,
-        env_keys: forwarded_env_keys(run_id)?,
+        env_keys: forwarded_env_keys(args, source, run_id)?,
     })?;
     let files = [
         (crate::jobs::colab::CONTROLLER_FILE.to_string(), controller),
@@ -271,6 +288,67 @@ mod tests {
             tricky
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Colab controller is written while the run is prepared, before the
+    /// submission inserts it, so its forwarded variables cannot come from the
+    /// stored run. Same for every flavor and account: they share this step.
+    #[test]
+    fn a_colab_run_forwards_its_variables_before_it_is_stored() {
+        let store = Store::open().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut project = crate::local::agent_text::sample_project();
+        project.id = format!("proj-{id}");
+        project.slug = format!("proj-{id}");
+        store.create_local_project(&project).unwrap();
+        store
+            .create_local_experiment(&crate::local::model::LocalExperiment {
+                id: format!("exp-{id}"),
+                project_id: project.id.clone(),
+                parent_experiment_id: None,
+                slug: "colab-exp".into(),
+                branch_name: "orx/colab-exp".into(),
+                title: None,
+                description: None,
+                run_command: "train".into(),
+                agent_status: "idle".into(),
+                created_at: 0,
+                updated_at: 0,
+                chat_session_id: None,
+                archived: false,
+            })
+            .unwrap();
+        store
+            .set_project_env(&project.id, "WANDB_PROJECT", "colab")
+            .unwrap();
+        let mut args = crate::compute::tests::tinker_args();
+        args.exp_id = format!("exp-{id}");
+        args.backend = Some("colab".into());
+        args.flavor = Some("l4@auto".into());
+        let source = SourceSnapshot {
+            revision: "abc123".into(),
+            digest: String::new(),
+            size: 0,
+            path: "/nonexistent.tar".into(),
+            ray_package: None,
+        };
+        let run_id = uuid::Uuid::new_v4().to_string();
+        assert!(store.get_run(&run_id).unwrap().is_none());
+
+        let keys = forwarded_env_keys(&args, &source, &run_id).unwrap();
+        for key in [
+            "WANDB_PROJECT",
+            crate::config::RUN_ID_ENV,
+            "ORX_EXPERIMENT",
+            "ORX_COMMIT",
+            crate::local::trackio::PROJECT,
+        ] {
+            assert!(keys.iter().any(|k| k == key), "{key} missing from {keys:?}");
+        }
+
+        args.exp_id = "missing".into();
+        let error = forwarded_env_keys(&args, &source, &run_id).unwrap_err();
+        assert!(error.to_string().contains("missing"), "{error}");
     }
 
     #[test]
