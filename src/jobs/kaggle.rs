@@ -1219,10 +1219,14 @@ set -u
 kaggle={cli}
 {env}
 unset {scrubbed}
-kernel={owner}/{slug}
+base_slug={slug}
+kernel={owner}/$base_slug
 dataset={owner}/{dataset}
 url="https://www.kaggle.com/code/$kernel"
 poll=${{ORX_KAGGLE_POLL_SECS:-15}}
+queue_poll=${{ORX_KAGGLE_POLL_SECS:-10}}
+queue_limit=${{ORX_KAGGLE_QUEUE_SECS:-{queue_secs}}}
+queue_tries=${{ORX_KAGGLE_QUEUE_TRIES:-{queue_tries}}}
 pushed=0
 finished=0
 follower=""
@@ -1271,13 +1275,50 @@ if [ "$ready" != 1 ]; then
   exit 1
 fi
 
+push_kernel() {{
+  if ! "$kaggle" kernels push -p {kernel_dir} -t {timeout} </dev/null; then
+    echo "[orx] Kaggle refused the kernel. GPUs and internet access need a phone-verified Kaggle account, and the weekly GPU/TPU quota may be used up (orx compute show kaggle)."
+    exit 1
+  fi
+  pushed=1
+  pushed_at=$SECONDS
+  echo "[orx] Kernel: $url"
+}}
+
+# Kaggle can leave a kernel queued for a long time when the accelerator is
+# short. A kernel that has not started within $queue_limit seconds is deleted
+# and pushed again under a fresh slug (a deleted kernel's slug may not be
+# reusable), at most $queue_tries times in all.
+cp {kernel_dir}/kernel-metadata.json .kaggle-kernel-metadata.json
+attempt=1
+relaunch() {{
+  local waited=$(( (SECONDS - pushed_at) / 60 ))
+  if [ "$attempt" -ge "$queue_tries" ]; then
+    echo "[orx] Kaggle did not start the kernel after $attempt tries of $waited minutes each in its queue."
+    if deadline 120 "$kaggle" kernels delete "$kernel" -y </dev/null >/dev/null 2>&1; then
+      pushed=0
+    else
+      echo "[orx] Could not delete the queued kernel; stop it at $url"
+    fi
+    echo "Kaggle kept the kernel queued without starting it, $attempt times for $waited minutes each: no {label} was free. Run again later, or pick another flavor (orx compute show kaggle)." > {reason_file}
+    exit 1
+  fi
+  echo "[orx] The kernel waited $waited minutes in Kaggle's queue without starting; {label} may be short. Cancelling it and starting again (try $((attempt + 1)) of $queue_tries)."
+  if ! deadline 120 "$kaggle" kernels delete "$kernel" -y </dev/null >/dev/null 2>&1; then
+    # Pushing beside a kernel that may still start would spend quota twice.
+    echo "[orx] Could not cancel the queued kernel, so orx keeps waiting for it instead of starting a second one. Stop it at $url"
+    pushed_at=$SECONDS
+    return
+  fi
+  attempt=$((attempt + 1))
+  kernel={owner}/$base_slug-r$attempt
+  url="https://www.kaggle.com/code/$kernel"
+  sed "s/$base_slug/$base_slug-r$attempt/g" .kaggle-kernel-metadata.json > {kernel_dir}/kernel-metadata.json
+  push_kernel
+}}
+
 echo "[orx] Starting a Kaggle kernel: {label}"
-if ! "$kaggle" kernels push -p {kernel_dir} -t {timeout} </dev/null; then
-  echo "[orx] Kaggle refused the kernel. GPUs and internet access need a phone-verified Kaggle account, and the weekly GPU/TPU quota may be used up (orx compute show kaggle)."
-  exit 1
-fi
-pushed=1
-echo "[orx] Kernel: $url"
+push_kernel
 
 state=""
 misses=0
@@ -1287,7 +1328,11 @@ while :; do
     running|complete|error|cancel_requested|cancel_acknowledged) state="$current"; break ;;
     queued|new_script)
       [ "$state" = queued ] || echo "[orx] Waiting in Kaggle's queue"
-      state=queued; misses=0 ;;
+      state=queued; misses=0
+      if [ $((SECONDS - pushed_at)) -ge "$queue_limit" ]; then
+        relaunch
+        state=""
+      fi ;;
     *)
       misses=$((misses + 1))
       if [ "$misses" -ge 60 ]; then
@@ -1295,7 +1340,7 @@ while :; do
         exit 1
       fi ;;
   esac
-  sleep 10
+  sleep "$queue_poll"
 done
 
 # The log stream can stay open after the kernel ends, or stall on a dropped
@@ -1396,8 +1441,17 @@ exit "$code"
         verify = VERIFY_HINT,
         reason_file = crate::jobs::localbox::FAILURE_REASON_FILE,
         deadline = super::SHELL_DEADLINE,
+        queue_secs = QUEUE_LIMIT_SECS,
+        queue_tries = QUEUE_TRIES,
     )
 }
+
+/// How long a kernel may wait in Kaggle's queue before orx cancels it and
+/// pushes it again.
+const QUEUE_LIMIT_SECS: u64 = 10 * 60;
+
+/// Pushes per run, the first included, before orx gives up on the queue.
+const QUEUE_TRIES: u32 = 6;
 
 fn skipped_note(keys: &[String]) -> String {
     let keys: Vec<&str> = keys
@@ -1693,7 +1747,7 @@ mod tests {
             "{script}"
         );
         assert!(
-            script.contains("kernel=alice/orx-run-0123456789ab"),
+            script.contains("base_slug=orx-run-0123456789ab\nkernel=alice/$base_slug"),
             "{script}"
         );
         assert!(script.contains("-t 3600"), "{script}");
@@ -1738,6 +1792,33 @@ mod tests {
     /// prints `logs`, then returns the exit code, stdout and the CLI calls.
     #[cfg(unix)]
     fn run_controller(logs: &str) -> (Option<i32>, String, String) {
+        let run = run_controller_with(RUNNING_THEN_COMPLETE, logs, "exit 0", &[]);
+        (run.code, run.stdout, run.calls)
+    }
+
+    /// `kernels status` for a kernel that runs for two polls, then completes.
+    #[cfg(unix)]
+    const RUNNING_THEN_COMPLETE: &str = r#"n=$(cat "$FAKE_CALLS.n" 2>/dev/null || echo 0); echo $((n + 1)) > "$FAKE_CALLS.n"
+    if [ "$n" -lt 2 ]; then s=RUNNING; else s=COMPLETE; fi"#;
+
+    #[cfg(unix)]
+    struct ControllerRun {
+        code: Option<i32>,
+        stdout: String,
+        calls: String,
+        reason: Option<String>,
+        metadata: String,
+    }
+
+    /// Like [`run_controller`]; `status` sets `s` to the kernel's state
+    /// (`$3` is the kernel), `delete` answers `kernels delete`.
+    #[cfg(unix)]
+    fn run_controller_with(
+        status: &str,
+        logs: &str,
+        delete: &str,
+        envs: &[(&str, &str)],
+    ) -> ControllerRun {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("orx-kaggle-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1751,10 +1832,10 @@ echo "$*" >> "$FAKE_CALLS"
 case "$1 $2" in
   "datasets status") echo ready ;;
   "kernels status")
-    n=$(cat "$FAKE_CALLS.n" 2>/dev/null || echo 0); echo $((n + 1)) > "$FAKE_CALLS.n"
-    if [ "$n" -lt 2 ]; then s=RUNNING; else s=COMPLETE; fi
-    echo "alice/orx-run-0123456789ab has status \"KernelWorkerStatus.$s\"" ;;
+    {status}
+    echo "$3 has status \"KernelWorkerStatus.$s\"" ;;
   "kernels logs") {logs} ;;
+  "kernels delete") {delete} ;;
   "kernels output") mkdir -p "$5" ;;
 esac
 exit 0
@@ -1781,13 +1862,134 @@ exit 0
             .current_dir(&run_dir)
             .env("FAKE_CALLS", &calls)
             .env("ORX_KAGGLE_POLL_SECS", "1")
+            .envs(envs.iter().copied())
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let calls = std::fs::read_to_string(&calls).unwrap();
+        let run = ControllerRun {
+            code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            calls: std::fs::read_to_string(&calls).unwrap(),
+            reason: std::fs::read_to_string(
+                run_dir.join(crate::jobs::localbox::FAILURE_REASON_FILE),
+            )
+            .ok(),
+            metadata: std::fs::read_to_string(
+                run_dir.join(KERNEL_DIR).join("kernel-metadata.json"),
+            )
+            .unwrap(),
+        };
         let _ = std::fs::remove_dir_all(&root);
-        (output.status.code(), stdout, calls)
+        run
+    }
+
+    /// Never starts the first kernel; any later one runs, then completes.
+    #[cfg(unix)]
+    const FIRST_KERNEL_STAYS_QUEUED: &str = r#"if [ "$3" = alice/orx-run-0123456789ab ]; then s=QUEUED; else
+    n=$(cat "$FAKE_CALLS.n" 2>/dev/null || echo 0); echo $((n + 1)) > "$FAKE_CALLS.n"
+    if [ "$n" -lt 2 ]; then s=RUNNING; else s=COMPLETE; fi; fi"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_kernel_stuck_in_the_queue_is_cancelled_and_pushed_again() {
+        let run = run_controller_with(
+            FIRST_KERNEL_STAYS_QUEUED,
+            r#"printf '\n__ORX_EXIT_CODE__=0\n'"#,
+            "exit 0",
+            &[("ORX_KAGGLE_QUEUE_SECS", "0")],
+        );
+        assert_eq!(run.code, Some(0), "{}", run.stdout);
+        let delete = run
+            .calls
+            .find("kernels delete alice/orx-run-0123456789ab -y")
+            .unwrap();
+        let pushes: Vec<usize> = run
+            .calls
+            .match_indices("kernels push")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(pushes.len(), 2, "{}", run.calls);
+        assert!(pushes[0] < delete && delete < pushes[1], "{}", run.calls);
+        assert!(
+            run.calls
+                .contains("kernels logs alice/orx-run-0123456789ab-r2 --follow"),
+            "{}",
+            run.calls
+        );
+        let meta: Value = serde_json::from_str(&run.metadata).unwrap();
+        assert_eq!(meta["id"], "alice/orx-run-0123456789ab-r2");
+        assert_eq!(meta["title"], "orx-run-0123456789ab-r2");
+        assert_eq!(meta["dataset_sources"][0], "alice/orx-src-0123456789ab");
+        assert!(
+            run.stdout
+                .contains("https://www.kaggle.com/code/alice/orx-run-0123456789ab-r2"),
+            "{}",
+            run.stdout
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_queue_that_never_moves_ends_the_run_with_its_reason() {
+        let run = run_controller_with(
+            "s=QUEUED",
+            "exit 0",
+            "exit 0",
+            &[
+                ("ORX_KAGGLE_QUEUE_SECS", "0"),
+                ("ORX_KAGGLE_QUEUE_TRIES", "3"),
+            ],
+        );
+        assert_eq!(run.code, Some(1), "{}", run.stdout);
+        assert_eq!(
+            run.calls.matches("kernels push").count(),
+            3,
+            "{}",
+            run.calls
+        );
+        for kernel in ["", "-r2", "-r3"] {
+            let call = format!("kernels delete alice/orx-run-0123456789ab{kernel} -y");
+            assert!(
+                run.calls.contains(&call),
+                "{call} missing from:\n{}",
+                run.calls
+            );
+        }
+        assert!(!run.calls.contains("kernels logs"), "{}", run.calls);
+        assert!(run.reason.unwrap().contains("2× NVIDIA T4"));
+        // The last kernel was deleted, so nothing is left running on Kaggle.
+        assert!(!run.stdout.contains("keeps running"), "{}", run.stdout);
+        assert!(run
+            .calls
+            .contains("datasets delete alice/orx-src-0123456789ab -y"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_queued_kernel_that_cannot_be_cancelled_is_waited_for_not_doubled() {
+        let run = run_controller_with(
+            r#"n=$(cat "$FAKE_CALLS.n" 2>/dev/null || echo 0); echo $((n + 1)) > "$FAKE_CALLS.n"
+    if [ "$n" -lt 2 ]; then s=QUEUED; elif [ "$n" -lt 4 ]; then s=RUNNING; else s=COMPLETE; fi"#,
+            r#"printf '\n__ORX_EXIT_CODE__=0\n'"#,
+            "exit 1",
+            &[("ORX_KAGGLE_QUEUE_SECS", "0")],
+        );
+        assert_eq!(run.code, Some(0), "{}", run.stdout);
+        assert_eq!(
+            run.calls.matches("kernels push").count(),
+            1,
+            "{}",
+            run.calls
+        );
+        assert!(run
+            .calls
+            .contains("kernels delete alice/orx-run-0123456789ab -y"));
+        assert!(
+            run.stdout
+                .contains("keeps waiting for it instead of starting a second one"),
+            "{}",
+            run.stdout
+        );
     }
 
     #[cfg(unix)]
