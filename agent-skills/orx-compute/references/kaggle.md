@@ -79,7 +79,10 @@ uses `orx exp run --backend kaggle`.
   into the run's `kaggle-output` folder when it ends, with the full kernel log.
 - GPUs and internet access need a phone-verified Kaggle account; Kaggle
   refuses the kernel otherwise, and the run fails with that reason.
-- The kernel may wait in Kaggle's queue before it starts; the log says so.
+- The kernel may wait in Kaggle's queue before it starts; the log says so. A
+  kernel still queued after 10 minutes (often no free T4) is cancelled and
+  pushed again under a new kernel name, up to 6 tries; after that the run fails
+  with that reason. Try another flavor or run later.
 - A controller on this machine follows the kernel and records its status and
   logs; do not kill it.
   Cancelling the run stops following the kernel, but Kaggle keeps it running
