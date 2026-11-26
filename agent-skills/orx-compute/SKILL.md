@@ -160,6 +160,10 @@ always requires `references/k8s.md` before creating or editing the manifest.
 If the installed reference cannot be read, `orx skill compute/<backend>` prints
 the same canonical document.
 
+Only when the user asks to save datasets, checkpoints or other files to Google
+Drive, or to fetch them from it, read [references/drive.md](references/drive.md)
+(`orx compute drive`). Drive storage is off unless the user turns it on.
+
 For Slurm, `--cpus` and `--mem` request `#SBATCH --cpus-per-task` and
 `#SBATCH --mem`; omitting either uses the configured Slurm default, then the
 partition default. `--flavor cpu` requests no GPU even when the default flavor

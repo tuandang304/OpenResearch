@@ -50,6 +50,10 @@ pub(super) fn routes() -> Router<AppState> {
             "/api/settings/checkpoints",
             get(checkpoint_settings).post(set_checkpoint_settings),
         )
+        .route(
+            "/api/settings/drive-storage",
+            get(drive_storage_settings).post(set_drive_storage_settings),
+        )
         .route("/api/settings/kaggle", get(kaggle_settings))
         .route("/api/settings/kaggle/accounts", post(add_kaggle_account))
         .route("/api/settings/kaggle/kernels", get(kaggle_live_kernels))
@@ -517,4 +521,32 @@ pub(super) async fn set_checkpoint_settings(
             .map_err(bad_request)?;
     }
     checkpoint_settings().await
+}
+
+pub(super) async fn drive_storage_settings() -> ApiResult {
+    let settings = crate::jobs::drive_storage::load_settings().map_err(ApiError::from)?;
+    Ok(Json(crate::jobs::drive_storage::describe(
+        settings.as_ref(),
+    )))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetDriveStorageReq {
+    enabled: Option<bool>,
+    /// A Drive folder link; `""` forgets the folder.
+    folder_url: Option<String>,
+    remote: Option<String>,
+}
+
+pub(super) async fn set_drive_storage_settings(Json(req): Json<SetDriveStorageReq>) -> ApiResult {
+    crate::jobs::drive_storage::update(crate::jobs::drive_storage::Update {
+        enabled: req.enabled,
+        folder: req.folder_url,
+        remote: req.remote,
+        rclone_config: None,
+    })
+    .await
+    .map_err(bad_request)?;
+    drive_storage_settings().await
 }

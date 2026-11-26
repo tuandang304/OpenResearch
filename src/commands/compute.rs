@@ -17,6 +17,9 @@ pub use prices::PricesArgs;
 mod gpu_zones;
 use gpu_zones::gpu_zones;
 pub use gpu_zones::GpuZonesArgs;
+// `orx compute drive`, added by the tuandang304 fork.
+mod drive;
+pub use drive::DriveCommand;
 
 pub async fn run(args: crate::ComputeArgs) -> Result<()> {
     if let Some(command) = args.command {
@@ -224,6 +227,11 @@ pub enum ComputeCommand {
     Checkpoints {
         #[command(subcommand)]
         command: CheckpointsCommand,
+    },
+    /// The user's opt-in Google Drive folder for datasets, checkpoints and large outputs.
+    Drive {
+        #[command(subcommand)]
+        command: DriveCommand,
     },
     /// Machine-wide, user-owned compute guidance.
     Instructions {
@@ -649,6 +657,7 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
         ComputeCommand::Catalog(a) => return catalog(a, json_output).await,
         ComputeCommand::Prices(a) => return prices(a, json_output).await,
         ComputeCommand::GpuZones(a) => return gpu_zones(a, json_output).await,
+        ComputeCommand::Drive { command } => return drive::run(command, json_output).await,
         ComputeCommand::Status => settings::status().await?,
         ComputeCommand::Doctor(args) => serde_json::to_value(
             super::compute_doctor::diagnose(

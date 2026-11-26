@@ -205,6 +205,28 @@ export type CheckpointSettings =
       error: string | null;
     };
 
+/** The user's opt-in Google Drive folder, where agents save datasets and checkpoints. */
+export interface DriveStorageSettings {
+  /** Off until the user turns it on. */
+  enabled: boolean;
+  folderUrl: string | null;
+  folderId: string | null;
+  /** The rclone Google Drive remote that reaches the folder. */
+  remote: string | null;
+  rcloneConfig: string | null;
+  /** Google Drive remotes in the rclone config. */
+  remotes: string[];
+  /** What stops orx from using the folder now, such as rclone missing. */
+  error: string | null;
+}
+
+export interface DriveStorageUpdate {
+  enabled?: boolean;
+  /** An empty link forgets the folder. */
+  folderUrl?: string;
+  remote?: string;
+}
+
 type Get = <T>(url: string, signal?: AbortSignal) => Promise<T>;
 type Post = <T>(url: string, body?: unknown) => Promise<T>;
 
@@ -223,6 +245,12 @@ export function createForkComputeApi(get: Get, post: Post) {
   /** An empty `remote` turns checkpoint storage off. */
   const saveCheckpointSettings = (remote: string, intervalMinutes?: number) =>
     post<CheckpointSettings>("/api/settings/checkpoints", { remote, intervalMinutes });
+
+  const getDriveStorageSettings = (signal?: AbortSignal) =>
+    get<DriveStorageSettings>("/api/settings/drive-storage", signal);
+
+  const saveDriveStorageSettings = (update: DriveStorageUpdate) =>
+    post<DriveStorageSettings>("/api/settings/drive-storage", update);
 
   const getColabSettings = (signal?: AbortSignal, fresh = false) =>
     get<ColabSettings>(fresh ? "/api/settings/colab?fresh=true" : "/api/settings/colab", signal);
@@ -277,6 +305,8 @@ export function createForkComputeApi(get: Get, post: Post) {
     stopGcpInstance,
     getCheckpointSettings,
     saveCheckpointSettings,
+    getDriveStorageSettings,
+    saveDriveStorageSettings,
     getColabSettings,
     stopColabRuntime,
     startColabLogin,

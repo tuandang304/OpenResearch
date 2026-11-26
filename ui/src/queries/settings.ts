@@ -392,6 +392,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 30_000,
   });
 
+  const getDriveStorageSettingsQuery = () => queryOptions({
+    queryKey: workspaceKey("getDriveStorageSettings"),
+    queryFn: ({ signal }) => api.getDriveStorageSettings(signal),
+    staleTime: 30_000,
+  });
+
   const getCheckpointSettingsQuery = () => queryOptions({
     queryKey: workspaceKey("getCheckpointSettings"),
     queryFn: ({ signal }) => api.getCheckpointSettings(signal),
@@ -487,6 +493,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     getKaggleLiveKernelsQuery,
     getGcpSettingsQuery,
     getCheckpointSettingsQuery,
+    getDriveStorageSettingsQuery,
     getComputeRoutingSettingsQuery,
     getComputePricesQuery,
     getCrossHarnessSettingsQuery,

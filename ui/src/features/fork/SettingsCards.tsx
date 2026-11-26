@@ -18,7 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { fmtNumber, type ComputeTargetId, type ComputeTargetSummary, type Harness, type HarnessFailover, type HarnessAccount, type HarnessAccounts, type HarnessPoolLimit, type HarnessPoolStatus, type HarnessId, type CheckpointSettings, type GcpSettings, type GcpSettingsUpdate, type DelegationPolicy, type DelegationRule, type OptionChoice, harnessModelLabel, modelLabel, reasoningFor } from "../../api";
+import { fmtNumber, type ComputeTargetId, type ComputeTargetSummary, type Harness, type HarnessFailover, type HarnessAccount, type HarnessAccounts, type HarnessPoolLimit, type HarnessPoolStatus, type HarnessId, type CheckpointSettings, type DriveStorageSettings, type DriveStorageUpdate, type GcpSettings, type GcpSettingsUpdate, type DelegationPolicy, type DelegationRule, type OptionChoice, harnessModelLabel, modelLabel, reasoningFor } from "../../api";
 import { m } from "../../paraglide/messages.js";
 import { fmtUnits } from "../../features/fork/ComputeSections";
 import { ltr } from "../../i18n";
@@ -701,6 +701,118 @@ export function ComputeRoutingCard({ targets }: { targets: ComputeTargetSummary[
       )}
       {enabled && usable.length < 2 && <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_compute_routing_needs_two()}</p>}
       {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+/** The user's opt-in Google Drive folder: agents save datasets, checkpoints and other large
+ * outputs there with `orx compute drive`, only while it is on. */
+export function DriveStorageCard() {
+  const { setScopedQueryData } = useWorkspace();
+  const { getDriveStorageSettingsQuery } = useWorkspace().queries;
+  const { saveDriveStorageSettings } = useWorkspace().api;
+  const options = getDriveStorageSettingsQuery();
+  const query = useQuery(options);
+  const data: DriveStorageSettings | undefined = query.data;
+  const [folder, setFolder] = useState("");
+  const [remote, setRemote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!data) return;
+    setFolder(data.folderUrl ?? "");
+    setRemote(data.remote ?? "");
+  }, [data]);
+
+  async function save(update: DriveStorageUpdate) {
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await saveDriveStorageSettings(update);
+      setScopedQueryData(options.queryKey, () => next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const enabled = data?.enabled === true;
+  const linked = !!data?.folderUrl;
+  const unchanged = folder.trim() === (data?.folderUrl ?? "") && remote === (data?.remote ?? "");
+  const remoteChoices: OptionChoice[] = (data?.remotes ?? []).map((name) => ({ id: name, label: name }));
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "mb-8")}>
+      <div className="flex items-start justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_drive_storage_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_drive_storage_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={enabled}
+          aria-label={m.settings_drive_storage_title()}
+          disabled={!data || saving || (!enabled && !linked)}
+          onClick={() => void save({ enabled: !enabled })}
+        />
+      </div>
+      {query.isPending ? (
+        <LoadingRow>
+          <Spinner /> {m.common_checking()}
+        </LoadingRow>
+      ) : (
+        <>
+          <form
+            className="mt-3 flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void save({ folderUrl: folder.trim(), remote: remote || undefined });
+            }}
+          >
+            <label className="flex min-w-48 flex-[2] flex-col gap-1 text-sm">
+              {m.settings_drive_storage_folder_label()}
+              <Input
+                type="url"
+                value={folder}
+                onChange={(event) => setFolder(event.target.value)}
+                placeholder="https://drive.google.com/drive/folders/…"
+                autoComplete="off"
+                spellCheck={false}
+                dir="ltr"
+              />
+            </label>
+            {remoteChoices.length > 1 && (
+              <div className="flex w-44 flex-col gap-1 text-sm">
+                {m.settings_drive_storage_remote_label()}
+                <OptionPicker
+                  variant="field"
+                  dropDown
+                  floating
+                  title={m.settings_drive_storage_remote_label()}
+                  choices={remoteChoices}
+                  value={remote}
+                  disabled={saving}
+                  onSelect={setRemote}
+                />
+              </div>
+            )}
+            <Button type="submit" disabled={saving || !folder.trim() || unchanged}>
+              {saving ? <Spinner /> : m.common_save()}
+            </Button>
+            {linked && (
+              <Button type="button" variant="ghost" disabled={saving} onClick={() => void save({ folderUrl: "" })}>
+                {m.settings_drive_storage_forget()}
+              </Button>
+            )}
+          </form>
+          <p className="mt-1.5 mb-0 text-sm text-subtext">
+            {linked ? (enabled ? m.settings_drive_storage_hint_on() : m.settings_drive_storage_hint_off()) : m.settings_drive_storage_hint()}
+          </p>
+          {data?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{data.error}</p>}
+        </>
+      )}
+      {(error ?? query.error?.message) && <div className="error">{error ?? query.error?.message}</div>}
     </div>
   );
 }
