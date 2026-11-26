@@ -132,7 +132,7 @@ pub fn clear_settings() -> Result<()> {
 
 /// rclone's own lookup order: `$RCLONE_CONFIG`, then the platform config dir, then the
 /// legacy `~/.rclone.conf`.
-fn default_rclone_config() -> Option<PathBuf> {
+pub(crate) fn default_rclone_config() -> Option<PathBuf> {
     if let Some(path) = crate::local::shell_env::var("RCLONE_CONFIG") {
         return Some(PathBuf::from(path));
     }
@@ -176,7 +176,7 @@ fn remote_section(settings: &CheckpointSettings) -> Result<Vec<(String, String)>
     parse_section(&raw, name).map_err(|e| anyhow!("{e} ({})", path.display()))
 }
 
-fn parse_section(raw: &str, name: &str) -> Result<Vec<(String, String)>> {
+pub(crate) fn parse_section(raw: &str, name: &str) -> Result<Vec<(String, String)>> {
     if raw
         .trim_start()
         .starts_with("# Encrypted rclone configuration File")
@@ -221,8 +221,8 @@ fn parse_section(raw: &str, name: &str) -> Result<Vec<(String, String)>> {
         .find(|(key, value)| matches!(key.as_str(), "remote" | "upstreams") && value.contains(':'))
     {
         return Err(anyhow!(
-            "rclone remote '{name}' wraps another remote ({inner}); checkpoint storage needs a \
-             remote that stores files itself, such as Google Drive, Google Cloud Storage or S3"
+            "rclone remote '{name}' wraps another remote ({inner}); orx needs a remote that \
+             stores files itself, such as Google Drive, Google Cloud Storage or S3"
         ));
     }
     Ok(fields)

@@ -8,6 +8,7 @@ pub mod colab;
 pub mod colab_account;
 pub mod colab_accounts;
 pub mod colab_runtimes;
+pub mod drive_storage;
 pub mod gcp;
 pub mod gcp_billing;
 pub mod huggingface;

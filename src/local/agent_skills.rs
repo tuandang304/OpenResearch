@@ -81,6 +81,10 @@ const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
         content: include_str!("../../agent-skills/orx-compute/references/kaggle.md"),
     },
     AgentSkillResource {
+        path: "references/drive.md",
+        content: include_str!("../../agent-skills/orx-compute/references/drive.md"),
+    },
+    AgentSkillResource {
         path: "references/gcp.md",
         content: include_str!("../../agent-skills/orx-compute/references/gcp.md"),
     },

@@ -145,7 +145,7 @@ import { useChatWidth, type ChatWidth } from "../chatWidth";
 import { m } from "../paraglide/messages.js";
 import { ComputeDoctor } from "../features/research/ComputeDoctor";
 import { ColabSection, KaggleSection } from "../features/fork/ComputeSections";
-import { ACCOUNT_HARNESSES, HarnessAccountsCard, ComputeRoutingCard, CheckpointStorageCard, fmtUsd, ProviderPricesCard, GcpSection, ForkHarnessCards } from "../features/fork/SettingsCards";
+import { ACCOUNT_HARNESSES, HarnessAccountsCard, ComputeRoutingCard, CheckpointStorageCard, DriveStorageCard, fmtUsd, ProviderPricesCard, GcpSection, ForkHarnessCards } from "../features/fork/SettingsCards";
 import { autoDir, fmtBytes, fmtClock, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { getLocale, isLocale, type Locale } from "../paraglide/runtime.js";
@@ -3396,6 +3396,7 @@ function ComputeTab({
           <ComputeRoutingCard targets={configuredTargets} />
           <ProviderPricesCard />
           <CheckpointStorageCard />
+          <DriveStorageCard />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
